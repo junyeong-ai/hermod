@@ -1,0 +1,29 @@
+[package]
+name         = "hermod-transport"
+version      = { workspace = true }
+edition      = { workspace = true }
+license      = { workspace = true }
+rust-version = { workspace = true }
+repository   = { workspace = true }
+authors      = { workspace = true }
+description  = "Pluggable transports for Hermod: Unix socket (P0), WebSocket+TLS (P2)."
+
+[dependencies]
+hermod-crypto     = { workspace = true }
+tokio             = { workspace = true }
+futures           = { workspace = true }
+thiserror         = { workspace = true }
+tracing           = { workspace = true }
+tokio-tungstenite = { workspace = true }
+
+# TLS (P2.3)
+rustls           = { workspace = true }
+tokio-rustls     = { workspace = true }
+rustls-pki-types = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+ulid  = { workspace = true }
+
+[lints]
+workspace = true

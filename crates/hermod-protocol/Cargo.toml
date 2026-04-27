@@ -1,0 +1,33 @@
+[package]
+name         = "hermod-protocol"
+version      = { workspace = true }
+edition      = { workspace = true }
+license      = { workspace = true }
+rust-version = { workspace = true }
+repository   = { workspace = true }
+authors      = { workspace = true }
+description  = "Hermod protocol layer — IPC (JSON-RPC 2.0) and wire envelope processing."
+
+[dependencies]
+hermod-core      = { workspace = true }
+hermod-crypto    = { workspace = true }
+hermod-transport = { workspace = true }
+
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+thiserror     = { workspace = true }
+tokio         = { workspace = true }
+tokio-util    = { workspace = true }
+futures       = { workspace = true }
+bytes         = "1.10"
+ulid          = { workspace = true }
+ciborium      = { workspace = true }
+snow          = { workspace = true }
+strum         = { workspace = true }
+
+[dev-dependencies]
+tokio       = { workspace = true }
+serde_bytes = { workspace = true }
+
+[lints]
+workspace = true
