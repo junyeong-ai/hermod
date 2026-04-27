@@ -1,0 +1,38 @@
+[package]
+name         = "hermod-crypto"
+version      = { workspace = true }
+edition      = { workspace = true }
+license      = { workspace = true }
+rust-version = { workspace = true }
+repository   = { workspace = true }
+authors      = { workspace = true }
+description  = "Ed25519 signing, blake3 hashing, and canonical CBOR for Hermod envelopes."
+
+[dependencies]
+hermod-core   = { workspace = true }
+async-trait   = { workspace = true }
+ed25519-dalek = { workspace = true }
+blake3        = { workspace = true }
+rand          = { workspace = true }
+data-encoding = { workspace = true }
+ciborium      = { workspace = true }
+serde         = { workspace = true }
+thiserror     = { workspace = true }
+x25519-dalek  = { workspace = true }
+hex           = { workspace = true }
+serde_bytes   = { workspace = true }
+zeroize       = { workspace = true }
+
+# TLS cert generation + fingerprint (P2.3)
+rcgen        = { workspace = true }
+sha2         = { workspace = true }
+# Read-side cert parsing — used by `TlsMaterial::not_after_unix_secs`
+# so `hermod doctor` can warn before the federation listener silently
+# starts rejecting peers on an expired cert.
+x509-parser  = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true
