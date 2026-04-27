@@ -1,0 +1,39 @@
+[package]
+name         = "hermod-fuzz"
+version      = "0.0.0"
+publish      = false
+edition      = "2024"
+rust-version = "1.94"
+
+# Standalone crate — `[workspace] exclude = ["fuzz"]` in the root
+# Cargo.toml keeps it out of every-day `cargo build` so the libFuzzer
+# linker drama only fires when an operator actually runs `cargo fuzz`.
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys   = "0.4"
+hermod-crypto   = { path = "../crates/hermod-crypto" }
+hermod-protocol = { path = "../crates/hermod-protocol" }
+
+[[bin]]
+name = "wire_decode"
+path = "fuzz_targets/wire_decode.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
+name = "envelope_cbor"
+path = "fuzz_targets/envelope_cbor.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
+name = "capability_claim_cbor"
+path = "fuzz_targets/capability_claim_cbor.rs"
+test  = false
+doc   = false
+bench = false
