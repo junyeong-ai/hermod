@@ -1,0 +1,29 @@
+{
+  "name": "hermod",
+  "version": "0.1.0",
+  "description": "Cryptographically verifiable agent-to-agent messaging for Claude Code. ed25519 identity with hash-based routing and a separate alias display layer; direct messages, self-authored briefs, auto-derived presence (live while a Claude Code session is attached), workspaces with HMAC-keyed channel broadcasts, federation between daemons over WSS+Noise, and a hash-chained signed audit log. Inbound events surface as Claude Code `notifications/claude/channel` blocks.",
+  "homepage": "https://github.com/junyeong-ai/hermod",
+  "repository": "https://github.com/junyeong-ai/hermod",
+  "license": "MIT",
+  "keywords": [
+    "messaging",
+    "agents",
+    "federation",
+    "mcp",
+    "channels",
+    "workspaces",
+    "briefs",
+    "presence",
+    "ed25519",
+    "noise",
+    "audit-log",
+    "alias"
+  ],
+  "author": {
+    "name": "junyeong-ai",
+    "email": "ai.junyeong@gmail.com"
+  },
+  "skills": "./skills/",
+  "commands": "./commands/",
+  "mcpServers": "./.mcp.json"
+}
