@@ -1,0 +1,4 @@
+disallowed-methods = [
+    { path = "hermod_storage::AuditRepository::append", reason = "use crate::services::audit_or_warn so failures are observable" },
+    { path = "tokio::net::UnixListener::bind", reason = "use hermod_transport::UnixIpcListener so the socket is mode 0600 from creation" },
+]

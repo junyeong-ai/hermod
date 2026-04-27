@@ -1,0 +1,39 @@
+# Rust
+/target
+Cargo.lock.bak
+
+# Node
+node_modules
+dist
+*.tsbuildinfo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Hermod runtime
+/.hermod-dev/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# Env
+.env
+.env.local
+
+# Claude Code runtime
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
+
+# Fuzz artifacts
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/coverage/

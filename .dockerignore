@@ -1,0 +1,8 @@
+target/
+.git/
+.github/
+docs/
+deploy/
+*.md
+!Cargo.toml
+!Cargo.lock
