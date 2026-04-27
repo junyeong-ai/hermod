@@ -1,0 +1,76 @@
+name: lint
+
+# Fast-feedback lane. Runs on every push and PR to give the
+# contributor a clippy / fmt / naming verdict in under a minute,
+# independent of the heavier `ci.yml` suite that includes release
+# builds, e2e tests, doc tests, fuzz build, and cargo-deny.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: "-D warnings"
+
+# Cancel any in-flight run for the same ref when a new push lands —
+# saves CI minutes when contributors push a follow-up commit before
+# the previous run finished.
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          # Tracks rust-toolchain.toml at the workspace root.
+          toolchain: "1.94"
+          components: rustfmt
+
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94"
+          components: clippy
+
+      - name: cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Separate cache key from `ci.yml` so the two workflows
+          # don't fight over a single shared cache entry. The
+          # downside is double storage; the upside is that a clippy-
+          # only run never invalidates the heavier `ci` cache.
+          key: lint
+          shared-key: lint-clippy
+
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  naming:
+    name: naming convention
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v5
+
+      # The script is pure bash + grep / awk / sed — no toolchain.
+      - run: bash scripts/check_naming.sh

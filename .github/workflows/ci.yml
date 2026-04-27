@@ -1,0 +1,91 @@
+name: ci
+
+# Heavy lane: build, test, doc-test, machete, deny, fuzz-build.
+# Fast-feedback fmt / clippy / naming live in `lint.yml` so a
+# whitespace-only contributor sees a verdict in under a minute and
+# the contributor's branch isn't blocked on the slower test step.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: build + test + doc + deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94"
+          components: clippy, rustfmt
+
+      - name: cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-test
+
+      - name: build release binaries
+        # The end-to-end tests in `crates/hermod-cli/tests/` spawn
+        # `target/release/hermod` and `target/release/hermodd` as
+        # separate processes — `cargo test` alone only builds the test
+        # harness and links the lib crates, so the release binaries
+        # have to exist on disk before the e2e tests run.
+        run: cargo build --release --workspace --bins
+
+      - name: cargo test
+        run: cargo test --workspace --all-targets
+
+      - name: cargo doc
+        # Catches broken intra-doc links in the public API.
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+      - name: cargo machete
+        # Fails if any crate declares a dependency it doesn't use.
+        uses: bnjbvr/cargo-machete@main
+
+      - name: cargo deny
+        # Fails on RUSTSEC advisory hits, banned licenses, or yanked
+        # crates.
+        uses: EmbarkStudios/cargo-deny-action@v2
+
+  fuzz:
+    name: cargo fuzz build (compile-test only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: install nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "fuzz"
+          shared-key: ci-fuzz
+
+      - name: install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: build fuzz targets
+        # Compile-test only — actual campaigns are operator-driven
+        # (see fuzz/README.md). This step catches regressions that
+        # break a target's parser-surface signature.
+        working-directory: fuzz
+        run: cargo +nightly fuzz build
