@@ -1,0 +1,48 @@
+[package]
+name         = "hermod-storage"
+version      = { workspace = true }
+edition      = { workspace = true }
+license      = { workspace = true }
+rust-version = { workspace = true }
+repository   = { workspace = true }
+authors      = { workspace = true }
+description  = "SQLite-backed repositories for Hermod agents, messages, capabilities, peers, sessions, audit."
+
+[features]
+default  = []
+# Build the Postgres backend. Off by default — adds the
+# `tokio-postgres` / `sqlx-postgres` driver chain (~3 MiB compiled).
+# Enable with `--features postgres` on the build command line.
+postgres = ["sqlx/postgres"]
+
+[dependencies]
+hermod-core   = { workspace = true }
+hermod-crypto = { workspace = true }
+async-trait   = { workspace = true }
+blake3        = { workspace = true }
+ciborium      = { workspace = true }
+flate2        = { workspace = true }
+time          = { workspace = true }
+serde         = { workspace = true }
+serde_bytes   = { workspace = true }
+serde_json    = { workspace = true }
+thiserror     = { workspace = true }
+# `sqlite` is always-on — it's the default backend. `postgres` flips
+# on via this crate's `postgres` feature; see `[features]` above.
+sqlx          = { workspace = true, features = ["sqlite"] }
+tokio         = { workspace = true }
+tracing       = { workspace = true }
+ulid          = { workspace = true }
+url           = { workspace = true }
+hex           = { workspace = true }
+reqwest       = { workspace = true }
+
+[dev-dependencies]
+tokio       = { workspace = true }
+serde_bytes = { workspace = true }
+strum       = { workspace = true }
+proptest    = "1.11"
+tempfile    = { workspace = true }
+
+[lints]
+workspace = true
