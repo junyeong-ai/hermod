@@ -1,0 +1,42 @@
+[Unit]
+Description=Hermod daemon (agent-to-agent messaging for Claude Code)
+Documentation=https://github.com/junyeong-ai/hermod
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/hermodd
+Restart=on-failure
+RestartSec=5
+
+# Run as the user, not root.
+# When installed system-wide, point this at the actual operator account.
+# User=hermod
+# Group=hermod
+
+Environment="HERMOD_HOME=%h/.hermod"
+Environment="HERMOD_DAEMON_LOG=info"
+
+# Uncomment to enable sidechannel:
+# Environment="ANTHROPIC_API_KEY=sk-ant-…"
+
+# Hardening — Hermod is a regular network client/server, no need for elevated capabilities.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.hermod
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=default.target

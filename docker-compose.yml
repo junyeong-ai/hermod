@@ -1,0 +1,65 @@
+# Two-daemon federation example. Run `docker compose up`, then in another
+# shell:
+#
+#   docker compose exec alpha hermod init --alias alpha
+#   docker compose exec beta  hermod init --alias beta
+#   docker compose exec alpha hermod identity   # copy alpha's pubkey + ip
+#   docker compose exec beta  hermod peer add --endpoint wss://alpha:7823 \
+#                                              --pubkey-hex <alpha-pubkey>
+#   docker compose exec alpha hermod peer add --endpoint wss://beta:7823 \
+#                                              --pubkey-hex <beta-pubkey>
+#   docker compose exec beta  hermod message send --to <alpha-agent-id> \
+#                                                  --body 'hello from beta'
+#
+# /healthz and /metrics are exposed on each daemon's :9690.
+
+services:
+  alpha:
+    build: .
+    image: hermod:dev
+    container_name: hermod-alpha
+    environment:
+      HERMOD_DAEMON_LISTEN_WS: "0.0.0.0:7823"
+      HERMOD_DAEMON_METRICS_LISTEN: "0.0.0.0:9690"
+      HERMOD_FEDERATION_ENABLED: "1"
+      HERMOD_DAEMON_LOG_FORMAT: "json"
+    volumes:
+      - alpha-home:/var/lib/hermod
+    ports:
+      - "7823:7823"  # federation
+      - "9690:9690"  # /healthz + /metrics
+    networks:
+      - hermod
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/hermod", "doctor"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  beta:
+    build: .
+    image: hermod:dev
+    container_name: hermod-beta
+    environment:
+      HERMOD_DAEMON_LISTEN_WS: "0.0.0.0:7823"
+      HERMOD_DAEMON_METRICS_LISTEN: "0.0.0.0:9690"
+      HERMOD_FEDERATION_ENABLED: "1"
+      HERMOD_DAEMON_LOG_FORMAT: "json"
+    volumes:
+      - beta-home:/var/lib/hermod
+    ports:
+      - "7824:7823"
+      - "9691:9690"
+    networks:
+      - hermod
+    depends_on:
+      - alpha
+
+volumes:
+  alpha-home:
+  beta-home:
+
+networks:
+  hermod:
+    driver: bridge

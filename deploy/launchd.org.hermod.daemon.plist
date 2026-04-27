@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS launchd unit for hermodd.
+
+  Install:
+    cp deploy/launchd.com.hermod.daemon.plist ~/Library/LaunchAgents/com.hermod.daemon.plist
+    launchctl load ~/Library/LaunchAgents/com.hermod.daemon.plist
+
+  Logs:
+    tail -f ~/.hermod/log/hermodd.{out,err}.log
+
+  Replace `/Users/REPLACE_ME` with your home dir before installing.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.hermod.daemon</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/hermodd</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HERMOD_HOME</key>
+    <string>/Users/REPLACE_ME/.hermod</string>
+    <key>HERMOD_DAEMON_LOG</key>
+    <string>info</string>
+    <!-- Uncomment to enable sidechannel:
+    <key>ANTHROPIC_API_KEY</key>
+    <string>sk-ant-…</string>
+    -->
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>StandardOutPath</key>
+  <string>/Users/REPLACE_ME/.hermod/log/hermodd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/REPLACE_ME/.hermod/log/hermodd.err.log</string>
+
+  <!-- Resource governance, per Apple's launchd guidance -->
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>2048</integer>
+  </dict>
+  <key>HardResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>4096</integer>
+  </dict>
+</dict>
+</plist>

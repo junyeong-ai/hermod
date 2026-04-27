@@ -1,0 +1,94 @@
+# Broker-mode federation example (Phase 16.1 host + Phase 16.5 client).
+#
+#     bob ──┐
+#           ├──► broker (relay + witness) ──► carol
+#     bob ◄─┘                                    │
+#                                                ▼
+#                                            broker (forwards back to bob)
+#
+# `broker` runs with `[broker] enabled = true` (relay + witness on),
+# `bob` and `carol` run with only `[federation] upstream_broker`. They
+# never `peer add` each other directly — they only know the broker.
+# Sending a DM from bob to carol routes:
+#
+#     bob ──► broker ──► carol
+#
+# and the broker's hash-chained audit log captures each forward as
+# `broker.relay.forwarded`.
+#
+# Bootstrap:
+#
+#   docker compose -f docker-compose.broker.yml build
+#   docker compose -f docker-compose.broker.yml run --rm \
+#       --entrypoint /usr/local/bin/hermod broker init --alias broker
+#   docker compose -f docker-compose.broker.yml run --rm \
+#       --entrypoint /usr/local/bin/hermod bob    init --alias bob
+#   docker compose -f docker-compose.broker.yml run --rm \
+#       --entrypoint /usr/local/bin/hermod carol  init --alias carol
+#
+# Then capture the broker's pubkey, populate it as
+# HERMOD_FEDERATION_UPSTREAM_BROKER on bob/carol, and bring up the
+# stack. See scripts/broker-compose-up.sh for a one-shot bootstrap.
+
+services:
+  broker:
+    image: hermod:dev
+    container_name: hermod-broker
+    environment:
+      HERMOD_DAEMON_LISTEN_WS: "0.0.0.0:7823"
+      HERMOD_DAEMON_METRICS_LISTEN: "0.0.0.0:9690"
+      HERMOD_FEDERATION_ENABLED: "1"
+      HERMOD_BROKER_MODE: "relay_and_witness"
+      HERMOD_DAEMON_LOG_FORMAT: "json"
+    volumes:
+      - broker-home:/var/lib/hermod
+    networks:
+      - hermod
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/hermod", "doctor"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  bob:
+    image: hermod:dev
+    container_name: hermod-bob
+    environment:
+      HERMOD_DAEMON_LISTEN_WS: "0.0.0.0:7823"
+      HERMOD_FEDERATION_ENABLED: "1"
+      # Set by the bootstrap script after broker init.
+      HERMOD_FEDERATION_UPSTREAM_BROKER: "${BROKER_DESCRIPTOR:?run scripts/broker-compose-up.sh}"
+      HERMOD_DAEMON_LOG_FORMAT: "json"
+    volumes:
+      - bob-home:/var/lib/hermod
+    networks:
+      - hermod
+    depends_on:
+      broker:
+        condition: service_healthy
+
+  carol:
+    image: hermod:dev
+    container_name: hermod-carol
+    environment:
+      HERMOD_DAEMON_LISTEN_WS: "0.0.0.0:7823"
+      HERMOD_FEDERATION_ENABLED: "1"
+      HERMOD_FEDERATION_UPSTREAM_BROKER: "${BROKER_DESCRIPTOR:?run scripts/broker-compose-up.sh}"
+      HERMOD_DAEMON_LOG_FORMAT: "json"
+    volumes:
+      - carol-home:/var/lib/hermod
+    networks:
+      - hermod
+    depends_on:
+      broker:
+        condition: service_healthy
+
+volumes:
+  broker-home:
+  bob-home:
+  carol-home:
+
+networks:
+  hermod:
+    driver: bridge
