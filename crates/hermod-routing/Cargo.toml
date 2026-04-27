@@ -1,0 +1,31 @@
+[package]
+name         = "hermod-routing"
+version      = { workspace = true }
+edition      = { workspace = true }
+license      = { workspace = true }
+rust-version = { workspace = true }
+repository   = { workspace = true }
+authors      = { workspace = true }
+description  = "Router, AccessController, RateLimiter for Hermod."
+
+[dependencies]
+hermod-core      = { workspace = true }
+hermod-crypto    = { workspace = true }
+hermod-storage   = { workspace = true }
+hermod-protocol  = { workspace = true }
+hermod-transport = { workspace = true }
+
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tokio     = { workspace = true }
+tracing   = { workspace = true }
+hex       = { workspace = true }
+serde     = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+strum = { workspace = true }
+ulid  = { workspace = true }
+
+[lints]
+workspace = true
