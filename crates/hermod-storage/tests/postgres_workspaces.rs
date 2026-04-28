@@ -13,8 +13,8 @@ use hermod_core::{AgentId, MessageId, PubkeyBytes, Timestamp, TrustLevel, Worksp
 use hermod_crypto::{WorkspaceId, WorkspaceSecret};
 use hermod_storage::AgentRepository;
 use hermod_storage::backends::postgres::{
-    PostgresAgentRepository, PostgresChannelRepository, PostgresDiscoveredChannelRepository, PostgresWorkspaceMemberRepository,
-    PostgresWorkspaceRepository, open_pool, run_migrations,
+    PostgresAgentRepository, PostgresChannelRepository, PostgresDiscoveredChannelRepository,
+    PostgresWorkspaceMemberRepository, PostgresWorkspaceRepository, open_pool, run_migrations,
 };
 use hermod_storage::repositories::agents::AgentRecord;
 use hermod_storage::repositories::workspaces::{
@@ -35,7 +35,10 @@ fn fake_agent(b: u8) -> AgentId {
 
 async fn open_scoped() -> sqlx::PgPool {
     let url = dsn().expect("HERMOD_TEST_POSTGRES_URL must be set");
-    let schema = format!("hermod_test_{}", ulid::Ulid::new().to_string().to_lowercase());
+    let schema = format!(
+        "hermod_test_{}",
+        ulid::Ulid::new().to_string().to_lowercase()
+    );
 
     let setup = open_pool(&url).await.expect("open pool for setup");
     let create = format!("CREATE SCHEMA \"{schema}\"");
@@ -50,7 +53,9 @@ async fn open_scoped() -> sqlx::PgPool {
         if url.contains('?') { "&" } else { "?" },
         schema
     );
-    let pool = open_pool(&scoped_url).await.expect("re-open with search_path");
+    let pool = open_pool(&scoped_url)
+        .await
+        .expect("re-open with search_path");
     run_migrations(&pool).await.expect("run migrations");
     pool
 }
@@ -150,7 +155,10 @@ async fn workspace_delete_cascades_to_channels_messages_members_discovered() {
     let secret = WorkspaceSecret::from_bytes([9u8; 32]);
     let ws_id = secret.workspace_id();
     let now = Timestamp::now();
-    ws_repo.upsert(&workspace(ws_id, Some(secret.clone()))).await.unwrap();
+    ws_repo
+        .upsert(&workspace(ws_id, Some(secret.clone())))
+        .await
+        .unwrap();
 
     let ch_id = secret.channel_id("general");
     ch_repo
@@ -211,7 +219,10 @@ async fn channel_history_orders_by_received_at_desc_with_limit() {
     let secret = WorkspaceSecret::from_bytes([10u8; 32]);
     let ws_id = secret.workspace_id();
     let now = Timestamp::now();
-    ws_repo.upsert(&workspace(ws_id, Some(secret.clone()))).await.unwrap();
+    ws_repo
+        .upsert(&workspace(ws_id, Some(secret.clone())))
+        .await
+        .unwrap();
 
     let ch_id = secret.channel_id("general");
     ch_repo
@@ -268,7 +279,10 @@ async fn channel_record_message_dedupes_on_id() {
     let secret = WorkspaceSecret::from_bytes([11u8; 32]);
     let ws_id = secret.workspace_id();
     let now = Timestamp::now();
-    ws_repo.upsert(&workspace(ws_id, Some(secret.clone()))).await.unwrap();
+    ws_repo
+        .upsert(&workspace(ws_id, Some(secret.clone())))
+        .await
+        .unwrap();
 
     let ch_id = secret.channel_id("general");
     ch_repo
@@ -385,7 +399,10 @@ async fn discovered_channels_observe_upserts_then_prune_cuts_old() {
     let secret = WorkspaceSecret::from_bytes([14u8; 32]);
     let ws_id = secret.workspace_id();
     let t0 = Timestamp::now();
-    ws_repo.upsert(&workspace(ws_id, Some(secret.clone()))).await.unwrap();
+    ws_repo
+        .upsert(&workspace(ws_id, Some(secret.clone())))
+        .await
+        .unwrap();
 
     let ch_id = secret.channel_id("general");
     disc_repo

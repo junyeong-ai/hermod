@@ -63,7 +63,7 @@ impl BlobStore for MemoryBlobStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blobs::tests::blob_store_conformance;
+    use crate::blobs::testing::blob_store_conformance;
 
     #[tokio::test]
     async fn memory_conforms() {

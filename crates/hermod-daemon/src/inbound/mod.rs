@@ -15,15 +15,15 @@ mod scope;
 mod workspace_observability;
 
 pub use scope::FederationRejection;
+use scope::{PermissionPromptFields, intent_for, validate_inbound_body_size};
 pub(crate) use scope::{always_requires_capability, scope_for};
-use scope::{intent_for, validate_inbound_body_size, PermissionPromptFields};
 
 use hermod_core::{AgentId, Envelope, MessageStatus, PubkeyBytes, Timestamp, TrustLevel};
 use hermod_crypto::PublicKey;
 use hermod_protocol::envelope::{deserialize_envelope, serialize_envelope};
 use hermod_routing::confirmation::{Verdict, classify, decide, summarize};
 use hermod_routing::{AccessController, AccessVerdict, RateLimiter};
-use hermod_storage::{AuditEntry, Database, MessageRecord, AuditSink};
+use hermod_storage::{AuditEntry, AuditSink, Database, MessageRecord};
 use std::sync::Arc;
 use tracing::debug;
 
@@ -74,7 +74,10 @@ impl std::fmt::Debug for InboundProcessor {
         f.debug_struct("InboundProcessor")
             .field("self_id", &self.self_id)
             .field("replay_window_secs", &self.replay_window_secs)
-            .field("held_envelope_max_age_secs", &self.held_envelope_max_age_secs)
+            .field(
+                "held_envelope_max_age_secs",
+                &self.held_envelope_max_age_secs,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -333,7 +336,8 @@ impl InboundProcessor {
                     .await
                     .map_err(|e| FederationRejection::Storage(e.to_string()))?;
                 if let Some(id) = held {
-                    audit_or_warn(&*self.audit_sink,
+                    audit_or_warn(
+                        &*self.audit_sink,
                         AuditEntry {
                             id: None,
                             ts: Timestamp::now(),
@@ -394,10 +398,7 @@ impl InboundProcessor {
 
     /// Apply an envelope that has already cleared every gate. The confirmation
     /// service re-enters here when the operator accepts a held envelope.
-    pub async fn apply_envelope(
-        &self,
-        envelope: &Envelope,
-    ) -> Result<(), FederationRejection> {
+    pub async fn apply_envelope(&self, envelope: &Envelope) -> Result<(), FederationRejection> {
         // Body-size guard. Outbound `MessageService::send` /
         // `BriefService::publish` / `BroadcastService::send` already cap
         // these on the originator side; we re-validate on the receiver
@@ -415,7 +416,8 @@ impl InboundProcessor {
                 hmac,
             } => {
                 return self
-                    .accept_channel_broadcast(envelope,
+                    .accept_channel_broadcast(
+                        envelope,
                         workspace_id,
                         channel_id,
                         text,
@@ -438,25 +440,17 @@ impl InboundProcessor {
                 channel_name,
             } => {
                 return self
-                    .accept_channel_advertise(envelope,
-                        workspace_id,
-                        channel_id,
-                        channel_name,
-                    )
+                    .accept_channel_advertise(envelope, workspace_id, channel_id, channel_name)
                     .await;
             }
             hermod_core::MessageBody::Brief { summary, topic } => {
-                return self
-                    .accept_brief(envelope, summary, topic.as_deref())
-                    .await;
+                return self.accept_brief(envelope, summary, topic.as_deref()).await;
             }
             hermod_core::MessageBody::Presence {
                 manual_status,
                 live,
             } => {
-                return self
-                    .accept_presence(envelope, *manual_status, *live)
-                    .await;
+                return self.accept_presence(envelope, *manual_status, *live).await;
             }
             hermod_core::MessageBody::File {
                 name,
@@ -464,9 +458,7 @@ impl InboundProcessor {
                 hash,
                 data,
             } => {
-                return self
-                    .accept_file(envelope, name, mime, hash, data)
-                    .await;
+                return self.accept_file(envelope, name, mime, hash, data).await;
             }
             hermod_core::MessageBody::PermissionPrompt {
                 request_id,
@@ -476,7 +468,8 @@ impl InboundProcessor {
                 expires_at,
             } => {
                 return self
-                    .accept_permission_prompt(envelope,
+                    .accept_permission_prompt(
+                        envelope,
                         PermissionPromptFields {
                             request_id,
                             tool_name,
@@ -496,9 +489,7 @@ impl InboundProcessor {
                     .await;
             }
             hermod_core::MessageBody::CapabilityGrant { token, scope } => {
-                return self
-                    .accept_capability_grant(envelope, token, scope)
-                    .await;
+                return self.accept_capability_grant(envelope, token, scope).await;
             }
             hermod_core::MessageBody::AuditFederate {
                 action,
@@ -507,7 +498,8 @@ impl InboundProcessor {
                 original_ts_ms,
             } => {
                 return self
-                    .accept_audit_federate(envelope,
+                    .accept_audit_federate(
+                        envelope,
                         action,
                         target.as_deref(),
                         details.as_ref(),
@@ -517,7 +509,8 @@ impl InboundProcessor {
             }
             hermod_core::MessageBody::WorkspaceRosterRequest { workspace_id, hmac } => {
                 return self
-                    .accept_workspace_roster_request(envelope,
+                    .accept_workspace_roster_request(
+                        envelope,
                         workspace_id,
                         hmac.as_ref().map(|b| b.as_ref()),
                     )
@@ -530,7 +523,8 @@ impl InboundProcessor {
                 hmac,
             } => {
                 return self
-                    .accept_workspace_roster_response(envelope,
+                    .accept_workspace_roster_response(
+                        envelope,
                         request_id,
                         workspace_id,
                         members,
@@ -540,7 +534,8 @@ impl InboundProcessor {
             }
             hermod_core::MessageBody::WorkspaceChannelsRequest { workspace_id, hmac } => {
                 return self
-                    .accept_workspace_channels_request(envelope,
+                    .accept_workspace_channels_request(
+                        envelope,
                         workspace_id,
                         hmac.as_ref().map(|b| b.as_ref()),
                     )
@@ -553,7 +548,8 @@ impl InboundProcessor {
                 hmac,
             } => {
                 return self
-                    .accept_workspace_channels_response(envelope,
+                    .accept_workspace_channels_response(
+                        envelope,
                         request_id,
                         workspace_id,
                         channels,
@@ -575,7 +571,8 @@ impl InboundProcessor {
             .await
             .map_err(|e| FederationRejection::Storage(e.to_string()))?;
 
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),
@@ -622,10 +619,7 @@ impl InboundProcessor {
 
         self.apply_envelope(&envelope).await
     }
-
-
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -644,9 +638,9 @@ mod tests {
         let self_public_key = keypair.public_key();
         let signer: Arc<dyn hermod_crypto::Signer> =
             Arc::new(hermod_crypto::LocalKeySigner::new(keypair));
-        let url = format!("sqlite://{}", p.display());
-        let db = hermod_storage::connect(
-            &url,
+        let dsn = format!("sqlite://{}", p.display());
+        let db = hermod_storage::open_database(
+            &dsn,
             signer,
             std::sync::Arc::new(hermod_storage::MemoryBlobStore::new()),
         )

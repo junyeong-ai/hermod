@@ -65,7 +65,7 @@ pub trait Database: Send + Sync + std::fmt::Debug + 'static {
     fn workspace_members(&self) -> &dyn WorkspaceMemberRepository;
 
     /// Backend connectivity check — returns `Ok(())` if a trivial query
-    /// succeeds. Used by `/healthz` without coupling the daemon to any
+    /// succeeds. Used by `/readyz` without coupling the daemon to any
     /// specific SQL.
     async fn ping(&self) -> Result<()>;
 

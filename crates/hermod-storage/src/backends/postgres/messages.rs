@@ -149,12 +149,10 @@ impl MessageRepository for PostgresMessageRepository {
     }
 
     async fn release_claim(&self, id: &MessageId) -> Result<()> {
-        sqlx::query(
-            r#"UPDATE messages SET claim_token = NULL, claimed_at = NULL WHERE id = $1"#,
-        )
-        .bind(id.to_string())
-        .execute(&self.pool)
-        .await?;
+        sqlx::query(r#"UPDATE messages SET claim_token = NULL, claimed_at = NULL WHERE id = $1"#)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -262,11 +260,7 @@ impl MessageRepository for PostgresMessageRepository {
         row.map(row_to_message).transpose()
     }
 
-    async fn list_inbox(
-        &self,
-        to: &AgentId,
-        filter: &InboxFilter,
-    ) -> Result<Vec<MessageRecord>> {
+    async fn list_inbox(&self, to: &AgentId, filter: &InboxFilter) -> Result<Vec<MessageRecord>> {
         use std::fmt::Write;
 
         let statuses = filter
@@ -284,8 +278,7 @@ impl MessageRepository for PostgresMessageRepository {
         // position.
         let mut next_param: u32 = 2;
 
-        let status_placeholders =
-            numbered_placeholders(next_param as usize, statuses.len());
+        let status_placeholders = numbered_placeholders(next_param as usize, statuses.len());
         next_param += statuses.len() as u32;
 
         let priority_filter = if priorities.is_empty() {

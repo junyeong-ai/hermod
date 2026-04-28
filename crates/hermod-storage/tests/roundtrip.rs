@@ -19,13 +19,9 @@ fn tmp_db_path() -> std::path::PathBuf {
 async fn fresh_db() -> SqliteDatabase {
     let p = tmp_db_path();
     let signer: Arc<dyn Signer> = Arc::new(LocalKeySigner::new(Arc::new(Keypair::generate())));
-    SqliteDatabase::connect(
-        &p,
-        signer,
-        Arc::new(hermod_storage::MemoryBlobStore::new()),
-    )
-    .await
-    .expect("open db")
+    SqliteDatabase::connect(&p, signer, Arc::new(hermod_storage::MemoryBlobStore::new()))
+        .await
+        .expect("open db")
 }
 
 #[tokio::test]

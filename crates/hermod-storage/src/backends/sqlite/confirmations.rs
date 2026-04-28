@@ -178,8 +178,8 @@ fn row_to_pending(row: sqlx::sqlite::SqliteRow) -> Result<PendingConfirmation> {
     let actor_str: String = row.try_get("actor")?;
     let actor = AgentId::from_str(&actor_str).map_err(StorageError::Core)?;
     let intent_s: String = row.try_get("intent")?;
-    let intent = crate::HoldedIntent::from_str(&intent_s)
-        .map_err(crate::error::StorageError::Core)?;
+    let intent =
+        crate::HoldedIntent::from_str(&intent_s).map_err(crate::error::StorageError::Core)?;
     let sensitivity: String = row.try_get("sensitivity")?;
     let trust_str: String = row.try_get("trust_level")?;
     let trust_level = TrustLevel::from_str(&trust_str).map_err(StorageError::Core)?;
@@ -225,7 +225,9 @@ mod tests {
         p.push(format!("hermod-conf-{}.sqlite", ulid::Ulid::new()));
         SqliteDatabase::connect(
             &p,
-            std::sync::Arc::new(hermod_crypto::LocalKeySigner::new(std::sync::Arc::new(hermod_crypto::Keypair::generate()))) as std::sync::Arc<dyn hermod_crypto::Signer>,
+            std::sync::Arc::new(hermod_crypto::LocalKeySigner::new(std::sync::Arc::new(
+                hermod_crypto::Keypair::generate(),
+            ))) as std::sync::Arc<dyn hermod_crypto::Signer>,
             std::sync::Arc::new(crate::blobs::MemoryBlobStore::new()),
         )
         .await

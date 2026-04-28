@@ -11,6 +11,8 @@ pub struct Config {
     #[serde(default)]
     pub storage: StorageConfig,
     #[serde(default)]
+    pub blob: BlobConfig,
+    #[serde(default)]
     pub federation: FederationConfig,
     #[serde(default)]
     pub policy: PolicyConfig,
@@ -241,28 +243,46 @@ pub struct StorageConfig {
     /// Backend DSN. Scheme selects the backend:
     ///
     ///   * `sqlite:///$HERMOD_HOME/hermod.db` — file-backed SQLite (default).
+    ///   * `postgresql://user@host/db?sslmode=require` — PostgreSQL
+    ///     backend (requires `--features postgres`).
     ///
     /// `$HERMOD_HOME` is expanded against the daemon's home directory
-    /// before the URL is parsed, so config files stay portable across
+    /// before the DSN is parsed, so config files stay portable across
     /// hosts. To swap to a different backend, change the scheme — no
-    /// other config touches are needed.
-    #[serde(default = "defaults::storage_url")]
-    pub url: String,
-    /// Root directory for the [`BlobStore`]. File-message payloads
-    /// land under `<root>/files/`, audit-archive day-buckets under
-    /// `<root>/audit-archive/`. The directory is created mode 0o700
-    /// on first use. Future deployments may swap this for an S3 / GCS
-    /// backend by selecting a different `BlobStore` impl at startup;
-    /// the path becomes irrelevant in that case.
-    #[serde(default = "defaults::blob_root")]
-    pub blob_root: String,
+    /// other config touches are needed. Mirrors `[blob] dsn` so the
+    /// two pluggable layers share one mental model.
+    #[serde(default = "defaults::storage_dsn")]
+    pub dsn: String,
 }
 
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            url: defaults::storage_url(),
-            blob_root: defaults::blob_root(),
+            dsn: defaults::storage_dsn(),
+        }
+    }
+}
+
+/// Pluggable blob store. File-message payloads (1 MiB cap) and
+/// gzip-compressed audit-archive day-buckets land here. Backends are
+/// selected by DSN scheme — see [`hermod_storage::open_blob_store`]
+/// for the catalogue. Auth/region for cloud backends come from the
+/// SDK's standard env-var chain (ADC for GCS, AWS credential chain
+/// for S3); the DSN carries only "where" (bucket + prefix), never
+/// secrets.
+///
+/// `$HERMOD_HOME` is expanded inside the DSN before parsing, so
+/// `file://$HERMOD_HOME/blob-store` works portably across hosts.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BlobConfig {
+    #[serde(default = "defaults::blob_dsn")]
+    pub dsn: String,
+}
+
+impl Default for BlobConfig {
+    fn default() -> Self {
+        Self {
+            dsn: defaults::blob_dsn(),
         }
     }
 }
@@ -309,11 +329,11 @@ mod defaults {
     pub fn socket_path() -> String {
         "$HERMOD_HOME/sock".into()
     }
-    pub fn storage_url() -> String {
+    pub fn storage_dsn() -> String {
         "sqlite://$HERMOD_HOME/hermod.db".into()
     }
-    pub fn blob_root() -> String {
-        "$HERMOD_HOME/blob-store".into()
+    pub fn blob_dsn() -> String {
+        "file://$HERMOD_HOME/blob-store".into()
     }
     pub fn rate_limit() -> u32 {
         60
@@ -430,11 +450,11 @@ impl Config {
         if let Ok(v) = std::env::var("HERMOD_DAEMON_METRICS_LISTEN") {
             self.daemon.metrics_listen = Some(v);
         }
-        if let Ok(v) = std::env::var("HERMOD_STORAGE_URL") {
-            self.storage.url = v;
+        if let Ok(v) = std::env::var("HERMOD_STORAGE_DSN") {
+            self.storage.dsn = v;
         }
-        if let Ok(v) = std::env::var("HERMOD_STORAGE_BLOB_ROOT") {
-            self.storage.blob_root = v;
+        if let Ok(v) = std::env::var("HERMOD_BLOB_DSN") {
+            self.blob.dsn = v;
         }
         if let Ok(v) = std::env::var("HERMOD_FEDERATION_ENABLED") {
             self.federation.enabled = parse_bool(&v);
@@ -501,9 +521,9 @@ impl Config {
             })?;
         }
         if let Ok(v) = std::env::var("HERMOD_POLICY_MAX_FILE_PAYLOAD_BYTES") {
-            self.policy.max_file_payload_bytes = v.parse().with_context(|| {
-                format!("invalid HERMOD_POLICY_MAX_FILE_PAYLOAD_BYTES = {v:?}")
-            })?;
+            self.policy.max_file_payload_bytes = v
+                .parse()
+                .with_context(|| format!("invalid HERMOD_POLICY_MAX_FILE_PAYLOAD_BYTES = {v:?}"))?;
         }
         if let Ok(v) = std::env::var("HERMOD_POLICY_AUDIT_RETENTION_SECS") {
             self.policy.audit_retention_secs = v

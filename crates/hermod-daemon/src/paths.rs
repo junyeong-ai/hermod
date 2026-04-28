@@ -47,10 +47,11 @@ pub fn expand(input: &str, home: &Path) -> PathBuf {
 }
 
 /// Expand `$HERMOD_HOME` inside a backend DSN. The token may appear
-/// anywhere in the URL — typically embedded in the path component
-/// (`sqlite://$HERMOD_HOME/hermod.db`). We textually substitute the
-/// resolved home directory before the URL is parsed; downstream
-/// (`hermod_storage::connect`) sees a fully-qualified DSN.
-pub fn expand_url(input: &str, home: &Path) -> String {
+/// anywhere in the DSN — typically embedded in the path component
+/// (`sqlite://$HERMOD_HOME/hermod.db`, `file://$HERMOD_HOME/blobs`).
+/// We textually substitute the resolved home directory before the
+/// DSN is parsed; downstream (`hermod_storage::open_database`,
+/// `hermod_storage::open_blob_store`) sees a fully-qualified DSN.
+pub fn expand_dsn(input: &str, home: &Path) -> String {
     input.replace("$HERMOD_HOME", &home.display().to_string())
 }

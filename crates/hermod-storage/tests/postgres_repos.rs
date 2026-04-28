@@ -19,8 +19,8 @@
 use hermod_core::{AgentAlias, AgentId, PresenceStatus, PubkeyBytes, Timestamp, TrustLevel};
 use hermod_storage::AgentRepository;
 use hermod_storage::backends::postgres::{
-    PostgresAgentPresenceRepository, PostgresAgentRepository, PostgresBriefRepository, PostgresMcpSessionRepository,
-    PostgresRateLimitRepository, open_pool, run_migrations,
+    PostgresAgentPresenceRepository, PostgresAgentRepository, PostgresBriefRepository,
+    PostgresMcpSessionRepository, PostgresRateLimitRepository, open_pool, run_migrations,
 };
 use hermod_storage::repositories::agents::AgentRecord;
 use hermod_storage::repositories::briefs::{BriefRecord, BriefRepository};
@@ -46,7 +46,10 @@ fn fake_agent(b: u8) -> AgentId {
 /// scoped to that schema.
 async fn open_scoped() -> sqlx::PgPool {
     let url = dsn().expect("HERMOD_TEST_POSTGRES_URL must be set");
-    let schema = format!("hermod_test_{}", ulid::Ulid::new().to_string().to_lowercase());
+    let schema = format!(
+        "hermod_test_{}",
+        ulid::Ulid::new().to_string().to_lowercase()
+    );
 
     let setup = open_pool(&url).await.expect("open pool for setup");
     let create = format!("CREATE SCHEMA \"{schema}\"");
@@ -280,7 +283,10 @@ async fn presence_set_and_clear_manual_status_roundtrips() {
         .expect("set busy");
     let rec = presence.get(&agent).await.expect("get").expect("present");
     assert_eq!(rec.manual_status, Some(PresenceStatus::Busy));
-    assert_eq!(rec.manual_status_expires_at.unwrap().unix_ms(), exp.unix_ms());
+    assert_eq!(
+        rec.manual_status_expires_at.unwrap().unix_ms(),
+        exp.unix_ms()
+    );
 
     presence.clear_manual(&agent).await.expect("clear");
     let rec = presence.get(&agent).await.unwrap().unwrap();
@@ -364,7 +370,10 @@ async fn mcp_attach_detach_track_liveness_correctly() {
     let was_live_before_first = mcp.attach_atomic(&s1, ttl_ms).await.unwrap();
     assert!(!was_live_before_first, "no sessions before first attach");
     let was_live_before_second = mcp.attach_atomic(&s2, ttl_ms).await.unwrap();
-    assert!(was_live_before_second, "first session is live when second attaches");
+    assert!(
+        was_live_before_second,
+        "first session is live when second attaches"
+    );
 
     assert_eq!(mcp.count_live(now, ttl_ms).await.unwrap(), 2);
 

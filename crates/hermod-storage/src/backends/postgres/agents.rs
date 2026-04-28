@@ -37,13 +37,12 @@ impl PostgresAgentRepository {
         let mut effective_local = record.local_alias.clone();
         let mut outcome = AliasOutcome::Accepted;
         if let Some(proposed) = &record.local_alias {
-            let row = sqlx::query(
-                r#"SELECT id FROM agents WHERE local_alias = $1 AND id != $2 LIMIT 1"#,
-            )
-            .bind(proposed.as_str())
-            .bind(record.id.as_str())
-            .fetch_optional(&mut *conn)
-            .await?;
+            let row =
+                sqlx::query(r#"SELECT id FROM agents WHERE local_alias = $1 AND id != $2 LIMIT 1"#)
+                    .bind(proposed.as_str())
+                    .bind(record.id.as_str())
+                    .fetch_optional(&mut *conn)
+                    .await?;
             if let Some(row) = row {
                 let conflict_str: String = row.try_get("id")?;
                 let conflicting_id =

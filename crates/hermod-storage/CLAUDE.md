@@ -6,13 +6,24 @@ the per-collection repository traits — never names a concrete backend.
 ## Construction
 
 ```rust
-hermod_storage::connect(url, signer, blobs).await
+let blobs = hermod_storage::open_blob_store(blob_dsn).await?;
+//   file:///abs/path/blob-store                    // default, always-on
+//   memory://                                      // tests, always-on
+//   gcs://bucket/prefix                            // --features gcs
+//   s3://bucket/prefix                             // --features s3
+
+let db = hermod_storage::open_database(storage_dsn, signer, blobs).await?;
 //   sqlite:///abs/path/hermod.db                   // default, always-on
 //   postgres://user@host/db?sslmode=require        // --features postgres
 ```
 
-URL scheme dispatches the backend. Adding a new backend = one new arm
-in `connect()` + one new module under `backends/`.
+Two trait families, two parallel DSN-dispatched factories at the
+crate root — the symmetry is intentional. Adding a new database
+backend = one new arm in `open_database()` + one new module under
+`backends/`. Adding a new blob backend = one new arm in
+`blobs::open()` + one new module under `blobs/`. Cloud backends
+(`gcs`, `s3`) take auth from the SDK's standard env-var chain (ADC,
+AWS credential chain) — DSN never carries secrets.
 
 ## Trait surface
 

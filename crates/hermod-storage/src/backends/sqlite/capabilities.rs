@@ -6,9 +6,7 @@ use sqlx::{Row, SqlitePool};
 use std::str::FromStr;
 
 use crate::error::{Result, StorageError};
-use crate::repositories::capabilities::{
-    CapabilityFilter, CapabilityRecord, CapabilityRepository,
-};
+use crate::repositories::capabilities::{CapabilityFilter, CapabilityRecord, CapabilityRepository};
 
 #[derive(Debug, Clone)]
 pub struct SqliteCapabilityRepository {
@@ -20,11 +18,7 @@ impl SqliteCapabilityRepository {
         Self { pool }
     }
 
-    async fn upsert_with_direction(
-        &self,
-        cap: &CapabilityRecord,
-        direction: &str,
-    ) -> Result<()> {
+    async fn upsert_with_direction(&self, cap: &CapabilityRecord, direction: &str) -> Result<()> {
         sqlx::query(
             r#"INSERT INTO capabilities
                    (id, issuer, audience, scope, target, expires_at, revoked_at, raw_token, direction)

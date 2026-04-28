@@ -118,7 +118,7 @@ impl BlobStore for LocalFsBlobStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blobs::tests::blob_store_conformance;
+    use crate::blobs::testing::blob_store_conformance;
 
     fn fresh_store() -> LocalFsBlobStore {
         let mut root = std::env::temp_dir();

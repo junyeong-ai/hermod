@@ -155,19 +155,12 @@ pub trait MessageRepository: Send + Sync + std::fmt::Debug {
 
     /// Stamp `delivered_at` and flip a `pending` row to `delivered`.
     /// Refuses to overwrite later states.
-    async fn try_deliver_pending(
-        &self,
-        id: &MessageId,
-        at: Timestamp,
-    ) -> Result<TransitionOutcome>;
+    async fn try_deliver_pending(&self, id: &MessageId, at: Timestamp)
+    -> Result<TransitionOutcome>;
 
     async fn get(&self, id: &MessageId) -> Result<Option<MessageRecord>>;
 
-    async fn list_inbox(
-        &self,
-        to: &AgentId,
-        filter: &InboxFilter,
-    ) -> Result<Vec<MessageRecord>>;
+    async fn list_inbox(&self, to: &AgentId, filter: &InboxFilter) -> Result<Vec<MessageRecord>>;
 
     /// Mark as read. Returns true if a row was affected.
     async fn ack(&self, id: &MessageId, recipient: &AgentId, at: Timestamp) -> Result<bool>;

@@ -132,6 +132,12 @@ zeroize      = { version = "1.8", features = ["zeroize_derive"] }
 url          = "2.5"
 tempfile     = "3.10"
 
+# Cloud blob backends. Single SDK adapter for GCS/S3/Azure under one
+# trait, gated on `hermod-storage`'s `gcs` / `s3` features. Off by
+# default — the daemon's reference build (sqlite + local_fs) doesn't
+# pay this dep tree.
+object_store = { version = "0.13", default-features = false }
+
 [profile.release]
 lto           = "thin"
 codegen-units = 1

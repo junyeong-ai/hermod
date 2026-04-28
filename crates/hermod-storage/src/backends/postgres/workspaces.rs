@@ -300,12 +300,7 @@ impl PostgresWorkspaceMemberRepository {
 
 #[async_trait]
 impl WorkspaceMemberRepository for PostgresWorkspaceMemberRepository {
-    async fn touch(
-        &self,
-        workspace: &WorkspaceId,
-        agent: &AgentId,
-        now: Timestamp,
-    ) -> Result<()> {
+    async fn touch(&self, workspace: &WorkspaceId, agent: &AgentId, now: Timestamp) -> Result<()> {
         sqlx::query(
             r#"
             INSERT INTO workspace_members (workspace_id, agent_id, first_seen, last_seen)

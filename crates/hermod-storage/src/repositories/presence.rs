@@ -129,11 +129,7 @@ pub trait McpSessionRepository: Send + Sync + std::fmt::Debug {
     async fn count_live(&self, now: Timestamp, ttl_ms: i64) -> Result<u64>;
 
     /// Prune stale rows and report the liveness transition.
-    async fn prune_with_transition(
-        &self,
-        now: Timestamp,
-        ttl_ms: i64,
-    ) -> Result<PruneOutcome>;
+    async fn prune_with_transition(&self, now: Timestamp, ttl_ms: i64) -> Result<PruneOutcome>;
 }
 
 /// Combine the cached/manual record with current self-liveness into the

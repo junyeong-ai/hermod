@@ -36,7 +36,10 @@ fn fake_signer() -> Arc<dyn Signer> {
 
 async fn open_scoped() -> (sqlx::PgPool, String) {
     let url = dsn().expect("HERMOD_TEST_POSTGRES_URL must be set");
-    let schema = format!("hermod_test_{}", ulid::Ulid::new().to_string().to_lowercase());
+    let schema = format!(
+        "hermod_test_{}",
+        ulid::Ulid::new().to_string().to_lowercase()
+    );
 
     let setup = open_pool(&url).await.expect("open pool for setup");
     let create = format!("CREATE SCHEMA \"{schema}\"");
@@ -374,26 +377,29 @@ async fn archive_day_then_verify_archive_roundtrip() {
 }
 
 #[tokio::test]
-async fn connect_postgres_returns_full_database_trait_object() {
+async fn open_database_via_postgres_dsn() {
     if dsn().is_none() {
         return;
     }
-    let (_pool, url) = open_scoped().await;
+    let (_pool, dsn_str) = open_scoped().await;
 
     // The headline assertion of all of Phase 6: the public
-    // `connect()` factory accepts a `postgres://` URL and returns
-    // the daemon's standard `Arc<dyn Database>`. After this, the
-    // daemon doesn't need to know which backend is in use.
-    let db = hermod_storage::connect(
-        &url,
+    // `open_database()` factory accepts a `postgres://` DSN and
+    // returns the daemon's standard `Arc<dyn Database>`. After this,
+    // the daemon doesn't need to know which backend is in use.
+    let db = hermod_storage::open_database(
+        &dsn_str,
         fake_signer(),
         Arc::new(hermod_storage::MemoryBlobStore::new()),
     )
     .await
-    .expect("connect via postgres scheme");
+    .expect("open_database via postgres scheme");
 
     db.ping().await.expect("ping");
-    let snap = db.metrics_snapshot(Timestamp::now().unix_ms()).await.unwrap();
+    let snap = db
+        .metrics_snapshot(Timestamp::now().unix_ms())
+        .await
+        .unwrap();
     assert_eq!(snap.audit_rows_total, 0);
     assert_eq!(snap.workspaces_total, 0);
 

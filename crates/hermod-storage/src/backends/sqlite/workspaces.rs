@@ -293,12 +293,7 @@ impl SqliteWorkspaceMemberRepository {
 
 #[async_trait]
 impl WorkspaceMemberRepository for SqliteWorkspaceMemberRepository {
-    async fn touch(
-        &self,
-        workspace: &WorkspaceId,
-        agent: &AgentId,
-        now: Timestamp,
-    ) -> Result<()> {
+    async fn touch(&self, workspace: &WorkspaceId, agent: &AgentId, now: Timestamp) -> Result<()> {
         sqlx::query(
             r#"
             INSERT INTO workspace_members (workspace_id, agent_id, first_seen, last_seen)
@@ -491,7 +486,9 @@ mod tests {
         p.push(format!("hermod-ws-{}.sqlite", ulid::Ulid::new()));
         SqliteDatabase::connect(
             &p,
-            std::sync::Arc::new(hermod_crypto::LocalKeySigner::new(std::sync::Arc::new(hermod_crypto::Keypair::generate()))) as std::sync::Arc<dyn hermod_crypto::Signer>,
+            std::sync::Arc::new(hermod_crypto::LocalKeySigner::new(std::sync::Arc::new(
+                hermod_crypto::Keypair::generate(),
+            ))) as std::sync::Arc<dyn hermod_crypto::Signer>,
             std::sync::Arc::new(crate::blobs::MemoryBlobStore::new()),
         )
         .await
@@ -602,7 +599,13 @@ mod tests {
         assert!(db.workspaces().get(&ws_id).await.unwrap().is_none());
         assert!(db.channels().get(&ch_id).await.unwrap().is_none());
         assert!(db.channels().history(&ch_id, 10).await.unwrap().is_empty());
-        assert!(db.workspace_members().list(&ws_id).await.unwrap().is_empty());
+        assert!(
+            db.workspace_members()
+                .list(&ws_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

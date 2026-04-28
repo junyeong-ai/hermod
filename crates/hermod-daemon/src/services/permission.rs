@@ -40,9 +40,9 @@ use hermod_core::{AgentId, Timestamp};
 use hermod_crypto::short_id;
 use hermod_protocol::ipc::methods::{
     PermissionBehavior, PermissionListParams, PermissionListResolvedParams,
-    PermissionListResolvedResult, PermissionListResult, PermissionOutcome,
-    PermissionRequestParams, PermissionRequestResult, PermissionRequestView,
-    PermissionResolvedView, PermissionRespondParams, PermissionRespondResult,
+    PermissionListResolvedResult, PermissionListResult, PermissionOutcome, PermissionRequestParams,
+    PermissionRequestResult, PermissionRequestView, PermissionResolvedView,
+    PermissionRespondParams, PermissionRespondResult,
 };
 use hermod_storage::{AuditEntry, AuditSink};
 use std::collections::{HashMap, VecDeque};
@@ -232,7 +232,10 @@ impl std::fmt::Debug for PermissionService {
             .field("self_id", &self.self_id)
             .field("ttl", &self.ttl)
             .field("has_relay_responder", &self.relay_responder.get().is_some())
-            .field("has_prompt_forwarder", &self.prompt_forwarder.get().is_some())
+            .field(
+                "has_prompt_forwarder",
+                &self.prompt_forwarder.get().is_some(),
+            )
             .finish()
     }
 }
@@ -314,7 +317,8 @@ impl PermissionService {
 
         self.audit_expirations(&expired, now).await;
 
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: now,
@@ -355,7 +359,8 @@ impl PermissionService {
                     } else {
                         "permission.relay.unreachable"
                     };
-                    audit_or_warn(&*self.audit_sink,
+                    audit_or_warn(
+                        &*self.audit_sink,
                         AuditEntry {
                             id: None,
                             ts: now,
@@ -376,7 +381,8 @@ impl PermissionService {
                         error = %e,
                         "permission prompt fan-out failed; local prompt still live"
                     );
-                    audit_or_warn(&*self.audit_sink,
+                    audit_or_warn(
+                        &*self.audit_sink,
                         AuditEntry {
                             id: None,
                             ts: now,
@@ -437,7 +443,8 @@ impl PermissionService {
 
         let matched = removed.is_some();
         if matched {
-            audit_or_warn(&*self.audit_sink,
+            audit_or_warn(
+                &*self.audit_sink,
                 AuditEntry {
                     id: None,
                     ts: now,
@@ -557,11 +564,7 @@ impl PermissionService {
             && let PromptOrigin::Relayed { from } = &req.origin
             && let Some(responder) = self.relay_responder.get()
             && let Err(e) = responder
-                .respond(
-                    from.clone(),
-                    params.request_id.clone(),
-                    params.behavior,
-                )
+                .respond(from.clone(), params.request_id.clone(), params.behavior)
                 .await
         {
             tracing::warn!(
@@ -570,7 +573,8 @@ impl PermissionService {
                 error = %e,
                 "federated permission verdict send failed; verdict still applied locally"
             );
-            audit_or_warn(&*self.audit_sink,
+            audit_or_warn(
+                &*self.audit_sink,
                 AuditEntry {
                     id: None,
                     ts: now,
@@ -589,7 +593,8 @@ impl PermissionService {
 
         let matched = removed.is_some();
         if matched {
-            audit_or_warn(&*self.audit_sink,
+            audit_or_warn(
+                &*self.audit_sink,
                 AuditEntry {
                     id: None,
                     ts: now,
@@ -682,7 +687,8 @@ impl PermissionService {
     /// critical section.
     async fn audit_expirations(&self, expired: &[OpenRequest], at: Timestamp) {
         for req in expired {
-            audit_or_warn(&*self.audit_sink,
+            audit_or_warn(
+                &*self.audit_sink,
                 AuditEntry {
                     id: None,
                     ts: at,
@@ -706,16 +712,19 @@ mod tests {
     use super::*;
     use hermod_protocol::ipc::methods::PermissionBehavior;
 
-    async fn make_service() -> (PermissionService, std::sync::Arc<dyn hermod_storage::Database>) {
+    async fn make_service() -> (
+        PermissionService,
+        std::sync::Arc<dyn hermod_storage::Database>,
+    ) {
         let mut p = std::env::temp_dir();
         p.push(format!("hermod-permission-{}.sqlite", ulid::Ulid::new()));
         let keypair = std::sync::Arc::new(hermod_crypto::Keypair::generate());
         let self_id = keypair.agent_id();
         let signer: std::sync::Arc<dyn hermod_crypto::Signer> =
             std::sync::Arc::new(hermod_crypto::LocalKeySigner::new(keypair));
-        let url = format!("sqlite://{}", p.display());
-        let db = hermod_storage::connect(
-            &url,
+        let dsn = format!("sqlite://{}", p.display());
+        let db = hermod_storage::open_database(
+            &dsn,
             signer,
             std::sync::Arc::new(hermod_storage::MemoryBlobStore::new()),
         )
@@ -739,7 +748,11 @@ mod tests {
         let (svc, _db) = make_service().await;
         for _ in 0..50 {
             let r = svc.request(req_params("Bash")).await.unwrap();
-            assert!(short_id::is_valid(&r.request_id), "bad id: {}", r.request_id);
+            assert!(
+                short_id::is_valid(&r.request_id),
+                "bad id: {}",
+                r.request_id
+            );
         }
     }
 

@@ -37,7 +37,8 @@ use super::pool::{open_pool, run_migrations};
 use super::presence::{PostgresAgentPresenceRepository, PostgresMcpSessionRepository};
 use super::rate_limit::PostgresRateLimitRepository;
 use super::workspaces::{
-    PostgresChannelRepository, PostgresDiscoveredChannelRepository, PostgresWorkspaceMemberRepository, PostgresWorkspaceRepository,
+    PostgresChannelRepository, PostgresDiscoveredChannelRepository,
+    PostgresWorkspaceMemberRepository, PostgresWorkspaceRepository,
 };
 
 #[derive(Clone)]
@@ -157,11 +158,10 @@ impl Database for PostgresDatabase {
     }
 
     async fn schema_version(&self) -> Result<String> {
-        let row = sqlx::query_scalar::<_, String>(
-            "SELECT value FROM schema_meta WHERE key = 'version'",
-        )
-        .fetch_one(&self.pool)
-        .await?;
+        let row =
+            sqlx::query_scalar::<_, String>("SELECT value FROM schema_meta WHERE key = 'version'")
+                .fetch_one(&self.pool)
+                .await?;
         Ok(row)
     }
 

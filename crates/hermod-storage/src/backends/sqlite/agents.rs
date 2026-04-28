@@ -407,7 +407,9 @@ mod tests {
         p.push(format!("hermod-agents-{}.sqlite", ulid::Ulid::new()));
         SqliteDatabase::connect(
             &p,
-            std::sync::Arc::new(hermod_crypto::LocalKeySigner::new(std::sync::Arc::new(hermod_crypto::Keypair::generate()))) as std::sync::Arc<dyn hermod_crypto::Signer>,
+            std::sync::Arc::new(hermod_crypto::LocalKeySigner::new(std::sync::Arc::new(
+                hermod_crypto::Keypair::generate(),
+            ))) as std::sync::Arc<dyn hermod_crypto::Signer>,
             std::sync::Arc::new(crate::blobs::MemoryBlobStore::new()),
         )
         .await
@@ -513,4 +515,3 @@ mod tests {
         assert!(r.effective_alias().is_none());
     }
 }
-

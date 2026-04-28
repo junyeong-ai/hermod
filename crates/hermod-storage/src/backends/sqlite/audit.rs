@@ -279,8 +279,7 @@ impl AuditRepository for SqliteAuditRepository {
             .to_vec();
 
         let mut jsonl = Vec::with_capacity(rows.len() * 256);
-        let mut manifest_value =
-            serde_json::to_value(&manifest).map_err(StorageError::Json)?;
+        let mut manifest_value = serde_json::to_value(&manifest).map_err(StorageError::Json)?;
         if let Some(obj) = manifest_value.as_object_mut() {
             obj.insert(
                 "manifest_sig_hex".into(),
@@ -347,13 +346,11 @@ impl AuditRepository for SqliteAuditRepository {
         .execute(&mut *tx)
         .await?;
 
-        let res = sqlx::query(
-            r#"DELETE FROM audit_log WHERE ts >= ? AND ts < ?"#,
-        )
-        .bind(epoch_start_ms)
-        .bind(epoch_end_ms)
-        .execute(&mut *tx)
-        .await?;
+        let res = sqlx::query(r#"DELETE FROM audit_log WHERE ts >= ? AND ts < ?"#)
+            .bind(epoch_start_ms)
+            .bind(epoch_end_ms)
+            .execute(&mut *tx)
+            .await?;
 
         tx.commit().await?;
 
@@ -424,11 +421,10 @@ impl AuditRepository for SqliteAuditRepository {
             Some(l) => l,
             None => return Ok(ArchiveVerification::ParseError),
         };
-        let manifest_value: serde_json::Value =
-            match serde_json::from_slice(manifest_line) {
-                Ok(v) => v,
-                Err(_) => return Ok(ArchiveVerification::ParseError),
-            };
+        let manifest_value: serde_json::Value = match serde_json::from_slice(manifest_line) {
+            Ok(v) => v,
+            Err(_) => return Ok(ArchiveVerification::ParseError),
+        };
         let mut manifest_obj = match manifest_value.as_object().cloned() {
             Some(o) => o,
             None => return Ok(ArchiveVerification::ParseError),
@@ -511,10 +507,9 @@ impl AuditRepository for SqliteAuditRepository {
     }
 
     async fn earliest_ts(&self) -> Result<Option<i64>> {
-        let v: Option<i64> =
-            sqlx::query_scalar::<_, Option<i64>>("SELECT MIN(ts) FROM audit_log")
-                .fetch_one(&self.pool)
-                .await?;
+        let v: Option<i64> = sqlx::query_scalar::<_, Option<i64>>("SELECT MIN(ts) FROM audit_log")
+            .fetch_one(&self.pool)
+            .await?;
         Ok(v)
     }
 }
@@ -605,13 +600,9 @@ mod tests {
         let signer: Arc<dyn Signer> = Arc::new(hermod_crypto::LocalKeySigner::new(Arc::new(
             hermod_crypto::Keypair::generate(),
         )));
-        SqliteDatabase::connect(
-            &p,
-            signer,
-            Arc::new(crate::blobs::MemoryBlobStore::new()),
-        )
-        .await
-        .unwrap()
+        SqliteDatabase::connect(&p, signer, Arc::new(crate::blobs::MemoryBlobStore::new()))
+            .await
+            .unwrap()
     }
 
     fn fake_actor() -> AgentId {

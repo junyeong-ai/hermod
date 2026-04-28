@@ -93,12 +93,7 @@ pub trait DiscoveredChannelRepository: Send + Sync + std::fmt::Debug {
 
 #[async_trait]
 pub trait WorkspaceMemberRepository: Send + Sync + std::fmt::Debug {
-    async fn touch(
-        &self,
-        workspace: &WorkspaceId,
-        agent: &AgentId,
-        now: Timestamp,
-    ) -> Result<()>;
+    async fn touch(&self, workspace: &WorkspaceId, agent: &AgentId, now: Timestamp) -> Result<()>;
 
     async fn list(&self, workspace: &WorkspaceId) -> Result<Vec<AgentId>>;
 

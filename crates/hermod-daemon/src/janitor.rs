@@ -10,9 +10,9 @@
 //! flaky check; retention there is an operator concern handled out-of-band
 //! (snapshot, archive, then rotate the DB).
 
-use std::sync::Arc;
 use hermod_core::Timestamp;
-use hermod_storage::{Database, SESSION_TTL_SECS, AuditSink};
+use hermod_storage::{AuditSink, Database, SESSION_TTL_SECS};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
@@ -90,8 +90,12 @@ impl std::fmt::Debug for JanitorWorker {
 }
 
 impl JanitorWorker {
-    pub fn new(db: Arc<dyn Database>, audit_sink: Arc<dyn AuditSink>,
-        self_id: hermod_core::AgentId, config: JanitorConfig) -> Self {
+    pub fn new(
+        db: Arc<dyn Database>,
+        audit_sink: Arc<dyn AuditSink>,
+        self_id: hermod_core::AgentId,
+        config: JanitorConfig,
+    ) -> Self {
         Self {
             db,
             audit_sink,
@@ -235,7 +239,8 @@ impl JanitorWorker {
                             rows = res.rows_archived,
                             "janitor sealed audit archives"
                         );
-                        crate::services::audit_or_warn(&*self.audit_sink,
+                        crate::services::audit_or_warn(
+                            &*self.audit_sink,
                             hermod_storage::AuditEntry {
                                 id: None,
                                 ts: hermod_core::Timestamp::now(),
@@ -255,7 +260,8 @@ impl JanitorWorker {
                 }
                 Err(e) => {
                     warn!(error = %e, "janitor audit archival failed");
-                    crate::services::audit_or_warn(&*self.audit_sink,
+                    crate::services::audit_or_warn(
+                        &*self.audit_sink,
                         hermod_storage::AuditEntry {
                             id: None,
                             ts: hermod_core::Timestamp::now(),
@@ -330,9 +336,9 @@ mod tests {
     async fn fresh_db() -> Arc<dyn Database> {
         let mut p = std::env::temp_dir();
         p.push(format!("hermod-janitor-{}.sqlite", ulid::Ulid::new()));
-        let url = format!("sqlite://{}", p.display());
-        hermod_storage::connect(
-            &url,
+        let dsn = format!("sqlite://{}", p.display());
+        hermod_storage::open_database(
+            &dsn,
             std::sync::Arc::new(hermod_crypto::LocalKeySigner::new(std::sync::Arc::new(
                 hermod_crypto::Keypair::generate(),
             ))) as std::sync::Arc<dyn hermod_crypto::Signer>,

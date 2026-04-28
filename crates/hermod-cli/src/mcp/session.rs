@@ -317,9 +317,9 @@ fn event_to_channel_notification(event: &ChannelEvent) -> Value {
                 .strip_prefix("local-fs://")
                 .map(|suffix| {
                     // The default LocalFs root is `$HERMOD_HOME/blob-store`;
-                    // operators can override via `[storage] blob_root`. We
-                    // surface the location string verbatim and let Claude
-                    // resolve via the operator's filesystem.
+                    // operators can override via `[blob] dsn`. We surface
+                    // the location string verbatim and let Claude resolve
+                    // via the operator's filesystem.
                     suffix.to_string()
                 })
                 .unwrap_or_default();
@@ -346,4 +346,3 @@ fn event_to_channel_notification(event: &ChannelEvent) -> Value {
     };
     channel_notification(content, meta)
 }
-

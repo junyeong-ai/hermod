@@ -133,12 +133,11 @@ impl McpSessionRepository for PostgresMcpSessionRepository {
     async fn attach_atomic(&self, session: &McpSession, ttl_ms: i64) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
         let cutoff = session.attached_at.unix_ms() - ttl_ms;
-        let row = sqlx::query(
-            r#"SELECT COUNT(*) AS n FROM mcp_sessions WHERE last_heartbeat_at > $1"#,
-        )
-        .bind(cutoff)
-        .fetch_one(&mut *tx)
-        .await?;
+        let row =
+            sqlx::query(r#"SELECT COUNT(*) AS n FROM mcp_sessions WHERE last_heartbeat_at > $1"#)
+                .bind(cutoff)
+                .fetch_one(&mut *tx)
+                .await?;
         let prior: i64 = row.try_get("n")?;
         sqlx::query(
             r#"INSERT INTO mcp_sessions
@@ -177,23 +176,21 @@ impl McpSessionRepository for PostgresMcpSessionRepository {
     ) -> Result<DetachOutcome> {
         let mut tx = self.pool.begin().await?;
         let cutoff = now.unix_ms() - ttl_ms;
-        let prior_row = sqlx::query(
-            r#"SELECT COUNT(*) AS n FROM mcp_sessions WHERE last_heartbeat_at > $1"#,
-        )
-        .bind(cutoff)
-        .fetch_one(&mut *tx)
-        .await?;
+        let prior_row =
+            sqlx::query(r#"SELECT COUNT(*) AS n FROM mcp_sessions WHERE last_heartbeat_at > $1"#)
+                .bind(cutoff)
+                .fetch_one(&mut *tx)
+                .await?;
         let prior: i64 = prior_row.try_get("n")?;
         sqlx::query(r#"DELETE FROM mcp_sessions WHERE session_id = $1"#)
             .bind(session_id)
             .execute(&mut *tx)
             .await?;
-        let post_row = sqlx::query(
-            r#"SELECT COUNT(*) AS n FROM mcp_sessions WHERE last_heartbeat_at > $1"#,
-        )
-        .bind(cutoff)
-        .fetch_one(&mut *tx)
-        .await?;
+        let post_row =
+            sqlx::query(r#"SELECT COUNT(*) AS n FROM mcp_sessions WHERE last_heartbeat_at > $1"#)
+                .bind(cutoff)
+                .fetch_one(&mut *tx)
+                .await?;
         let post: i64 = post_row.try_get("n")?;
         tx.commit().await?;
         Ok(DetachOutcome {
@@ -204,12 +201,11 @@ impl McpSessionRepository for PostgresMcpSessionRepository {
 
     async fn count_live(&self, now: Timestamp, ttl_ms: i64) -> Result<u64> {
         let cutoff = now.unix_ms() - ttl_ms;
-        let row = sqlx::query(
-            r#"SELECT COUNT(*) AS n FROM mcp_sessions WHERE last_heartbeat_at > $1"#,
-        )
-        .bind(cutoff)
-        .fetch_one(&self.pool)
-        .await?;
+        let row =
+            sqlx::query(r#"SELECT COUNT(*) AS n FROM mcp_sessions WHERE last_heartbeat_at > $1"#)
+                .bind(cutoff)
+                .fetch_one(&self.pool)
+                .await?;
         let n: i64 = row.try_get("n")?;
         Ok(n.max(0) as u64)
     }
@@ -217,24 +213,22 @@ impl McpSessionRepository for PostgresMcpSessionRepository {
     async fn prune_with_transition(&self, now: Timestamp, ttl_ms: i64) -> Result<PruneOutcome> {
         let mut tx = self.pool.begin().await?;
         let cutoff = now.unix_ms() - ttl_ms;
-        let prior_row = sqlx::query(
-            r#"SELECT COUNT(*) AS n FROM mcp_sessions WHERE last_heartbeat_at > $1"#,
-        )
-        .bind(cutoff)
-        .fetch_one(&mut *tx)
-        .await?;
+        let prior_row =
+            sqlx::query(r#"SELECT COUNT(*) AS n FROM mcp_sessions WHERE last_heartbeat_at > $1"#)
+                .bind(cutoff)
+                .fetch_one(&mut *tx)
+                .await?;
         let prior: i64 = prior_row.try_get("n")?;
         let pruned = sqlx::query(r#"DELETE FROM mcp_sessions WHERE last_heartbeat_at <= $1"#)
             .bind(cutoff)
             .execute(&mut *tx)
             .await?
             .rows_affected();
-        let post_row = sqlx::query(
-            r#"SELECT COUNT(*) AS n FROM mcp_sessions WHERE last_heartbeat_at > $1"#,
-        )
-        .bind(cutoff)
-        .fetch_one(&mut *tx)
-        .await?;
+        let post_row =
+            sqlx::query(r#"SELECT COUNT(*) AS n FROM mcp_sessions WHERE last_heartbeat_at > $1"#)
+                .bind(cutoff)
+                .fetch_one(&mut *tx)
+                .await?;
         let post: i64 = post_row.try_get("n")?;
         tx.commit().await?;
         Ok(PruneOutcome {

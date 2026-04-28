@@ -3,7 +3,7 @@
 //! A `Database` implementation backed by a SQLite WAL file. Suitable
 //! for single-host deployments where one daemon = one identity. For
 //! HA / multi-region deployments operators select the `postgres://`
-//! backend at startup via `[storage] url`; both implement the same
+//! backend at startup via `[storage] dsn`; both implement the same
 //! `Database` trait surface.
 
 mod agents;

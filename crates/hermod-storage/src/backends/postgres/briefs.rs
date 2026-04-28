@@ -26,12 +26,11 @@ impl PostgresBriefRepository {
 #[async_trait]
 impl BriefRepository for PostgresBriefRepository {
     async fn prune_expired(&self, now_ms: i64) -> Result<u64> {
-        let res = sqlx::query(
-            r#"DELETE FROM briefs WHERE expires_at IS NOT NULL AND expires_at <= $1"#,
-        )
-        .bind(now_ms)
-        .execute(&self.pool)
-        .await?;
+        let res =
+            sqlx::query(r#"DELETE FROM briefs WHERE expires_at IS NOT NULL AND expires_at <= $1"#)
+                .bind(now_ms)
+                .execute(&self.pool)
+                .await?;
         Ok(res.rows_affected())
     }
 

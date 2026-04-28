@@ -34,7 +34,8 @@ use super::pool::{open_pool, run_migrations};
 use super::presence::{SqliteAgentPresenceRepository, SqliteMcpSessionRepository};
 use super::rate_limit::SqliteRateLimitRepository;
 use super::workspaces::{
-    SqliteChannelRepository, SqliteDiscoveredChannelRepository, SqliteWorkspaceMemberRepository, SqliteWorkspaceRepository,
+    SqliteChannelRepository, SqliteDiscoveredChannelRepository, SqliteWorkspaceMemberRepository,
+    SqliteWorkspaceRepository,
 };
 
 #[derive(Clone)]
@@ -153,11 +154,10 @@ impl Database for SqliteDatabase {
     }
 
     async fn schema_version(&self) -> Result<String> {
-        let row = sqlx::query_scalar::<_, String>(
-            "SELECT value FROM schema_meta WHERE key = 'version'",
-        )
-        .fetch_one(&self.pool)
-        .await?;
+        let row =
+            sqlx::query_scalar::<_, String>("SELECT value FROM schema_meta WHERE key = 'version'")
+                .fetch_one(&self.pool)
+                .await?;
         Ok(row)
     }
 

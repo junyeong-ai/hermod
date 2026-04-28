@@ -37,7 +37,10 @@ fn fake_agent(b: u8) -> AgentId {
 
 async fn open_scoped() -> sqlx::PgPool {
     let url = dsn().expect("HERMOD_TEST_POSTGRES_URL must be set");
-    let schema = format!("hermod_test_{}", ulid::Ulid::new().to_string().to_lowercase());
+    let schema = format!(
+        "hermod_test_{}",
+        ulid::Ulid::new().to_string().to_lowercase()
+    );
 
     let setup = open_pool(&url).await.expect("open pool for setup");
     let create = format!("CREATE SCHEMA \"{schema}\"");
@@ -52,7 +55,9 @@ async fn open_scoped() -> sqlx::PgPool {
         if url.contains('?') { "&" } else { "?" },
         schema
     );
-    let pool = open_pool(&scoped_url).await.expect("re-open with search_path");
+    let pool = open_pool(&scoped_url)
+        .await
+        .expect("re-open with search_path");
     run_migrations(&pool).await.expect("run migrations");
     pool
 }
@@ -143,7 +148,12 @@ async fn enqueue_get_roundtrip() {
     let messages = PostgresMessageRepository::new(pool.clone());
     let id = MessageId::new();
     messages
-        .enqueue(&pending_record(id, me.clone(), peer.clone(), MessagePriority::Normal))
+        .enqueue(&pending_record(
+            id,
+            me.clone(),
+            peer.clone(),
+            MessagePriority::Normal,
+        ))
         .await
         .expect("enqueue");
 
@@ -253,7 +263,12 @@ async fn try_deliver_pending_and_ack_transitions() {
     let messages = PostgresMessageRepository::new(pool.clone());
     let id = MessageId::new();
     messages
-        .enqueue(&pending_record(id, peer.clone(), me.clone(), MessagePriority::Normal))
+        .enqueue(&pending_record(
+            id,
+            peer.clone(),
+            me.clone(),
+            MessagePriority::Normal,
+        ))
         .await
         .unwrap();
 
@@ -293,7 +308,12 @@ async fn fail_pending_to_recipient_marks_all_in_flight_failed() {
     let messages = PostgresMessageRepository::new(pool.clone());
     for _ in 0..3 {
         messages
-            .enqueue(&pending_record(MessageId::new(), me.clone(), peer.clone(), MessagePriority::Normal))
+            .enqueue(&pending_record(
+                MessageId::new(),
+                me.clone(),
+                peer.clone(),
+                MessagePriority::Normal,
+            ))
             .await
             .unwrap();
     }
@@ -318,17 +338,32 @@ async fn prune_expired_returns_blob_locations() {
     let now = Timestamp::now();
 
     // Two expired rows; one with a blob location, one without.
-    let mut expired_with_blob = pending_record(MessageId::new(), me.clone(), peer.clone(), MessagePriority::Normal);
+    let mut expired_with_blob = pending_record(
+        MessageId::new(),
+        me.clone(),
+        peer.clone(),
+        MessagePriority::Normal,
+    );
     expired_with_blob.expires_at = Some(Timestamp::from_unix_ms(now.unix_ms() - 1).unwrap());
     expired_with_blob.file_blob_location = Some("files/abc".into());
     messages.enqueue(&expired_with_blob).await.unwrap();
 
-    let mut expired_no_blob = pending_record(MessageId::new(), me.clone(), peer.clone(), MessagePriority::Normal);
+    let mut expired_no_blob = pending_record(
+        MessageId::new(),
+        me.clone(),
+        peer.clone(),
+        MessagePriority::Normal,
+    );
     expired_no_blob.expires_at = Some(Timestamp::from_unix_ms(now.unix_ms() - 1).unwrap());
     messages.enqueue(&expired_no_blob).await.unwrap();
 
     // One live row that survives.
-    let mut live = pending_record(MessageId::new(), me.clone(), peer.clone(), MessagePriority::Normal);
+    let mut live = pending_record(
+        MessageId::new(),
+        me.clone(),
+        peer.clone(),
+        MessagePriority::Normal,
+    );
     live.expires_at = Some(Timestamp::from_unix_ms(now.unix_ms() + 60_000).unwrap());
     messages.enqueue(&live).await.unwrap();
 
@@ -358,7 +393,12 @@ async fn outbox_claim_race_each_row_claimed_exactly_once() {
         let id = MessageId::new();
         all_ids.insert(id);
         messages
-            .enqueue(&pending_record(id, me.clone(), peer.clone(), MessagePriority::Normal))
+            .enqueue(&pending_record(
+                id,
+                me.clone(),
+                peer.clone(),
+                MessagePriority::Normal,
+            ))
             .await
             .unwrap();
     }
@@ -412,7 +452,10 @@ async fn outbox_claim_race_each_row_claimed_exactly_once() {
         let claims = h.await.unwrap();
         total += claims.len();
         for id in claims {
-            assert!(union.insert(id), "row {id} was claimed by more than one worker");
+            assert!(
+                union.insert(id),
+                "row {id} was claimed by more than one worker"
+            );
         }
     }
 
@@ -434,7 +477,12 @@ async fn release_claim_returns_row_to_pool() {
     let messages = PostgresMessageRepository::new(pool.clone());
     let id = MessageId::new();
     messages
-        .enqueue(&pending_record(id, me.clone(), peer.clone(), MessagePriority::Normal))
+        .enqueue(&pending_record(
+            id,
+            me.clone(),
+            peer.clone(),
+            MessagePriority::Normal,
+        ))
         .await
         .unwrap();
 
@@ -475,7 +523,12 @@ async fn try_fail_pending_or_delivered_idempotent() {
     let messages = PostgresMessageRepository::new(pool.clone());
     let id = MessageId::new();
     messages
-        .enqueue(&pending_record(id, me.clone(), peer.clone(), MessagePriority::Normal))
+        .enqueue(&pending_record(
+            id,
+            me.clone(),
+            peer.clone(),
+            MessagePriority::Normal,
+        ))
         .await
         .unwrap();
 

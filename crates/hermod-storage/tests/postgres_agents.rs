@@ -67,7 +67,10 @@ struct ScopedSchema {
 impl ScopedSchema {
     async fn open() -> Self {
         let url = dsn().expect("HERMOD_TEST_POSTGRES_URL must be set for this test");
-        let schema = format!("hermod_test_{}", ulid::Ulid::new().to_string().to_lowercase());
+        let schema = format!(
+            "hermod_test_{}",
+            ulid::Ulid::new().to_string().to_lowercase()
+        );
 
         let pool = open_pool(&url).await.expect("open postgres pool");
         let create = format!("CREATE SCHEMA \"{schema}\"");

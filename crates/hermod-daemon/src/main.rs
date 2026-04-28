@@ -53,8 +53,8 @@ async fn main() -> anyhow::Result<()> {
         effective_socket = s;
     }
 
-    let storage_url = paths::expand_url(&config.storage.url, &home);
-    let blob_root = paths::expand(&config.storage.blob_root, &home);
+    let storage_dsn = paths::expand_dsn(&config.storage.dsn, &home);
+    let blob_dsn = paths::expand_dsn(&config.blob.dsn, &home);
 
     let identity = identity::load(&home)
         .context("load identity (run `hermod init` first to generate an identity)")?;
@@ -71,16 +71,14 @@ async fn main() -> anyhow::Result<()> {
     // `Signer` trait so the daemon's signing dependencies don't bind to
     // the file-backed Keypair concretely. Future KMS backends slot in
     // by constructing a different `Arc<dyn Signer>` here.
-    let signer: std::sync::Arc<dyn hermod_crypto::Signer> = std::sync::Arc::new(
-        hermod_crypto::LocalKeySigner::new(identity.clone()),
-    );
-    let blobs: std::sync::Arc<dyn hermod_storage::BlobStore> = std::sync::Arc::new(
-        hermod_storage::LocalFsBlobStore::new(blob_root.clone())
-            .with_context(|| format!("open BlobStore at {}", blob_root.display()))?,
-    );
-    info!(blob_root = %blob_root.display(), "BlobStore ready (LocalFs backend)");
+    let signer: std::sync::Arc<dyn hermod_crypto::Signer> =
+        std::sync::Arc::new(hermod_crypto::LocalKeySigner::new(identity.clone()));
+    let blobs = hermod_storage::open_blob_store(&blob_dsn)
+        .await
+        .with_context(|| format!("open blob store at {blob_dsn}"))?;
+    info!(blob_dsn = %blob_dsn, "BlobStore ready");
     let db: std::sync::Arc<dyn hermod_storage::Database> =
-        match hermod_storage::connect(&storage_url, signer.clone(), blobs).await {
+        match hermod_storage::open_database(&storage_dsn, signer.clone(), blobs).await {
             Ok(db) => db,
             Err(hermod_storage::StorageError::SchemaMismatch { details }) => {
                 // The on-disk DB has an applied migration whose checksum
@@ -90,15 +88,13 @@ async fn main() -> anyhow::Result<()> {
                 // recover instead of surfacing a raw backend error.
                 anyhow::bail!(
                     "schema mismatch: the migrations bundled with this build \
-                     don't match the previously-applied schema at {storage_url}. \
+                     don't match the previously-applied schema at {storage_dsn}. \
                      Hermod uses a clean-slate migration policy — archive the \
                      database and re-init. underlying: {details}"
                 );
             }
             Err(e) => {
-                return Err(
-                    anyhow::Error::from(e).context(format!("open storage {storage_url}"))
-                );
+                return Err(anyhow::Error::from(e).context(format!("open storage {storage_dsn}")));
             }
         };
 
@@ -133,7 +129,8 @@ async fn main() -> anyhow::Result<()> {
 
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_env("HERMOD_DAEMON_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter =
+        EnvFilter::try_from_env("HERMOD_DAEMON_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
     let json = std::env::var("HERMOD_DAEMON_LOG_FORMAT").ok().as_deref() == Some("json");
     if json {
         tracing_subscriber::fmt()

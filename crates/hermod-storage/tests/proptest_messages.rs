@@ -43,7 +43,9 @@ async fn fresh_db() -> SqliteDatabase {
     p.push(format!("hermod-proptest-{}.sqlite", ulid::Ulid::new()));
     SqliteDatabase::connect(
         &p,
-        Arc::new(hermod_crypto::LocalKeySigner::new(Arc::new(Keypair::generate()))) as Arc<dyn hermod_crypto::Signer>,
+        Arc::new(hermod_crypto::LocalKeySigner::new(Arc::new(
+            Keypair::generate(),
+        ))) as Arc<dyn hermod_crypto::Signer>,
         Arc::new(hermod_storage::MemoryBlobStore::new()),
     )
     .await

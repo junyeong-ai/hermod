@@ -14,6 +14,10 @@ default  = []
 # `tokio-postgres` / `sqlx-postgres` driver chain (~3 MiB compiled).
 # Enable with `--features postgres` on the build command line.
 postgres = ["sqlx/postgres"]
+# Cloud blob backends — each pulls a single SDK adapter (`object_store`
+# in both cases) and a DSN-dispatched impl in `blobs/`. Off by default.
+gcs      = ["dep:object_store", "object_store/gcp"]
+s3       = ["dep:object_store", "object_store/aws"]
 
 [dependencies]
 hermod-core   = { workspace = true }
@@ -36,6 +40,9 @@ ulid          = { workspace = true }
 url           = { workspace = true }
 hex           = { workspace = true }
 reqwest       = { workspace = true }
+# Cloud blob backends share a single Apache `object_store` adapter —
+# pulled in only when `gcs` or `s3` is enabled.
+object_store  = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio       = { workspace = true }

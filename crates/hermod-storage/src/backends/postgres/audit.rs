@@ -121,7 +121,9 @@ impl AuditRepository for PostgresAuditRepository {
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext('audit_log')::bigint)")
             .execute(&mut *tx)
             .await?;
-        let new_id = self.append_locked(&mut tx, entry, details.as_deref()).await?;
+        let new_id = self
+            .append_locked(&mut tx, entry, details.as_deref())
+            .await?;
         tx.commit().await?;
         Ok(new_id)
     }
@@ -294,8 +296,7 @@ impl AuditRepository for PostgresAuditRepository {
             .to_vec();
 
         let mut jsonl = Vec::with_capacity(rows.len() * 256);
-        let mut manifest_value =
-            serde_json::to_value(&manifest).map_err(StorageError::Json)?;
+        let mut manifest_value = serde_json::to_value(&manifest).map_err(StorageError::Json)?;
         if let Some(obj) = manifest_value.as_object_mut() {
             obj.insert(
                 "manifest_sig_hex".into(),
@@ -523,10 +524,9 @@ impl AuditRepository for PostgresAuditRepository {
     }
 
     async fn earliest_ts(&self) -> Result<Option<i64>> {
-        let v: Option<i64> =
-            sqlx::query_scalar::<_, Option<i64>>("SELECT MIN(ts) FROM audit_log")
-                .fetch_one(&self.pool)
-                .await?;
+        let v: Option<i64> = sqlx::query_scalar::<_, Option<i64>>("SELECT MIN(ts) FROM audit_log")
+            .fetch_one(&self.pool)
+            .await?;
         Ok(v)
     }
 }

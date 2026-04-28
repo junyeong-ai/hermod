@@ -9,7 +9,8 @@
 use hermod_core::{AgentId, MessageId, PubkeyBytes, Timestamp, TrustLevel};
 use hermod_storage::AgentRepository;
 use hermod_storage::backends::postgres::{
-    PostgresAgentRepository, PostgresCapabilityRepository, PostgresConfirmationRepository, open_pool, run_migrations,
+    PostgresAgentRepository, PostgresCapabilityRepository, PostgresConfirmationRepository,
+    open_pool, run_migrations,
 };
 use hermod_storage::repositories::agents::AgentRecord;
 use hermod_storage::repositories::capabilities::{
@@ -33,7 +34,10 @@ fn fake_agent(b: u8) -> AgentId {
 
 async fn open_scoped() -> sqlx::PgPool {
     let url = dsn().expect("HERMOD_TEST_POSTGRES_URL must be set");
-    let schema = format!("hermod_test_{}", ulid::Ulid::new().to_string().to_lowercase());
+    let schema = format!(
+        "hermod_test_{}",
+        ulid::Ulid::new().to_string().to_lowercase()
+    );
 
     let setup = open_pool(&url).await.expect("open pool for setup");
     let create = format!("CREATE SCHEMA \"{schema}\"");
@@ -48,7 +52,9 @@ async fn open_scoped() -> sqlx::PgPool {
         if url.contains('?') { "&" } else { "?" },
         schema
     );
-    let pool = open_pool(&scoped_url).await.expect("re-open with search_path");
+    let pool = open_pool(&scoped_url)
+        .await
+        .expect("re-open with search_path");
     run_migrations(&pool).await.expect("run migrations");
     pool
 }
@@ -164,11 +170,15 @@ async fn caps_list_dynamic_filters_apply_correctly() {
     let now = Timestamp::now();
 
     // Three rows: active, expired, revoked.
-    caps.upsert(&cap_record("a", issuer.clone(), "x")).await.unwrap();
+    caps.upsert(&cap_record("a", issuer.clone(), "x"))
+        .await
+        .unwrap();
     let mut e = cap_record("b", issuer.clone(), "x");
     e.expires_at = Some(Timestamp::from_unix_ms(now.unix_ms() - 1).unwrap());
     caps.upsert(&e).await.unwrap();
-    caps.upsert(&cap_record("c", issuer.clone(), "x")).await.unwrap();
+    caps.upsert(&cap_record("c", issuer.clone(), "x"))
+        .await
+        .unwrap();
     caps.revoke("c", now).await.unwrap();
 
     // Default filter: include_revoked=false, include_expired=false
@@ -245,7 +255,9 @@ async fn caps_prune_terminal_drops_only_expired() {
     future.expires_at = Some(Timestamp::from_unix_ms(now.unix_ms() + 60_000).unwrap());
     caps.upsert(&future).await.unwrap();
 
-    caps.upsert(&cap_record("forever", issuer.clone(), "x")).await.unwrap();
+    caps.upsert(&cap_record("forever", issuer.clone(), "x"))
+        .await
+        .unwrap();
 
     let pruned = caps.prune_terminal(now.unix_ms()).await.unwrap();
     assert_eq!(pruned, 1);

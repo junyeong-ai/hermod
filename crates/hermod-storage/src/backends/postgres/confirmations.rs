@@ -201,8 +201,8 @@ fn row_to_pending(row: sqlx::postgres::PgRow) -> Result<PendingConfirmation> {
     let actor_str: String = row.try_get("actor")?;
     let actor = AgentId::from_str(&actor_str).map_err(StorageError::Core)?;
     let intent_s: String = row.try_get("intent")?;
-    let intent = crate::HoldedIntent::from_str(&intent_s)
-        .map_err(crate::error::StorageError::Core)?;
+    let intent =
+        crate::HoldedIntent::from_str(&intent_s).map_err(crate::error::StorageError::Core)?;
     let sensitivity: String = row.try_get("sensitivity")?;
     let trust_str: String = row.try_get("trust_level")?;
     let trust_level = TrustLevel::from_str(&trust_str).map_err(StorageError::Core)?;

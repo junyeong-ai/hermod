@@ -6,10 +6,10 @@
 //!
 //! Build behind the `postgres` cargo feature on this crate
 //! (`cargo build --features hermod-storage/postgres`); operators
-//! select the backend at runtime via `[storage] url = "postgres://…"`.
+//! select the backend at runtime via `[storage] dsn = "postgres://…"`.
 //!
 //! Status: **complete** — every repository in the `Database` trait is
-//! implemented. `connect()` dispatches `postgres://` URLs to
+//! implemented. `open_database()` dispatches `postgres://` DSNs to
 //! [`PostgresDatabase::connect`] and returns the daemon's standard
 //! `Arc<dyn Database>` trait object. The implementation has dialect
 //! parity with `backends::sqlite`:

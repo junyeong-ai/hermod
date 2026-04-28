@@ -12,9 +12,7 @@ use sqlx::{PgPool, Row};
 use std::str::FromStr;
 
 use crate::error::{Result, StorageError};
-use crate::repositories::capabilities::{
-    CapabilityFilter, CapabilityRecord, CapabilityRepository,
-};
+use crate::repositories::capabilities::{CapabilityFilter, CapabilityRecord, CapabilityRepository};
 
 #[derive(Debug, Clone)]
 pub struct PostgresCapabilityRepository {
@@ -26,11 +24,7 @@ impl PostgresCapabilityRepository {
         Self { pool }
     }
 
-    async fn upsert_with_direction(
-        &self,
-        cap: &CapabilityRecord,
-        direction: &str,
-    ) -> Result<()> {
+    async fn upsert_with_direction(&self, cap: &CapabilityRecord, direction: &str) -> Result<()> {
         sqlx::query(
             r#"INSERT INTO capabilities
                    (id, issuer, audience, scope, target, expires_at, revoked_at, raw_token, direction)
@@ -181,7 +175,10 @@ impl CapabilityRepository for PostgresCapabilityRepository {
         }
         if !filter.include_expired {
             use std::fmt::Write;
-            let _ = write!(sql, " AND (expires_at IS NULL OR expires_at > ${next_param})");
+            let _ = write!(
+                sql,
+                " AND (expires_at IS NULL OR expires_at > ${next_param})"
+            );
             next_param += 1;
         }
         if filter.after_id.is_some() {
