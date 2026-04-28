@@ -48,14 +48,23 @@ step short-circuits when the artifact already exists. Pass
 `--no-service`, `--no-mcp`, or `--skip-build` to opt out;
 `scripts/install.sh --help` for the full surface.
 
-### Or install as a Claude Code plugin
+### Or register the Claude Code plugin manually
+
+`./scripts/install.sh` already registers the bundled
+`.claude-plugin/marketplace.json` and installs the plugin under user
+scope. To do the equivalent by hand (e.g. for an existing checkout
+where you ran `--no-plugin`):
 
 ```bash
-claude plugin install /path/to/hermod
+claude plugin marketplace add /path/to/hermod
+claude plugin install hermod@hermod
 ```
 
 Slash commands (`/agents`, `/peers`, `/inbox`, `/health`), the MCP
-toolset, and the `hermod` skill all wire up in one shot.
+toolset, and the `hermod` skill all wire up in one shot. The
+marketplace stays pointed at the working tree, so a `git pull`
+followed by `/plugin marketplace update hermod` inside Claude Code
+refreshes the plugin without re-running the installer.
 
 ### Manual
 

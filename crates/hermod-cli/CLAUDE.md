@@ -9,11 +9,11 @@ over the same daemon, not duplicates.
 ```
 client.rs            local Unix-socket IPC client + remote dispatch
 remote.rs            WSS+Bearer remote-IPC client (TLS pin policy + 401-retry)
-bearer/              BearerProvider trait + Static/File/Command implementations
+bearer/              BearerProvider trait + 3 implementations
   mod.rs             trait, BearerToken, TokenEpoch, BearerError, from_env_and_args factory
   static_provider.rs HERMOD_BEARER_TOKEN-backed provider (no refresh)
-  file.rs            --bearer-file / default $HERMOD_HOME/identity/bearer_token (30s TTL cache)
-  command.rs         --bearer-command (sh -c, 30s timeout, single-flight refresh)
+  file.rs            --bearer-file / default $HERMOD_HOME/identity/bearer_token (cold-path read; refresh() re-reads on 401)
+  command.rs         --bearer-command (sh -c, 30s timeout, kill_on_drop, single-flight refresh)
 main.rs              clap CLI dispatch
 commands/            one file per `hermod <subcommand>` (peer, capability, brief, bearer, …)
 mcp/                 MCP server (hand-rolled JSON-RPC over stdio)
@@ -25,22 +25,25 @@ mcp/                 MCP server (hand-rolled JSON-RPC over stdio)
   tools.rs           tool schemas (operator-facing tool surface)
 ```
 
-## Bearer provider abstraction
+## BearerProvider abstraction
 
-Every `--remote wss://…` connect goes through a `BearerProvider`. The
-trait is two methods, no boolean flags:
+Every `--remote wss://…` connect goes through a `BearerProvider`. Two
+methods, no boolean flags:
 
-- `current()` — return the cached token, minting once on the cold path.
+- `current()` — return the cached token, minting once on the cold
+  path.
 - `refresh(stale: TokenEpoch)` — single-flight: re-mints only if the
   cached epoch is `<= stale`, otherwise returns the already-advanced
-  cache. The connect path retries exactly once on HTTP 401; if `refresh`
-  returns the same epoch (provider declines, e.g. `StaticBearerProvider`),
-  the failure escalates to fatal.
+  cache. The connect path retries exactly once on HTTP 401; if
+  `refresh` returns the same epoch (provider declines, e.g.
+  `StaticBearerProvider`), the failure escalates to fatal.
 
 Source precedence is enforced once in `bearer::from_env_and_args`:
-exactly one of `--bearer-file`, `--bearer-command`, `HERMOD_BEARER_TOKEN`
-may be set. With none set the implicit fallback is
-`$HERMOD_HOME/identity/bearer_token` via `FileBearerProvider`.
+exactly one of `--bearer-file`, `--bearer-command`,
+`HERMOD_BEARER_TOKEN` may be set. With none set the implicit fallback
+is `$HERMOD_HOME/identity/bearer_token` via `FileBearerProvider`.
+`File` and `Command` providers cache for the process lifetime — the
+401-trigger is the only refresh signal, no time-based heuristics.
 
 ## MCP surface contract
 
@@ -51,7 +54,9 @@ pinned by tests. Touching `mcp/` requires running
 real `hermodd` + `hermod mcp` subprocesses against a fresh
 `tempfile::tempdir()`.
 
-The advertised capabilities are exactly:
+Advertised capabilities (exact strings — pinned by initialize-response
+tests):
+
 - `experimental.claude/channel`
 - `experimental.claude/channel/permission`
 
@@ -61,60 +66,29 @@ inside the test snapshot — do not edit without updating both.
 
 ## Tool naming
 
-MCP tool names mirror IPC method names with `.` → `_`:
+MCP tool names mirror IPC method names with `.` → `_`
+(`message.send` → `message_send`). The MCP tool surface is
+intentionally narrower than the full IPC surface — operator-only
+namespaces (`peer.*`, `capability.*`, `audit.*`, `permission.*`,
+`mcp.*`) are NOT exposed to the agent. Adding a new tool requires a
+clear AI-agent use case; otherwise leave it operator-only.
 
-| IPC method | MCP tool |
-| --- | --- |
-| `message.send` | `message_send` |
-| `workspace.invite` | `workspace_invite` |
-| `confirmation.list` | `confirmation_list` |
+## CLI subcommand → IPC namespace
 
-Tool surface is intentionally narrower than the full IPC surface —
-operator-only actions (`peer.*`, `capability.*`, `audit.*`,
-`permission.*`, `mcp.*`) are NOT exposed to the agent. Adding a new
-tool requires a clear AI-agent use case; otherwise leave it
-operator-only.
+Every subcommand maps 1:1 to one IPC namespace; the subcommand verbs
+mirror the IPC verbs. Discover the live surface with `hermod --help`
+and `hermod <subcommand> --help`. Administrative subcommands without
+a 1:1 namespace: `init`, `status`, `identity`, `doctor`, `bearer`
+(token rotate / show), `mcp` (run the stdio MCP server).
 
-## CLI subcommand consistency
+## hermod doctor
 
-Every subcommand maps to one IPC namespace:
-
-```
-hermod peer        → peer.*       (add / list / remove / trust / repin)
-hermod capability  → capability.* (issue / list / revoke / deliver / request)
-hermod confirm     → confirmation.* (list / accept / reject)
-hermod permission  → permission.* (list / allow / deny / delegate)
-hermod workspace   → workspace.*  (create / list / join / invite / channels / members / mute / delete)
-hermod channel     → channel.*    (create / list / history / discover / adopt / advertise / mute / delete)
-hermod brief       → brief.*      (publish / read)
-hermod presence    → presence.*   (set / clear / get)
-hermod broadcast   → broadcast.*  (send)
-hermod audit       → audit.*      (query / verify / archive-now / list-archives / verify-archive)
-hermod agent       → agent.*      (list / get / register)
-hermod message     → message.*    (send / list / ack / send-file)
-hermod doctor / status / identity / init / mcp        administrative
-```
-
-## Release-binary dependence in tests
-
-`tests/channels.rs` and `tests/federation.rs` spawn the *release*
-binaries — they call `release_bin("hermod")` / `release_bin("hermodd")`
-which look at `target/release/`. CI runs `cargo build --release
---workspace --bins` before `cargo test` for this reason. After any
-change to MCP framing, IPC types, or daemon services, run:
-
-```bash
-cargo build --release --workspace --bins
-cargo test -p hermod-cli --test channels
-cargo test -p hermod-cli --test federation
-```
-
-## hermod doctor expectations
-
-`hermod doctor` is the operator's self-diagnostic. It checks identity
-file mode (0600), TLS cert validity (with 30-day expiry warning, FAIL
-on expired), schema version match, audit-chain integrity, daemon
-reachability, peer count, confirmation queue depth, capability
-presence, and Claude Code MCP registration. Adding a new operator-
-visible health signal ⇒ a new `report.check` / `report.note` call in
-`commands/doctor.rs`.
+`hermod doctor` is the operator's self-diagnostic. Output is driven by
+`hermod_daemon::home_layout::audit(home)` — adding a new file to
+`home_layout::spec` automatically adds a doctor row. Beyond the
+spec-driven file/mode audit, doctor also checks: identity loadable,
+TLS cert validity (FAIL on expired, warn under 30 days), daemon
+reachability, schema version, audit-chain integrity, peer count,
+held-confirmation queue depth, capability presence, and Claude Code
+MCP registration. New operator-visible health signals ⇒ a new
+`report.check` / `report.note` call in `commands/doctor.rs`.

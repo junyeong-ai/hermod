@@ -73,20 +73,10 @@ StorageAuditSink (always)            ← hash-chained, signed
   ⊕  RemoteAuditSink (optional)      ← AuditFederate envelopes
 ```
 
-Every emission must use `services::audit_or_warn(&*sink, entry)`.
-`AuditRepository::append` is forbidden by `clippy.toml`.
-
-## Federation policy on AuditEntry
-
-`AuditEntry.federation: AuditFederationPolicy { Default | Skip }` —
-typed at the call site, not heuristic at the sink. `Skip` is reserved
-for rows that would feed an outbound-federation feedback loop:
-
-- `MessageService::send`'s own `message.sent` row
-- `accept_audit_federate`'s folded `audit.federate.<original>` row
-- `accept_audit_federate`'s `audit.federate.received` meta-row
-
-Every other emission is `Default`.
+Emission discipline (`audit_or_warn`, typed `AuditEntry.federation`,
+doc parity with `docs/audit_actions.md`) lives in
+`.claude/rules/audit-emission.md` — path-scoped to the daemon and
+the audit-sink files, so it loads automatically when relevant.
 
 ## Migrations
 

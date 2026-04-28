@@ -45,14 +45,21 @@ systemd-user (Linux)에 데몬 등록. 재실행 안전 — 이미 존재하는 
 `--no-service`, `--no-mcp`, `--skip-build`로 개별 단계 opt-out 가능.
 `scripts/install.sh --help`로 전체 옵션 확인.
 
-### Claude Code 플러그인으로 설치
+### Claude Code 플러그인으로 등록
+
+`./scripts/install.sh` 가 번들된 `.claude-plugin/marketplace.json` 을 등록
+하고 플러그인을 user scope 으로 설치합니다. 수동으로 하려면 (예: `--no-plugin`
+로 install.sh 실행한 기존 체크아웃):
 
 ```bash
-claude plugin install /path/to/hermod
+claude plugin marketplace add /path/to/hermod
+claude plugin install hermod@hermod
 ```
 
 슬래시 명령 (`/agents`, `/peers`, `/inbox`, `/health`), MCP toolset, `hermod`
-skill이 한 번에 wire-up 됩니다.
+skill이 한 번에 wire-up 됩니다. marketplace 가 working tree 를 가리키므로
+`git pull` 후 Claude Code 안에서 `/plugin marketplace update hermod` 만
+실행하면 플러그인이 갱신됩니다.
 
 ### 수동 설치
 

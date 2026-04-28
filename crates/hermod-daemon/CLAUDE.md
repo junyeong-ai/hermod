@@ -104,13 +104,6 @@ as the daemon's own actions.
 Doc-coverage test in this crate pins each variant to
 `docs/audit_actions.md`.
 
-## Audit policy at emission
-
-Every `AuditEntry { ... }` literal must specify `federation:
-hermod_storage::AuditFederationPolicy::Default` or `Skip`. Default for
-nearly every site; Skip only for the 3 federation-feedback paths
-documented in the storage-layer guide. Compile error if missing.
-
 ## Configuration via env
 
 Every `[section] field` has a matching `HERMOD_<SECTION>_<FIELD>` env
