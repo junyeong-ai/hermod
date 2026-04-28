@@ -446,8 +446,12 @@ fn build_target(
         // secret never inherits to a subprocess we spawn.
         let env_token = hermod_crypto::secret::secret_from_env("HERMOD_BEARER_TOKEN");
         let default_path = hermod_daemon::identity::bearer_token_path(home);
-        let provider = bearer::daemon_from_env_and_args(&daemon_args, env_token, default_path)?;
-        Ok(client::ClientTarget::Remote { url, provider, pin })
+        let daemon = bearer::daemon_from_env_and_args(&daemon_args, env_token, default_path)?;
+        let auth = client::RemoteAuth {
+            daemon,
+            proxy: None,
+        };
+        Ok(client::ClientTarget::Remote { url, auth, pin })
     } else {
         Ok(client::ClientTarget::Local(socket_or_default(
             home,

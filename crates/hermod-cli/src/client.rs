@@ -7,10 +7,22 @@
 //!
 //! Command modules don't pick a transport themselves — they take a
 //! [`ClientTarget`] and call `target.connect()`. Top-level argument parsing
-//! decides Local vs Remote once and resolves the bearer source into an
-//! `Arc<dyn BearerProvider>`; every connect re-asks the provider for a
-//! token, so a 401 mid-session triggers a single-flight re-mint without
+//! decides Local vs Remote once and resolves the bearer source(s) into
+//! [`RemoteAuth`]; every connect re-asks the providers for fresh tokens,
+//! so an auth failure mid-session triggers a single-flight re-mint without
 //! touching the call sites.
+//!
+//! ## Two header families, one transport
+//!
+//! When the broker sits behind an SSO reverse proxy (Google Cloud IAP,
+//! oauth2-proxy, Cloudflare Access, ALB+Cognito, …), the CLI must
+//! present two independent bearer credentials:
+//!
+//!   * the daemon's `Authorization: Bearer …` (always),
+//!   * the proxy's `Proxy-Authorization: Bearer …` (when configured).
+//!
+//! [`RemoteAuth`] bundles both providers; the proxy slot is `Option`
+//! because a deployment without a fronting proxy simply leaves it `None`.
 
 use anyhow::{Context, Result, anyhow};
 use hermod_protocol::ipc::{IpcClient, methods};
@@ -33,7 +45,7 @@ pub enum ClientTarget {
     Local(PathBuf),
     Remote {
         url: Url,
-        provider: Arc<dyn BearerProvider>,
+        auth: RemoteAuth,
         pin: PinPolicy,
     },
 }
@@ -42,11 +54,30 @@ impl ClientTarget {
     pub async fn connect(&self) -> Result<DaemonClient> {
         match self {
             ClientTarget::Local(p) => DaemonClient::connect(p).await,
-            ClientTarget::Remote { url, provider, pin } => {
-                DaemonClient::connect_remote(url, provider, pin.clone()).await
+            ClientTarget::Remote { url, auth, pin } => {
+                DaemonClient::connect_remote(url, auth, pin.clone()).await
             }
         }
     }
+}
+
+/// Bearer providers for a remote IPC connection.
+///
+/// `daemon` is required; the hermod daemon validates it as
+/// `Authorization: Bearer …`. `proxy` is optional and, when set,
+/// fronts an SSO reverse proxy that demands its own
+/// `Proxy-Authorization: Bearer …` header. Each provider has its own
+/// independent [`crate::bearer::TokenEpoch`] — single-flight refresh
+/// is per-family.
+///
+/// `Debug` is intentionally not derived: printing a `RemoteAuth` would
+/// expose the configured provider shape (file path / command line)
+/// which is useful only for debugging and can leak source layout to
+/// stderr.
+#[derive(Clone)]
+pub struct RemoteAuth {
+    pub daemon: Arc<dyn BearerProvider>,
+    pub proxy: Option<Arc<dyn BearerProvider>>,
 }
 
 pub struct DaemonClient {
@@ -75,14 +106,11 @@ impl DaemonClient {
 
     /// Open a remote IPC session — `wss://host:port/` with Bearer auth.
     /// The handshake retries exactly once if the remote rejects the
-    /// presented token with HTTP 401, asking the [`BearerProvider`] to
-    /// mint a fresh credential.
-    pub async fn connect_remote(
-        url: &Url,
-        provider: &Arc<dyn BearerProvider>,
-        pin: PinPolicy,
-    ) -> Result<Self> {
-        let remote = connect_remote_with_refresh(url, provider, pin)
+    /// presented credentials, asking the relevant
+    /// [`BearerProvider`](crate::bearer::BearerProvider) to mint fresh
+    /// material.
+    pub async fn connect_remote(url: &Url, auth: &RemoteAuth, pin: PinPolicy) -> Result<Self> {
+        let remote = connect_remote_with_refresh(url, auth, pin)
             .await
             .with_context(|| format!("connect remote daemon at {url}"))?;
         Ok(Self {

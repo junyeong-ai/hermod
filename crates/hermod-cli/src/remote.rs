@@ -1,21 +1,41 @@
 //! WSS+Bearer remote IPC client.
 //!
 //! Speaks JSON-RPC 2.0 over a single WebSocket frame per request/response.
-//! Auth: `Authorization: Bearer <token>` on the upgrade request.
 //!
-//! TLS pinning matches the federation model — the daemon presents a
-//! self-signed cert and the client compares its SHA-256 fingerprint to
-//! either an explicit pin (`--pin <hex>`) or a TOFU pin recorded at
-//! `$HERMOD_HOME/remote_pins.json`. Use `PinPolicy::InsecureNoVerify` only
-//! for tests / fully-trusted LAN deployments.
+//! ## Auth
 //!
-//! ## Bearer refresh
+//! Two header families, one transport:
 //!
-//! The connect path goes through [`connect_remote_with_refresh`]: on a
-//! 401 from the upgrade, the bearer provider is asked to mint a fresh
-//! token (single-flight via [`crate::bearer::TokenEpoch`]) and the
-//! handshake is retried exactly once. Two consecutive 401s — or a
-//! provider that declines to advance the epoch — escalate to fatal.
+//! * `Authorization: Bearer <daemon-token>` — always sent; validated by
+//!   the hermod daemon's `ipc_remote::serve`.
+//! * `Proxy-Authorization: Bearer <proxy-token>` — sent when the
+//!   [`crate::client::RemoteAuth::proxy`] slot is `Some`. RFC 7235 §4.4
+//!   reserves this header for the SSO reverse proxy fronting the
+//!   broker (Google Cloud IAP, oauth2-proxy, Cloudflare Access,
+//!   ALB+Cognito, …). Real proxies strip the header before forwarding,
+//!   so the daemon never sees it.
+//!
+//! ## TLS pinning
+//!
+//! The daemon presents a self-signed cert and the client compares its
+//! SHA-256 fingerprint to either an explicit pin (`--pin <hex>`) or a
+//! TOFU pin recorded at `$HERMOD_HOME/remote_pins.json`. Use
+//! `PinPolicy::InsecureNoVerify` only for tests / fully-trusted LAN
+//! deployments.
+//!
+//! ## Auth-failure refresh
+//!
+//! The connect path is [`connect_remote_with_refresh`]:
+//!
+//!   * HTTP 401 → daemon-bearer rejected (or proxy-bearer rejected with
+//!     a 401-emitting reverse proxy; the wire is ambiguous). Refresh
+//!     both providers concurrently and retry once.
+//!   * HTTP 407 → RFC 7235 Proxy-Authentication-Required. Refresh the
+//!     proxy provider only and retry once.
+//!   * Two consecutive auth failures → fatal.
+//!   * A provider that returns the same epoch from `refresh` (e.g.
+//!     [`crate::bearer::StaticBearerProvider`]) signals "no notion of
+//!     refresh"; if no provider advanced, the failure is fatal.
 
 use anyhow::{Context, Result, anyhow};
 use futures::{SinkExt, StreamExt};
@@ -35,7 +55,8 @@ use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 use url::Url;
 use zeroize::Zeroizing;
 
-use crate::bearer::{BearerProvider, BearerToken};
+use crate::bearer::{BearerError, BearerToken, TokenEpoch};
+use crate::client::RemoteAuth;
 
 /// Mirrors the daemon's `MAX_REMOTE_IPC_BYTES` cap. Generous enough for
 /// any legitimate JSON-RPC reply, small enough that a misbehaving server
@@ -44,13 +65,20 @@ const MAX_REMOTE_IPC_BYTES: usize = 1024 * 1024;
 
 use crate::pins::{PinPolicy, RemotePinStore};
 
-/// Outcome of a single WSS handshake. The `Unauthorized` arm is the only
-/// signal the connect path acts on — every other failure (TLS, pin, IO,
-/// protocol) is `Other` and propagates as fatal.
+/// Outcome of a single WSS handshake. Two of the variants drive the
+/// refresh state machine in [`connect_remote_with_refresh`]; everything
+/// else folds into `Other` and propagates as fatal.
 #[derive(thiserror::Error, Debug)]
 pub enum RemoteConnectError {
+    /// HTTP 401 — daemon (or 401-emitting reverse proxy) rejected the
+    /// presented bearer.
     #[error("server returned HTTP 401 (bearer rejected)")]
     Unauthorized,
+    /// HTTP 407 — RFC 7235 Proxy-Authentication-Required from the
+    /// reverse proxy. Distinct from 401 so the retry refreshes only
+    /// the proxy provider.
+    #[error("server returned HTTP 407 (proxy authentication required)")]
+    ProxyAuthRequired,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -59,13 +87,95 @@ pub struct RemoteIpcClient {
     ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
 }
 
+/// Minted leases for one connect attempt — never reused across retries.
+/// Lifetime ends with the `connect` call that consumes them.
+struct RemoteAuthLeases {
+    daemon: BearerToken,
+    proxy: Option<BearerToken>,
+}
+
+impl RemoteAuthLeases {
+    /// Mint both tokens concurrently. Daemon and proxy providers are
+    /// independent — running them in parallel halves wall-clock time
+    /// when both are subprocess-backed (e.g. `gcloud auth
+    /// print-identity-token` for both).
+    async fn mint(auth: &RemoteAuth) -> Result<Self, BearerError> {
+        let daemon_fut = auth.daemon.current();
+        let proxy_fut = async {
+            match &auth.proxy {
+                Some(p) => Ok::<_, BearerError>(Some(p.current().await?)),
+                None => Ok(None),
+            }
+        };
+        let (daemon, proxy) = tokio::join!(daemon_fut, proxy_fut);
+        Ok(Self {
+            daemon: daemon?,
+            proxy: proxy?,
+        })
+    }
+
+    /// Refresh the proxy provider only — used after HTTP 407.
+    /// If `auth.proxy` is `None`, the lease is returned unchanged
+    /// (the caller has already decided that case is fatal before
+    /// invoking us, but defensive: never invent a refresh that didn't
+    /// happen).
+    async fn refresh_proxy(self, auth: &RemoteAuth) -> Result<Self, BearerError> {
+        let Self { daemon, proxy } = self;
+        let proxy = match (&auth.proxy, proxy) {
+            (Some(p), Some(stale)) => Some(p.refresh(stale.epoch()).await?),
+            (Some(p), None) => Some(p.current().await?),
+            (None, original) => original,
+        };
+        Ok(Self { daemon, proxy })
+    }
+
+    /// Refresh both providers concurrently — used after HTTP 401, where
+    /// we cannot tell which layer rejected. Single-flight inside each
+    /// provider; this top-level concurrency is purely to overlap two
+    /// independent subprocess invocations.
+    async fn refresh_both(self, auth: &RemoteAuth) -> Result<Self, BearerError> {
+        let Self { daemon, proxy } = self;
+        let daemon_stale = daemon.epoch();
+        let daemon_fut = auth.daemon.refresh(daemon_stale);
+        let proxy_fut = async {
+            match (&auth.proxy, proxy) {
+                (Some(p), Some(stale)) => {
+                    Ok::<_, BearerError>(Some(p.refresh(stale.epoch()).await?))
+                }
+                (Some(p), None) => Ok(Some(p.current().await?)),
+                (None, original) => Ok(original),
+            }
+        };
+        let (daemon, proxy) = tokio::join!(daemon_fut, proxy_fut);
+        Ok(Self {
+            daemon: daemon?,
+            proxy: proxy?,
+        })
+    }
+
+    /// Snapshot the epochs in a `Copy`-able value so callers can compare
+    /// before/after even though `refresh_*` consume `self`.
+    fn epochs(&self) -> AuthEpochs {
+        AuthEpochs {
+            daemon: self.daemon.epoch(),
+            proxy: self.proxy.as_ref().map(|t| t.epoch()),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct AuthEpochs {
+    daemon: TokenEpoch,
+    proxy: Option<TokenEpoch>,
+}
+
 impl RemoteIpcClient {
-    /// Open one WSS connection presenting `token` as the bearer. A 401
-    /// surfaces as [`RemoteConnectError::Unauthorized`]; other failures
-    /// fold into `Other`.
-    pub async fn connect(
+    /// Open one WSS connection presenting the minted leases. A 401/407
+    /// surfaces as the matching variant of [`RemoteConnectError`];
+    /// every other failure folds into `Other`.
+    async fn connect(
         url: &Url,
-        token: &BearerToken,
+        leases: &RemoteAuthLeases,
         policy: PinPolicy,
     ) -> Result<Self, RemoteConnectError> {
         let scheme = url.scheme();
@@ -85,12 +195,21 @@ impl RemoteIpcClient {
         // copy. We can't control tungstenite's HeaderValue allocation,
         // but we can ensure no extra unzeroed copy lingers in our
         // stack frame for every connect.
-        let auth = Zeroizing::new(format!("Bearer {}", token.secret().expose_secret()));
+        let auth = Zeroizing::new(format!("Bearer {}", leases.daemon.secret().expose_secret()));
         req.headers_mut().insert(
             "Authorization",
             auth.parse()
-                .map_err(|e| RemoteConnectError::Other(anyhow!("invalid token: {e}")))?,
+                .map_err(|e| RemoteConnectError::Other(anyhow!("invalid daemon token: {e}")))?,
         );
+        if let Some(proxy) = &leases.proxy {
+            let proxy_auth = Zeroizing::new(format!("Bearer {}", proxy.secret().expose_secret()));
+            req.headers_mut().insert(
+                "Proxy-Authorization",
+                proxy_auth
+                    .parse()
+                    .map_err(|e| RemoteConnectError::Other(anyhow!("invalid proxy token: {e}")))?,
+            );
+        }
 
         let connector = if scheme == "wss" {
             install_default_crypto_provider();
@@ -126,8 +245,8 @@ impl RemoteIpcClient {
         {
             Ok(v) => v,
             Err(e) => {
-                if is_unauthorized(&e) {
-                    return Err(RemoteConnectError::Unauthorized);
+                if let Some(specific) = classify_handshake_error(&e) {
+                    return Err(specific);
                 }
                 return Err(RemoteConnectError::Other(
                     anyhow::Error::new(e).context("ws handshake"),
@@ -172,27 +291,57 @@ impl RemoteIpcClient {
     }
 }
 
-/// Connect with one automatic re-mint on 401.
+/// Connect with one automatic re-mint on auth failure.
 ///
-/// 1. Mint via `provider.current()`, attempt connect.
-/// 2. On `Unauthorized`, ask the provider to advance the epoch and retry
+/// 1. Mint both leases via [`RemoteAuthLeases::mint`], attempt connect.
+/// 2. On `ProxyAuthRequired` (HTTP 407) — refresh the proxy provider
+///    only; retry exactly once.
+/// 3. On `Unauthorized` (HTTP 401) — the wire is ambiguous about which
+///    layer rejected, so refresh both providers concurrently and retry
 ///    exactly once.
-/// 3. If the provider returns the same epoch, the source has no notion
+/// 4. If no provider advanced its epoch, the source(s) have no notion
 ///    of refresh (e.g. a static env-supplied token rejected by the
 ///    daemon) — escalate to fatal so the operator sees the actual cause.
+/// 5. A second consecutive auth failure after refresh is fatal.
 pub async fn connect_remote_with_refresh(
     url: &Url,
-    provider: &Arc<dyn BearerProvider>,
+    auth: &RemoteAuth,
     pin: PinPolicy,
 ) -> Result<RemoteIpcClient> {
-    let lease = provider.current().await?;
-    match RemoteIpcClient::connect(url, &lease, pin.clone()).await {
+    let leases = RemoteAuthLeases::mint(auth).await?;
+    match RemoteIpcClient::connect(url, &leases, pin.clone()).await {
         Ok(c) => Ok(c),
-        Err(RemoteConnectError::Unauthorized) => {
-            let renewed = provider.refresh(lease.epoch()).await?;
-            if renewed.epoch() == lease.epoch() {
+        Err(RemoteConnectError::Other(other)) => Err(other),
+        Err(RemoteConnectError::ProxyAuthRequired) => {
+            if auth.proxy.is_none() {
                 anyhow::bail!(
-                    "bearer rejected by remote daemon and the bearer source declined \
+                    "remote returned HTTP 407 (proxy authentication required) but \
+                     no --proxy-bearer-* source is configured — set \
+                     --proxy-bearer-file, --proxy-bearer-command, or \
+                     HERMOD_PROXY_BEARER_TOKEN to authenticate against the \
+                     fronting proxy"
+                );
+            }
+            let before = leases.epochs();
+            let renewed = leases.refresh_proxy(auth).await?;
+            if renewed.epochs() == before {
+                anyhow::bail!(
+                    "proxy auth rejected and the proxy bearer source declined \
+                     to renew (cannot recover; check --proxy-bearer-command \
+                     output, --proxy-bearer-file contents, or \
+                     HERMOD_PROXY_BEARER_TOKEN)"
+                );
+            }
+            RemoteIpcClient::connect(url, &renewed, pin)
+                .await
+                .map_err(escalate_after_refresh)
+        }
+        Err(RemoteConnectError::Unauthorized) => {
+            let before = leases.epochs();
+            let renewed = leases.refresh_both(auth).await?;
+            if renewed.epochs() == before {
+                anyhow::bail!(
+                    "bearer rejected by remote daemon and the bearer source(s) declined \
                      to renew (cannot recover; check `hermod bearer show` against the \
                      daemon's $HERMOD_HOME/identity/bearer_token, or rotate via \
                      `hermod bearer rotate`)"
@@ -200,28 +349,47 @@ pub async fn connect_remote_with_refresh(
             }
             RemoteIpcClient::connect(url, &renewed, pin)
                 .await
-                .map_err(|e| match e {
-                    RemoteConnectError::Unauthorized => anyhow!(
-                        "bearer rejected after refresh — the renewed token is also \
-                         invalid (auth provider misconfigured)"
-                    ),
-                    RemoteConnectError::Other(other) => other,
-                })
+                .map_err(escalate_after_refresh)
         }
-        Err(RemoteConnectError::Other(other)) => Err(other),
     }
 }
 
-/// Best-effort detection of "the server told us our bearer is wrong"
-/// from a tungstenite handshake error. The library exposes the rejected
-/// HTTP response on `Error::Http`; we match purely on its status code,
-/// not on the body, so a daemon that customises the WWW-Authenticate
-/// payload still gets recognised.
-fn is_unauthorized(err: &tokio_tungstenite::tungstenite::Error) -> bool {
-    matches!(
-        err,
-        tokio_tungstenite::tungstenite::Error::Http(resp) if resp.status() == StatusCode::UNAUTHORIZED
-    )
+/// Map a second-attempt failure to a clear operator-facing message.
+/// `Other` propagates verbatim (TLS / pin / IO failures aren't
+/// auth-related and shouldn't be reframed as auth issues).
+fn escalate_after_refresh(e: RemoteConnectError) -> anyhow::Error {
+    match e {
+        RemoteConnectError::Unauthorized => anyhow!(
+            "bearer rejected after refresh — the renewed daemon token is also \
+             invalid (auth provider misconfigured)"
+        ),
+        RemoteConnectError::ProxyAuthRequired => anyhow!(
+            "proxy auth rejected after refresh — the renewed proxy token is also \
+             invalid (proxy auth provider misconfigured)"
+        ),
+        RemoteConnectError::Other(other) => other,
+    }
+}
+
+/// Best-effort detection of "the server told us our credentials are
+/// wrong" from a tungstenite handshake error. The library exposes the
+/// rejected HTTP response on `Error::Http`; we match purely on its
+/// status code, not on the body, so a daemon or proxy that customises
+/// the WWW-Authenticate / Proxy-Authenticate payload still gets
+/// recognised.
+fn classify_handshake_error(
+    err: &tokio_tungstenite::tungstenite::Error,
+) -> Option<RemoteConnectError> {
+    if let tokio_tungstenite::tungstenite::Error::Http(resp) = err {
+        return match resp.status() {
+            StatusCode::UNAUTHORIZED => Some(RemoteConnectError::Unauthorized),
+            StatusCode::PROXY_AUTHENTICATION_REQUIRED => {
+                Some(RemoteConnectError::ProxyAuthRequired)
+            }
+            _ => None,
+        };
+    }
+    None
 }
 
 /// Computes the SHA-256 of the cert DER and either matches against the
@@ -376,4 +544,142 @@ fn sha256_fp(cert_der: &[u8]) -> String {
 fn install_default_crypto_provider() {
     // Idempotent — multiple calls / threads safe.
     let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bearer::BearerProvider;
+    use async_trait::async_trait;
+    use hermod_crypto::SecretString;
+    use std::sync::Mutex;
+
+    /// Lightweight provider that the auth-flow tests can drive
+    /// deterministically. `refreshable=false` mimics a static
+    /// env-supplied source — `refresh()` returns the same epoch the
+    /// caller already holds, which the connect path recognises as
+    /// "declined to renew".
+    #[derive(Debug)]
+    struct StubProvider {
+        state: Mutex<StubState>,
+        token_prefix: &'static str,
+        refreshable: bool,
+    }
+
+    #[derive(Debug)]
+    struct StubState {
+        epoch: TokenEpoch,
+        mints: u64,
+    }
+
+    impl StubProvider {
+        fn new(prefix: &'static str, refreshable: bool) -> Arc<Self> {
+            Arc::new(Self {
+                state: Mutex::new(StubState {
+                    epoch: TokenEpoch::FIRST,
+                    mints: 1,
+                }),
+                token_prefix: prefix,
+                refreshable,
+            })
+        }
+
+        fn snapshot(&self) -> BearerToken {
+            let s = self.state.lock().expect("mutex");
+            let secret = SecretString::new(format!("{}-{}", self.token_prefix, s.mints));
+            BearerToken::new(secret, s.epoch)
+        }
+    }
+
+    #[async_trait]
+    impl BearerProvider for StubProvider {
+        async fn current(&self) -> Result<BearerToken, BearerError> {
+            Ok(self.snapshot())
+        }
+        async fn refresh(&self, stale: TokenEpoch) -> Result<BearerToken, BearerError> {
+            if self.refreshable {
+                let mut s = self.state.lock().expect("mutex");
+                if s.epoch <= stale {
+                    s.epoch = s.epoch.next();
+                    s.mints += 1;
+                }
+            }
+            Ok(self.snapshot())
+        }
+    }
+
+    fn make_auth(daemon_refresh: bool, proxy: Option<bool>) -> RemoteAuth {
+        RemoteAuth {
+            daemon: StubProvider::new("daemon", daemon_refresh),
+            proxy: proxy.map(|r| StubProvider::new("proxy", r) as _),
+        }
+    }
+
+    #[tokio::test]
+    async fn mint_returns_both_when_proxy_set() {
+        let auth = make_auth(true, Some(true));
+        let leases = RemoteAuthLeases::mint(&auth).await.expect("mint");
+        let proxy = leases.proxy.as_ref().expect("proxy lease");
+        assert_eq!(leases.daemon.secret().expose_secret(), "daemon-1");
+        assert_eq!(proxy.secret().expose_secret(), "proxy-1");
+        assert_eq!(leases.daemon.epoch(), TokenEpoch::FIRST);
+    }
+
+    #[tokio::test]
+    async fn mint_omits_proxy_when_unset() {
+        let auth = make_auth(true, None);
+        let leases = RemoteAuthLeases::mint(&auth).await.expect("mint");
+        assert!(leases.proxy.is_none());
+    }
+
+    #[tokio::test]
+    async fn refresh_proxy_only_advances_proxy() {
+        let auth = make_auth(true, Some(true));
+        let leases = RemoteAuthLeases::mint(&auth).await.expect("mint");
+        let before = leases.epochs();
+        let renewed = leases.refresh_proxy(&auth).await.expect("refresh_proxy");
+        assert_eq!(renewed.daemon.epoch(), before.daemon);
+        assert_ne!(
+            renewed.proxy.as_ref().expect("proxy").epoch(),
+            before.proxy.expect("had proxy"),
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_both_advances_both_when_refreshable() {
+        let auth = make_auth(true, Some(true));
+        let leases = RemoteAuthLeases::mint(&auth).await.expect("mint");
+        let before = leases.epochs();
+        let renewed = leases.refresh_both(&auth).await.expect("refresh_both");
+        assert_ne!(renewed.daemon.epoch(), before.daemon);
+        assert_ne!(
+            renewed.proxy.as_ref().expect("proxy").epoch(),
+            before.proxy.expect("had proxy"),
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_both_with_static_providers_advances_neither() {
+        let auth = make_auth(false, Some(false));
+        let leases = RemoteAuthLeases::mint(&auth).await.expect("mint");
+        let before = leases.epochs();
+        let renewed = leases.refresh_both(&auth).await.expect("refresh_both");
+        assert_eq!(renewed.epochs(), before);
+    }
+
+    #[tokio::test]
+    async fn epochs_snapshot_detects_partial_progress() {
+        let auth = make_auth(true, Some(false));
+        let leases = RemoteAuthLeases::mint(&auth).await.expect("mint");
+        let before = leases.epochs();
+        let renewed = leases.refresh_both(&auth).await.expect("refresh_both");
+        // daemon refreshable, proxy not — daemon advanced, proxy stayed.
+        assert_ne!(renewed.daemon.epoch(), before.daemon);
+        assert_eq!(
+            renewed.proxy.as_ref().expect("proxy").epoch(),
+            before.proxy.expect("had proxy"),
+        );
+        // overall snapshot differs because daemon component changed.
+        assert_ne!(renewed.epochs(), before);
+    }
 }
