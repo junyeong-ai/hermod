@@ -140,27 +140,32 @@ HERMOD_DAEMON_IPC_LISTEN_WSS=0.0.0.0:7824 hermodd
 ```
 
 The bearer token is auto-generated on first `hermod init` at
-`$HERMOD_HOME/identity/api_token` (mode 0600). Copy it to your client
-machine over a secure channel (SSH, password manager, Signal):
+`$HERMOD_HOME/identity/bearer_token` (mode 0600). Copy it to your
+client machine over a secure channel (SSH, password manager, Signal):
 
 ```sh
 # on the daemon host:
-cat $HERMOD_HOME/identity/api_token   # → 64-char hex string
+hermod bearer show          # prints the token (masked by default)
+cat $HERMOD_HOME/identity/bearer_token   # raw token (for scripted copy)
 ```
 
 ### Connect from a client
 
 ```sh
-# Two-shot — explicit token file:
+# Explicit token file:
 hermod --remote wss://my-daemon.example.com:7824/ \
-       --token-file ~/.hermod/.remote_token \
+       --bearer-file ~/.hermod/remote_bearer \
        status
 
 # Env-var-driven — fits Claude Code MCP server config:
 export HERMOD_REMOTE=wss://my-daemon.example.com:7824/
-export HERMOD_API_TOKEN=<paste>
+export HERMOD_BEARER_TOKEN=<paste>
 hermod status
 ```
+
+If the daemon's bearer rotates while the CLI is running, the next
+connect 401s on the cached token, the file is re-read, and the retry
+succeeds — no restart needed.
 
 `hermod doctor` works against a remote target too — it switches the
 "daemon reachable on Unix socket" check to "remote daemon reachable
@@ -573,7 +578,7 @@ tool surface, different transport underneath.
         "mcp"
       ],
       "env": {
-        "HERMOD_API_TOKEN": "<paste from the cloud host's identity/api_token>"
+        "HERMOD_BEARER_TOKEN": "<paste from the cloud host's identity/bearer_token>"
       }
     }
   }
@@ -620,7 +625,7 @@ $HERMOD_HOME/
     ed25519_secret               # 32-byte seed — agent_id derives from this
     tls.crt                      # regenerable from ed25519_secret
     tls.key                      # regenerable from ed25519_secret
-    api_token                    # remote-IPC bearer
+    bearer_token                 # remote-IPC bearer
 ```
 
 ### What to back up
@@ -631,7 +636,7 @@ $HERMOD_HOME/
 | `hermod.db` | Inbox + peer directory + audit history. SQLite WAL is crash-safe; backup with `VACUUM INTO '/path/backup.db'` for a transactionally consistent snapshot. Postgres: `pg_basebackup` + WAL archiving for PITR. | Per-deployment SLA. Hourly snapshot is typical for an active daemon. |
 | `blobs/` | File payloads + audit archive day-buckets. Loss of an audit archive day-bucket fails `hermod audit verify-archive` for that day; live audit log unaffected. | Same cadence as `hermod.db`. `rsync` for LocalFs; S3 lifecycle for cloud. |
 | `tls.crt` / `tls.key` | Regenerable from `ed25519_secret` — `hermod init` rebuilds them on missing. Peers re-pin via TOFU on first reconnect. | No backup required; just keep the seed. |
-| `api_token` | Remote-IPC bearer rotation. Regenerable via `hermod init --rotate-token` (or just delete the file and restart). | No backup required. |
+| `bearer_token` | Remote-IPC bearer rotation. Regenerable via `hermod bearer rotate` (or just delete the file and restart). | No backup required. |
 
 ### Identity-seed backup procedure
 
