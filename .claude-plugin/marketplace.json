@@ -1,0 +1,16 @@
+{
+  "name": "hermod",
+  "description": "Local marketplace shipped with the Hermod repository. Lets `claude plugin install hermod@hermod` resolve from a local checkout (or a git remote) without going through a published registry. The same manifest works once the repo is mirrored to a marketplace host.",
+  "owner": {
+    "name": "junyeong-ai",
+    "email": "ai.junyeong@gmail.com",
+    "url": "https://github.com/junyeong-ai"
+  },
+  "plugins": [
+    {
+      "name": "hermod",
+      "source": "./",
+      "description": "Cryptographically verifiable agent-to-agent messaging for Claude Code: slash commands (/agents /peers /inbox /health), the `hermod` skill, and the MCP server registration that bridges inbox events into Claude Code notifications/claude/channel blocks."
+    }
+  ]
+}

@@ -5,7 +5,9 @@
 #   1. Build + install `hermod` + `hermodd` binaries (via `cargo install --path`).
 #   2. Bootstrap identity at $HERMOD_HOME (default ~/.hermod) if absent.
 #   3. Register the hermod MCP server with Claude Code (`claude mcp add`).
-#   4. Set up the daemon as a background service (launchd on macOS, systemd
+#   4. Register this checkout as a Claude Code plugin marketplace + install
+#      the `hermod` plugin (slash commands, skill, MCP wiring).
+#   5. Set up the daemon as a background service (launchd on macOS, systemd
 #      --user on Linux). Skipped when --no-service is passed.
 #
 # Env / flags:
@@ -13,16 +15,14 @@
 #   HERMOD_ALIAS=<name>      — alias to register (default: $USER)
 #   --no-service             — skip launchd/systemd registration
 #   --no-mcp                 — skip `claude mcp add`
+#   --no-plugin              — skip Claude Code plugin marketplace + install
 #   --skip-build             — assume hermod/hermodd already on PATH
 #   --help                   — show this message
 #
 # After install:
 #   hermod status            (should print agent_id + uptime)
 #   hermod doctor            (sanity check)
-#
-# To use the slash commands + auto-MCP integration: install this repo as a
-# Claude Code plugin (`claude plugin install <repo>`); the manifest at
-# .claude-plugin/plugin.json wires everything up automatically.
+#   /agents /peers /inbox /health    (slash commands from the plugin)
 
 set -euo pipefail
 
@@ -32,6 +32,7 @@ HERMOD_ALIAS="${HERMOD_ALIAS:-${USER:-me}}"
 DO_SERVICE=1
 DO_MCP=1
 DO_BUILD=1
+DO_PLUGIN=1
 
 # ── pretty-printing helpers ──────────────────────────────────────────────
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
@@ -130,6 +131,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-service) DO_SERVICE=0; shift ;;
     --no-mcp)     DO_MCP=0;     shift ;;
+    --no-plugin)  DO_PLUGIN=0;  shift ;;
     --skip-build) DO_BUILD=0;   shift ;;
     --help|-h)    usage ;;
     *) err "unknown flag: $1"; exit 2 ;;
@@ -138,7 +140,7 @@ done
 
 # ── 1. binaries ──────────────────────────────────────────────────────────
 if [[ "$DO_BUILD" -eq 1 ]]; then
-  bold "[1/4] building + installing binaries (cargo install)"
+  bold "[1/5] building + installing binaries (cargo install)"
   if ! command -v cargo >/dev/null 2>&1; then
     err "cargo not found — install Rust from https://rustup.rs first"
     exit 1
@@ -153,7 +155,7 @@ else
 fi
 
 # ── 2. identity ──────────────────────────────────────────────────────────
-bold "[2/4] bootstrapping identity at $HERMOD_HOME"
+bold "[2/5] bootstrapping identity at $HERMOD_HOME"
 if [[ -f "$HERMOD_HOME/identity/ed25519_secret" ]]; then
   ok "identity already present (skipping init)"
 else
@@ -163,7 +165,7 @@ fi
 
 # ── 3. Claude Code MCP registration ──────────────────────────────────────
 if [[ "$DO_MCP" -eq 1 ]]; then
-  bold "[3/4] registering hermod MCP server with Claude Code"
+  bold "[3/5] registering hermod MCP server with Claude Code"
   if ! command -v claude >/dev/null 2>&1; then
     warn "claude CLI not found — skipping MCP registration"
     warn "  install Claude Code, then run: claude mcp add hermod hermod mcp --scope user"
@@ -174,19 +176,52 @@ if [[ "$DO_MCP" -eq 1 ]]; then
     ok "registered hermod MCP server (--scope user)"
   fi
 else
-  warn "[3/4] MCP registration skipped (--no-mcp)"
+  warn "[3/5] MCP registration skipped (--no-mcp)"
 fi
 
-# ── 4. background service ────────────────────────────────────────────────
+# ── 4. Claude Code plugin (slash commands + skill + auto-MCP) ────────────
+#
+# `claude plugin install <path>` is unsupported — Claude Code resolves
+# every install through a marketplace. We register the local checkout
+# itself as a marketplace via `.claude-plugin/marketplace.json`, then
+# install the `hermod` plugin from it. The marketplace stays pointed at
+# the working tree, so a `git pull` followed by `/plugin marketplace
+# update hermod` picks up new commands without re-running this script.
+if [[ "$DO_PLUGIN" -eq 1 ]]; then
+  bold "[4/5] registering local plugin marketplace + installing hermod plugin"
+  if ! command -v claude >/dev/null 2>&1; then
+    warn "claude CLI not found — skipping plugin install"
+    warn "  install Claude Code, then run:"
+    warn "    claude plugin marketplace add $REPO_ROOT"
+    warn "    claude plugin install hermod@hermod"
+  else
+    if claude plugin marketplace list 2>/dev/null | grep -q '^hermod\b'; then
+      ok "marketplace 'hermod' already registered"
+    else
+      claude plugin marketplace add "$REPO_ROOT" >/dev/null
+      ok "registered marketplace 'hermod' → $REPO_ROOT"
+    fi
+    if claude plugin list 2>/dev/null | grep -q '^hermod\b'; then
+      ok "plugin 'hermod' already installed"
+    else
+      claude plugin install hermod@hermod >/dev/null
+      ok "installed plugin 'hermod' (slash commands, skill, MCP)"
+    fi
+  fi
+else
+  warn "[4/5] plugin install skipped (--no-plugin)"
+fi
+
+# ── 5. background service ────────────────────────────────────────────────
 if [[ "$DO_SERVICE" -eq 1 ]]; then
-  bold "[4/4] setting up background daemon"
+  bold "[5/5] setting up background daemon"
   case "$(uname -s)" in
     Darwin) install_launchd ;;
     Linux)  install_systemd ;;
     *)      warn "unsupported OS $(uname -s) — start hermodd manually" ;;
   esac
 else
-  warn "[4/4] background service skipped (--no-service); run \`hermodd\` manually"
+  warn "[5/5] background service skipped (--no-service); run \`hermodd\` manually"
 fi
 
 # ── done ─────────────────────────────────────────────────────────────────
@@ -195,13 +230,10 @@ cat <<EOF
 
   hermod status                        # confirm daemon is up
   hermod doctor                        # full health check
-  /agents  /peers  /inbox  /health     # slash commands (after plugin install)
+  /agents  /peers  /inbox  /health     # slash commands (from the plugin)
 
-To integrate the slash commands automatically, install this repo as a
-Claude Code plugin so /agents /peers /inbox /health become available
-without copying files:
-
-  claude plugin install $REPO_ROOT     # local install
-  # or once published: claude plugin install hermod@<marketplace>
+The local plugin marketplace tracks $REPO_ROOT — after \`git pull\` run
+\`/plugin marketplace update hermod\` inside Claude Code to refresh slash
+commands without re-running this script.
 
 EOF
