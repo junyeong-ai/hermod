@@ -1,7 +1,7 @@
 //! Accept loop: bind Unix socket, dispatch each connection to the RPC dispatcher.
 
 use anyhow::{Context, Result};
-use hermod_crypto::{Keypair, Signer, TlsMaterial};
+use hermod_crypto::{Keypair, SecretString, Signer, TlsMaterial};
 use hermod_protocol::ipc::IpcServer;
 use hermod_routing::{AccessController, RateLimiter, Router};
 use hermod_storage::Database;
@@ -33,7 +33,7 @@ pub async fn serve(
     signer: Arc<dyn Signer>,
     keypair: Arc<Keypair>,
     tls: TlsMaterial,
-    api_token: Arc<str>,
+    bearer_token: Arc<SecretString>,
     audit_file_path: Option<PathBuf>,
     home: PathBuf,
     config: Config,
@@ -543,7 +543,7 @@ pub async fn serve(
             Ok(addr) => {
                 let dispatcher_for_ipc = dispatcher.clone();
                 let tls_for_ipc = tls.clone();
-                let token = api_token.clone();
+                let token = bearer_token.clone();
                 tokio::spawn(async move {
                     if let Err(e) =
                         crate::ipc_remote::serve(addr, tls_for_ipc, token, dispatcher_for_ipc).await

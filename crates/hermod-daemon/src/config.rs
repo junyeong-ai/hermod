@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use hermod_crypto::SecretString;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -118,8 +119,11 @@ pub struct AuditConfig {
     /// Optional `Authorization: Bearer <token>` for the webhook.
     /// Configure separately so a TOML config file can ship without
     /// secrets when paired with `HERMOD_AUDIT_WEBHOOK_BEARER_TOKEN`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub webhook_bearer_token: Option<String>,
+    /// `skip_serializing` ensures the value never round-trips back to
+    /// disk via `Config::write_template` — secrets stay in TOML
+    /// only because the operator put them there.
+    #[serde(default, skip_serializing)]
+    pub webhook_bearer_token: Option<SecretString>,
 }
 
 /// Authorization, replay protection, rate limiting, and retention windows.
@@ -216,8 +220,8 @@ pub struct DaemonConfig {
     pub listen_ws: Option<String>,
     /// Optional WSS+Bearer endpoint for remote IPC (`hermod --remote …`).
     /// When set, exposes the same JSON-RPC surface the Unix socket serves,
-    /// gated by the api_token at `$HERMOD_HOME/identity/api_token`. Reuses
-    /// the daemon's TLS material. None disables the listener.
+    /// gated by the bearer token at `$HERMOD_HOME/identity/bearer_token`.
+    /// Reuses the daemon's TLS material. None disables the listener.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ipc_listen_wss: Option<String>,
     /// Optional plaintext HTTP bind for `/healthz` (liveness),
@@ -586,7 +590,8 @@ impl Config {
         if let Ok(v) = std::env::var("HERMOD_AUDIT_WEBHOOK_URL") {
             self.audit.webhook_url = Some(v);
         }
-        if let Ok(v) = std::env::var("HERMOD_AUDIT_WEBHOOK_BEARER_TOKEN") {
+        if let Some(v) = hermod_crypto::secret::secret_from_env("HERMOD_AUDIT_WEBHOOK_BEARER_TOKEN")
+        {
             self.audit.webhook_bearer_token = Some(v);
         }
         if let Ok(v) = std::env::var("HERMOD_BROKER_MODE") {

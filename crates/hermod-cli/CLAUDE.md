@@ -7,10 +7,15 @@ over the same daemon, not duplicates.
 ## Module layout
 
 ```
-client.rs            local Unix-socket IPC client
-remote.rs            WSS+Bearer remote-IPC client (TLS pin policy)
+client.rs            local Unix-socket IPC client + remote dispatch
+remote.rs            WSS+Bearer remote-IPC client (TLS pin policy + 401-retry)
+bearer/              BearerProvider trait + Static/File/Command implementations
+  mod.rs             trait, BearerToken, TokenEpoch, BearerError, from_env_and_args factory
+  static_provider.rs HERMOD_BEARER_TOKEN-backed provider (no refresh)
+  file.rs            --bearer-file / default $HERMOD_HOME/identity/bearer_token (30s TTL cache)
+  command.rs         --bearer-command (sh -c, 30s timeout, single-flight refresh)
 main.rs              clap CLI dispatch
-commands/            one file per `hermod <subcommand>` (peer, capability, brief, …)
+commands/            one file per `hermod <subcommand>` (peer, capability, brief, bearer, …)
 mcp/                 MCP server (hand-rolled JSON-RPC over stdio)
   initialize.rs      capabilities + INSTRUCTIONS prompt (pinned by tests)
   notification.rs    `notifications/claude/channel` + `…/permission` frame builder
@@ -19,6 +24,23 @@ mcp/                 MCP server (hand-rolled JSON-RPC over stdio)
   channel.rs         cursor-based polling source (DM, file, confirmation, permission)
   tools.rs           tool schemas (operator-facing tool surface)
 ```
+
+## Bearer provider abstraction
+
+Every `--remote wss://…` connect goes through a `BearerProvider`. The
+trait is two methods, no boolean flags:
+
+- `current()` — return the cached token, minting once on the cold path.
+- `refresh(stale: TokenEpoch)` — single-flight: re-mints only if the
+  cached epoch is `<= stale`, otherwise returns the already-advanced
+  cache. The connect path retries exactly once on HTTP 401; if `refresh`
+  returns the same epoch (provider declines, e.g. `StaticBearerProvider`),
+  the failure escalates to fatal.
+
+Source precedence is enforced once in `bearer::from_env_and_args`:
+exactly one of `--bearer-file`, `--bearer-command`, `HERMOD_BEARER_TOKEN`
+may be set. With none set the implicit fallback is
+`$HERMOD_HOME/identity/bearer_token` via `FileBearerProvider`.
 
 ## MCP surface contract
 

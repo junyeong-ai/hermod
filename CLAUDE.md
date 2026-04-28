@@ -66,6 +66,7 @@ Suffix conventions — pick the right one before introducing a new type:
 | `*Repository` | Storage trait per collection. |
 | `*Service` | Daemon service (held by `Dispatcher`). |
 | `*Sink` | Composable audit destination. `StorageAuditSink`, `FileAuditSink`, `WebhookAuditSink`, `RemoteAuditSink`, `TeeAuditSink`. |
+| `*Provider` | External credential / dynamic-input supplier. Caching is internal; callers see only `current()` / `refresh()`. `BearerProvider`, `StaticBearerProvider`, `FileBearerProvider`, `CommandBearerProvider`. |
 | `*Mode` | Operator-driven enum collapsing previously-conflicting bool combinations. `BrokerMode`. |
 
 RPC method names: `<namespace>.<verb>` (e.g. `message.send`,

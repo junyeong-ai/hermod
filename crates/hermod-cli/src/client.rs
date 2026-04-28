@@ -7,23 +7,33 @@
 //!
 //! Command modules don't pick a transport themselves — they take a
 //! [`ClientTarget`] and call `target.connect()`. Top-level argument parsing
-//! decides Local vs Remote once.
+//! decides Local vs Remote once and resolves the bearer source into an
+//! `Arc<dyn BearerProvider>`; every connect re-asks the provider for a
+//! token, so a 401 mid-session triggers a single-flight re-mint without
+//! touching the call sites.
 
 use anyhow::{Context, Result, anyhow};
 use hermod_protocol::ipc::{IpcClient, methods};
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use url::Url;
 
+use crate::bearer::BearerProvider;
 use crate::pins::PinPolicy;
-use crate::remote::RemoteIpcClient;
+use crate::remote::{RemoteIpcClient, connect_remote_with_refresh};
 
 /// Where a CLI / MCP invocation should send its RPCs.
-#[derive(Clone, Debug)]
+///
+/// `Debug` is intentionally not derived — printing a `ClientTarget`
+/// would leak the URL / pin policy / provider configuration. Call sites
+/// that need observability inspect specific fields explicitly.
+#[derive(Clone)]
 pub enum ClientTarget {
     Local(PathBuf),
     Remote {
-        url: String,
-        token: String,
+        url: Url,
+        provider: Arc<dyn BearerProvider>,
         pin: PinPolicy,
     },
 }
@@ -32,8 +42,8 @@ impl ClientTarget {
     pub async fn connect(&self) -> Result<DaemonClient> {
         match self {
             ClientTarget::Local(p) => DaemonClient::connect(p).await,
-            ClientTarget::Remote { url, token, pin } => {
-                DaemonClient::connect_remote(url, token, pin.clone()).await
+            ClientTarget::Remote { url, provider, pin } => {
+                DaemonClient::connect_remote(url, provider, pin.clone()).await
             }
         }
     }
@@ -64,8 +74,15 @@ impl DaemonClient {
     }
 
     /// Open a remote IPC session — `wss://host:port/` with Bearer auth.
-    pub async fn connect_remote(url: &str, token: &str, pin: PinPolicy) -> Result<Self> {
-        let remote = RemoteIpcClient::connect(url, token, pin)
+    /// The handshake retries exactly once if the remote rejects the
+    /// presented token with HTTP 401, asking the [`BearerProvider`] to
+    /// mint a fresh credential.
+    pub async fn connect_remote(
+        url: &Url,
+        provider: &Arc<dyn BearerProvider>,
+        pin: PinPolicy,
+    ) -> Result<Self> {
+        let remote = connect_remote_with_refresh(url, provider, pin)
             .await
             .with_context(|| format!("connect remote daemon at {url}"))?;
         Ok(Self {
@@ -401,14 +418,16 @@ impl DaemonClient {
         &mut self,
         params: methods::AuditArchivesListParams,
     ) -> Result<methods::AuditArchivesListResult> {
-        self.call(methods::method::AUDIT_ARCHIVES_LIST, params).await
+        self.call(methods::method::AUDIT_ARCHIVES_LIST, params)
+            .await
     }
 
     pub async fn audit_verify_archive(
         &mut self,
         params: methods::AuditVerifyArchiveParams,
     ) -> Result<methods::AuditVerifyArchiveResult> {
-        self.call(methods::method::AUDIT_VERIFY_ARCHIVE, params).await
+        self.call(methods::method::AUDIT_VERIFY_ARCHIVE, params)
+            .await
     }
 
     pub async fn capability_issue(

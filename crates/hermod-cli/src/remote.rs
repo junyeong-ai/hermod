@@ -8,6 +8,14 @@
 //! either an explicit pin (`--pin <hex>`) or a TOFU pin recorded at
 //! `$HERMOD_HOME/remote_pins.json`. Use `PinPolicy::InsecureNoVerify` only
 //! for tests / fully-trusted LAN deployments.
+//!
+//! ## Bearer refresh
+//!
+//! The connect path goes through [`connect_remote_with_refresh`]: on a
+//! 401 from the upgrade, the bearer provider is asked to mint a fresh
+//! token (single-flight via [`crate::bearer::TokenEpoch`]) and the
+//! handshake is retried exactly once. Two consecutive 401s — or a
+//! provider that declines to advance the epoch — escalate to fatal.
 
 use anyhow::{Context, Result, anyhow};
 use futures::{SinkExt, StreamExt};
@@ -21,9 +29,13 @@ use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 use url::Url;
+use zeroize::Zeroizing;
+
+use crate::bearer::{BearerProvider, BearerToken};
 
 /// Mirrors the daemon's `MAX_REMOTE_IPC_BYTES` cap. Generous enough for
 /// any legitimate JSON-RPC reply, small enough that a misbehaving server
@@ -32,25 +44,52 @@ const MAX_REMOTE_IPC_BYTES: usize = 1024 * 1024;
 
 use crate::pins::{PinPolicy, RemotePinStore};
 
+/// Outcome of a single WSS handshake. The `Unauthorized` arm is the only
+/// signal the connect path acts on — every other failure (TLS, pin, IO,
+/// protocol) is `Other` and propagates as fatal.
+#[derive(thiserror::Error, Debug)]
+pub enum RemoteConnectError {
+    #[error("server returned HTTP 401 (bearer rejected)")]
+    Unauthorized,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 pub struct RemoteIpcClient {
     ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
 }
 
 impl RemoteIpcClient {
-    pub async fn connect(url: &str, token: &str, policy: PinPolicy) -> Result<Self> {
-        let parsed = Url::parse(url).with_context(|| format!("parse url {url:?}"))?;
-        let scheme = parsed.scheme();
+    /// Open one WSS connection presenting `token` as the bearer. A 401
+    /// surfaces as [`RemoteConnectError::Unauthorized`]; other failures
+    /// fold into `Other`.
+    pub async fn connect(
+        url: &Url,
+        token: &BearerToken,
+        policy: PinPolicy,
+    ) -> Result<Self, RemoteConnectError> {
+        let scheme = url.scheme();
         if scheme != "wss" && scheme != "ws" {
-            return Err(anyhow!(
+            return Err(RemoteConnectError::Other(anyhow!(
                 "remote IPC URL must be wss:// or ws://, got {scheme}"
-            ));
+            )));
         }
 
-        let mut req = url.into_client_request().context("build ws request")?;
-        let auth = format!("Bearer {token}");
+        let mut req = url
+            .as_str()
+            .into_client_request()
+            .context("build ws request")
+            .map_err(RemoteConnectError::Other)?;
+        // Wrap the formatted "Bearer <secret>" String in Zeroizing so
+        // its heap buffer is wiped after the HeaderValue takes its own
+        // copy. We can't control tungstenite's HeaderValue allocation,
+        // but we can ensure no extra unzeroed copy lingers in our
+        // stack frame for every connect.
+        let auth = Zeroizing::new(format!("Bearer {}", token.secret().expose_secret()));
         req.headers_mut().insert(
             "Authorization",
-            auth.parse().map_err(|e| anyhow!("invalid token: {e}"))?,
+            auth.parse()
+                .map_err(|e| RemoteConnectError::Other(anyhow!("invalid token: {e}")))?,
         );
 
         let connector = if scheme == "wss" {
@@ -77,14 +116,24 @@ impl RemoteIpcClient {
             .max_message_size(Some(MAX_REMOTE_IPC_BYTES))
             .max_frame_size(Some(MAX_REMOTE_IPC_BYTES));
 
-        let (ws, _resp) = tokio_tungstenite::connect_async_tls_with_config(
+        let (ws, _resp) = match tokio_tungstenite::connect_async_tls_with_config(
             req,
             Some(ws_config),
             false,
             connector,
         )
         .await
-        .context("ws handshake")?;
+        {
+            Ok(v) => v,
+            Err(e) => {
+                if is_unauthorized(&e) {
+                    return Err(RemoteConnectError::Unauthorized);
+                }
+                return Err(RemoteConnectError::Other(
+                    anyhow::Error::new(e).context("ws handshake"),
+                ));
+            }
+        };
         Ok(Self { ws })
     }
 
@@ -121,6 +170,58 @@ impl RemoteIpcClient {
             }
         }
     }
+}
+
+/// Connect with one automatic re-mint on 401.
+///
+/// 1. Mint via `provider.current()`, attempt connect.
+/// 2. On `Unauthorized`, ask the provider to advance the epoch and retry
+///    exactly once.
+/// 3. If the provider returns the same epoch, the source has no notion
+///    of refresh (e.g. a static env-supplied token rejected by the
+///    daemon) — escalate to fatal so the operator sees the actual cause.
+pub async fn connect_remote_with_refresh(
+    url: &Url,
+    provider: &Arc<dyn BearerProvider>,
+    pin: PinPolicy,
+) -> Result<RemoteIpcClient> {
+    let lease = provider.current().await?;
+    match RemoteIpcClient::connect(url, &lease, pin.clone()).await {
+        Ok(c) => Ok(c),
+        Err(RemoteConnectError::Unauthorized) => {
+            let renewed = provider.refresh(lease.epoch()).await?;
+            if renewed.epoch() == lease.epoch() {
+                anyhow::bail!(
+                    "bearer rejected by remote daemon and the bearer source declined \
+                     to renew (cannot recover; check `hermod bearer show` against the \
+                     daemon's $HERMOD_HOME/identity/bearer_token, or rotate via \
+                     `hermod bearer rotate`)"
+                );
+            }
+            RemoteIpcClient::connect(url, &renewed, pin)
+                .await
+                .map_err(|e| match e {
+                    RemoteConnectError::Unauthorized => anyhow!(
+                        "bearer rejected after refresh — the renewed token is also \
+                         invalid (auth provider misconfigured)"
+                    ),
+                    RemoteConnectError::Other(other) => other,
+                })
+        }
+        Err(RemoteConnectError::Other(other)) => Err(other),
+    }
+}
+
+/// Best-effort detection of "the server told us our bearer is wrong"
+/// from a tungstenite handshake error. The library exposes the rejected
+/// HTTP response on `Error::Http`; we match purely on its status code,
+/// not on the body, so a daemon that customises the WWW-Authenticate
+/// payload still gets recognised.
+fn is_unauthorized(err: &tokio_tungstenite::tungstenite::Error) -> bool {
+    matches!(
+        err,
+        tokio_tungstenite::tungstenite::Error::Http(resp) if resp.status() == StatusCode::UNAUTHORIZED
+    )
 }
 
 /// Computes the SHA-256 of the cert DER and either matches against the

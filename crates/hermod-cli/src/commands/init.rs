@@ -13,7 +13,7 @@ pub struct InitArgs {
     /// Replace the existing identity. The Ed25519 secret key *is* the agent
     /// identity in Hermod, so rotating it means becoming a brand-new agent.
     /// To make this irreversible-by-accident, the existing `hermod.db`,
-    /// TLS material, and API token are archived under
+    /// TLS material, and bearer token are archived under
     /// `<home>/archive/<timestamp>/` before the new identity is generated;
     /// federation peers will need to re-pin the new pubkey + TLS fingerprint.
     #[arg(long, default_value_t = false)]
@@ -40,7 +40,7 @@ pub async fn run(args: InitArgs, home: &Path) -> Result<()> {
 
     let (kp, _) = identity::ensure_exists(home)?;
     let tls = identity::ensure_tls(home, &kp)?;
-    let _ = identity::ensure_api_token(home)?;
+    let _ = identity::ensure_bearer_token(home)?;
 
     if let Some(alias) = args.alias {
         apply_alias(&config_path, &alias)?;
@@ -51,8 +51,8 @@ pub async fn run(args: InitArgs, home: &Path) -> Result<()> {
     println!("  fingerprint:     {}", kp.fingerprint().to_human_prefix(8));
     println!("  tls_fingerprint: {}", tls.fingerprint);
     println!(
-        "  api_token:       {}",
-        identity::api_token_path(home).display()
+        "  bearer_token:    {}",
+        identity::bearer_token_path(home).display()
     );
     println!("  config:          {}", config_path.display());
     println!();

@@ -1,8 +1,8 @@
 //! Remote IPC over WSS + Bearer auth.
 //!
 //! Same JSON-RPC dispatch the Unix socket serves, exposed over a WebSocket
-//! channel inside TLS. Auth: `Authorization: Bearer <api_token>` on the
-//! handshake. The token is `$HERMOD_HOME/identity/api_token` (mode 0600,
+//! channel inside TLS. Auth: `Authorization: Bearer <bearer_token>` on the
+//! handshake. The token is `$HERMOD_HOME/identity/bearer_token` (mode 0600,
 //! generated on `hermod init`).
 //!
 //! Reuses the daemon's existing TLS material (`identity/tls.crt|key`).
@@ -11,7 +11,7 @@
 use crate::dispatcher::Dispatcher;
 use anyhow::{Context, Result, anyhow};
 use futures::{SinkExt, StreamExt};
-use hermod_crypto::TlsMaterial;
+use hermod_crypto::{SecretString, TlsMaterial};
 use hermod_protocol::ipc::{Request, Response, message::Id};
 use rustls::ServerConfig;
 use rustls_pki_types::pem::PemObject;
@@ -38,7 +38,7 @@ const MAX_REMOTE_IPC_BYTES: usize = 1024 * 1024;
 pub async fn serve(
     addr: SocketAddr,
     tls: TlsMaterial,
-    api_token: Arc<str>,
+    bearer_token: Arc<SecretString>,
     dispatcher: Dispatcher,
 ) -> Result<()> {
     let acceptor = build_tls_acceptor(&tls)?;
@@ -56,7 +56,7 @@ pub async fn serve(
             }
         };
         let acceptor = acceptor.clone();
-        let token = api_token.clone();
+        let token = bearer_token.clone();
         let dispatcher = dispatcher.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_connection(sock, peer, acceptor, token, dispatcher).await {
@@ -71,8 +71,7 @@ fn build_tls_acceptor(tls: &TlsMaterial) -> Result<TlsAcceptor> {
         CertificateDer::pem_slice_iter(tls.cert_pem.as_bytes())
             .collect::<Result<Vec<_>, _>>()
             .context("parse TLS cert PEM")?;
-    let key = PrivateKeyDer::from_pem_slice(tls.key_pem.as_bytes())
-        .context("parse TLS key PEM")?;
+    let key = PrivateKeyDer::from_pem_slice(tls.key_pem.as_bytes()).context("parse TLS key PEM")?;
 
     let config =
         ServerConfig::builder_with_protocol_versions(hermod_transport::tls::PROTOCOL_VERSIONS)
@@ -90,7 +89,7 @@ async fn handle_connection(
     sock: tokio::net::TcpStream,
     peer: SocketAddr,
     acceptor: TlsAcceptor,
-    expected_token: Arc<str>,
+    expected_token: Arc<SecretString>,
     dispatcher: Dispatcher,
 ) -> Result<()> {
     let tls = acceptor.accept(sock).await?;
@@ -113,7 +112,7 @@ async fn handle_connection(
                 .and_then(|v| v.to_str().ok());
             let presented = header.and_then(|h| h.strip_prefix(EXPECTED_BEARER_PREFIX));
             if let Some(t) = presented
-                && constant_time_eq(t.as_bytes(), token.as_bytes())
+                && constant_time_eq(t.as_bytes(), token.expose_secret().as_bytes())
             {
                 auth_ok_for_callback.store(true, std::sync::atomic::Ordering::SeqCst);
                 return Ok(resp);

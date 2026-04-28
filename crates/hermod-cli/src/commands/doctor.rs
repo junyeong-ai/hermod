@@ -17,7 +17,7 @@ pub async fn run(home: &Path, target: &ClientTarget) -> Result<()> {
     let cfg_path = home.join("config.toml");
     let identity_dir = home.join("identity");
     let identity_secret = identity_dir.join("ed25519_secret");
-    let api_token = identity_dir.join("api_token");
+    let bearer_token = identity_dir.join("bearer_token");
     let tls_key = identity_dir.join("tls.key");
 
     report.check("$HERMOD_HOME exists and is readable", home.is_dir(), || {
@@ -44,7 +44,7 @@ pub async fn run(home: &Path, target: &ClientTarget) -> Result<()> {
 
     for (label, p) in [
         ("identity secret", &identity_secret),
-        ("api_token", &api_token),
+        ("bearer_token", &bearer_token),
         ("tls.key", &tls_key),
     ] {
         if p.exists() {

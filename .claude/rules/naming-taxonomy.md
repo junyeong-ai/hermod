@@ -17,6 +17,7 @@ test or review noise.
 | `*Repository` | Per-collection storage trait | `AgentRepository`, `MessageRepository` |
 | `*Service` | Daemon service held by the dispatcher | `MessageService`, `BrokerService` |
 | `*Sink` | Composable audit destination | `StorageAuditSink`, `RemoteAuditSink`, `TeeAuditSink` |
+| `*Provider` | External credential / dynamic input supplier — caching policy is encapsulated inside the implementation, callers see only `current()` / `refresh()` | `BearerProvider`, `StaticBearerProvider`, `FileBearerProvider`, `CommandBearerProvider` |
 | `*Mode` | Operator enum collapsing previously-conflicting bool combos | `BrokerMode { Disabled, RelayOnly, RelayAndWitness }` |
 | `*Auditor` | Side-channel observer (e.g. `BeaconAuditor`) | |
 | `*Forwarder` / `*Responder` | Async trait for cross-service callbacks (broken circular dep) | `PromptForwarder`, `RelayResponder` |

@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
-use hermod_crypto::{Keypair, TlsMaterial};
+use hermod_crypto::{Keypair, SecretString, TlsMaterial};
 use std::fs;
 use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
 /// On-disk identity layout:
 ///
@@ -11,6 +12,7 @@ use std::path::{Path, PathBuf};
 ///     ed25519_secret   (mode 0600, 32 raw bytes)
 ///     tls.crt          (PEM cert; SubjectAlternativeNames cover localhost + 127.0.0.1 + ::1)
 ///     tls.key          (mode 0600, PEM private key)
+///     bearer_token     (mode 0600, hex-encoded random bytes — Remote IPC bearer)
 /// ```
 pub fn identity_dir(home: &Path) -> PathBuf {
     home.join("identity")
@@ -28,41 +30,48 @@ pub fn tls_key_path(home: &Path) -> PathBuf {
     identity_dir(home).join("tls.key")
 }
 
-pub fn api_token_path(home: &Path) -> PathBuf {
-    identity_dir(home).join("api_token")
+pub fn bearer_token_path(home: &Path) -> PathBuf {
+    identity_dir(home).join("bearer_token")
 }
 
 /// Generate (if missing) the bearer token used to authenticate remote IPC
 /// clients (`hermod --remote …`). 32 random bytes hex-encoded; mode 0600.
 /// Idempotent: an existing file is read, never overwritten.
-pub fn ensure_api_token(home: &Path) -> Result<String> {
-    let p = api_token_path(home);
+pub fn ensure_bearer_token(home: &Path) -> Result<SecretString> {
+    let p = bearer_token_path(home);
     if p.exists() {
-        let s = fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?;
-        return Ok(s.trim().to_string());
+        return hermod_crypto::secret::read_secret_file(&p)
+            .with_context(|| format!("read {}", p.display()))?
+            .ok_or_else(|| anyhow::anyhow!("bearer token file {} is empty", p.display()));
     }
-    write_new_api_token(home)
+    write_new_bearer_token(home)
 }
 
 /// Generate a fresh bearer token and atomically replace the on-disk file.
 /// Returns the new token. After this call, every existing remote IPC
 /// client must re-authenticate with the new token; the daemon must be
 /// restarted (or the in-memory token hot-swapped) for it to take effect.
-pub fn rotate_api_token(home: &Path) -> Result<String> {
-    write_new_api_token(home)
+pub fn rotate_bearer_token(home: &Path) -> Result<SecretString> {
+    write_new_bearer_token(home)
 }
 
-fn write_new_api_token(home: &Path) -> Result<String> {
+fn write_new_bearer_token(home: &Path) -> Result<SecretString> {
     use rand::RngCore;
-    let mut bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
-    let token = hex::encode(bytes);
+    // Wrap the random bytes in `Zeroizing` so the stack array is wiped
+    // when this function returns — same hygiene as `Keypair::generate`.
+    // The hex-encoded `String` is moved into the returned
+    // `SecretString`, which carries ZeroizeOnDrop forward.
+    let mut bytes = Zeroizing::new([0u8; 32]);
+    rand::rngs::OsRng.fill_bytes(&mut *bytes);
+    // Borrow (via `as_slice`) — copying with `*bytes` would leave a
+    // 32-byte unzeroed copy on `hex::encode`'s stack frame.
+    let token = hex::encode(bytes.as_slice());
     let dir = identity_dir(home);
     fs::create_dir_all(&dir)?;
     restrict_dir_permissions(&dir)?;
-    let p = api_token_path(home);
+    let p = bearer_token_path(home);
     write_secret_atomic(&p, token.as_bytes())?;
-    Ok(token)
+    Ok(SecretString::new(token))
 }
 
 pub fn load(home: &Path) -> Result<Keypair> {
@@ -90,8 +99,7 @@ pub fn load(home: &Path) -> Result<Keypair> {
 #[cfg(unix)]
 fn enforce_secret_mode(p: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let meta = fs::metadata(p)
-        .with_context(|| format!("stat identity secret {}", p.display()))?;
+    let meta = fs::metadata(p).with_context(|| format!("stat identity secret {}", p.display()))?;
     let mode = meta.permissions().mode() & 0o777;
     if mode & 0o077 != 0 {
         anyhow::bail!(

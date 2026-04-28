@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod audit;
+pub mod bearer;
 pub mod brief;
 pub mod broadcast;
 pub mod capability;
@@ -13,7 +14,6 @@ pub mod peer;
 pub mod permission;
 pub mod presence;
 pub mod status;
-pub mod token;
 pub mod workspace;
 
 use clap::ValueEnum;

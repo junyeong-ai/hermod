@@ -106,7 +106,7 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|a| a.parse::<hermod_core::AgentAlias>().ok());
     services::ensure_self_agent(&*db, &identity, self_alias).await?;
 
-    let api_token = std::sync::Arc::<str>::from(hermod_daemon::identity::ensure_api_token(&home)?);
+    let bearer_token = std::sync::Arc::new(hermod_daemon::identity::ensure_bearer_token(&home)?);
     let audit_file_path = config
         .audit
         .file_path
@@ -118,7 +118,7 @@ async fn main() -> anyhow::Result<()> {
         signer,
         identity,
         tls,
-        api_token,
+        bearer_token,
         audit_file_path,
         home,
         config,

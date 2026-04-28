@@ -44,8 +44,7 @@ pub fn build_audit_sink(
 ) -> Result<AuditSinkBundle> {
     let remote = build_remote_sink(audit_cfg);
 
-    let storage_sink: Arc<dyn AuditSink> =
-        Arc::new(hermod_storage::StorageAuditSink::new(db));
+    let storage_sink: Arc<dyn AuditSink> = Arc::new(hermod_storage::StorageAuditSink::new(db));
     let mut sinks: Vec<Arc<dyn AuditSink>> = vec![storage_sink];
     if let Some(path) = audit_file_path {
         info!(path = %path.display(), "audit file mirror enabled");

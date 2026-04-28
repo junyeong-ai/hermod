@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+mod bearer;
 mod client;
 mod commands;
 mod error;
@@ -21,15 +22,30 @@ struct Cli {
 
     /// Connect to a remote daemon via WSS+Bearer instead of the local Unix
     /// socket. Example: `--remote wss://my-daemon.example.com:7824/`.
-    /// The token must be supplied via `--token-file` or `HERMOD_API_TOKEN`.
+    /// One of `--bearer-file`, `--bearer-command`, or
+    /// `HERMOD_BEARER_TOKEN` supplies the bearer; with none of those
+    /// set the CLI falls back to `$HERMOD_HOME/identity/bearer_token`.
     #[arg(long, env = "HERMOD_REMOTE")]
     remote: Option<String>,
 
-    /// File containing the API bearer token for remote IPC. Defaults to
-    /// `$HERMOD_HOME/identity/api_token` if `--remote` is set without a
-    /// token. Plain-text contents — surrounding whitespace is trimmed.
-    #[arg(long, env = "HERMOD_TOKEN_FILE")]
-    token_file: Option<PathBuf>,
+    /// File containing the bearer token for remote IPC. Plain-text
+    /// contents; surrounding whitespace is trimmed. Re-read on each
+    /// connect with a 30 s cache, so a `hermod bearer rotate` (or any
+    /// external tool that updates the file) is picked up by the next
+    /// connect without restarting the CLI.
+    #[arg(long, env = "HERMOD_BEARER_FILE", requires = "remote")]
+    bearer_file: Option<PathBuf>,
+
+    /// Shell command that prints the bearer token to stdout. Invoked
+    /// at connect time and re-invoked exactly once if the daemon
+    /// rejects the token with HTTP 401 (e.g. expired OIDC ID token
+    /// behind Google Cloud IAP). The command's trimmed stdout is sent
+    /// verbatim as the `Authorization: Bearer <stdout>` value. Mutually
+    /// exclusive with `--bearer-file` and `HERMOD_BEARER_TOKEN`.
+    ///
+    /// Example: `--bearer-command "gcloud auth print-identity-token --audiences=$IAP_CLIENT_ID"`
+    #[arg(long, env = "HERMOD_BEARER_COMMAND", requires = "remote")]
+    bearer_command: Option<String>,
 
     /// SHA-256 fingerprint of the remote daemon's TLS cert (any case;
     /// colons optional). When set, the connection fails loud if the
@@ -107,7 +123,7 @@ enum Command {
 
     /// Remote IPC bearer token (show / rotate).
     #[command(subcommand)]
-    Token(TokenCmd),
+    Bearer(BearerCmd),
 
     /// Query and verify the audit log.
     #[command(subcommand)]
@@ -275,9 +291,9 @@ enum CapabilityCmd {
 }
 
 #[derive(Subcommand, Debug)]
-enum TokenCmd {
+enum BearerCmd {
     /// Show the Remote IPC bearer token (masked by default).
-    Show(commands::token::ShowArgs),
+    Show(commands::bearer::ShowArgs),
     /// Generate a fresh bearer token. Restart the daemon to apply.
     Rotate,
 }
@@ -365,9 +381,9 @@ async fn main() -> anyhow::Result<()> {
             CapabilityCmd::Revoke(a) => commands::capability::revoke(a, &target).await,
             CapabilityCmd::List(a) => commands::capability::list(a, &target).await,
         },
-        Command::Token(sub) => match sub {
-            TokenCmd::Show(a) => commands::token::show(a, &home).await,
-            TokenCmd::Rotate => commands::token::rotate(&home).await,
+        Command::Bearer(sub) => match sub {
+            BearerCmd::Show(a) => commands::bearer::show(a, &home).await,
+            BearerCmd::Rotate => commands::bearer::rotate(&home).await,
         },
         Command::Audit(sub) => match sub {
             AuditCmd::Query(a) => commands::audit::query(a, &target).await,
@@ -414,14 +430,25 @@ fn build_target(
     home: &std::path::Path,
     socket: &Option<PathBuf>,
 ) -> anyhow::Result<client::ClientTarget> {
-    if let Some(url) = &cli.remote {
-        let token = read_api_token(cli, home)?;
-        let pin = build_pin_policy(cli, url, home)?;
-        Ok(client::ClientTarget::Remote {
-            url: url.clone(),
-            token,
-            pin,
-        })
+    if let Some(raw_url) = &cli.remote {
+        let url = url::Url::parse(raw_url)
+            .map_err(|e| anyhow::anyhow!("invalid --remote URL {raw_url:?}: {e}"))?;
+        let pin = build_pin_policy(cli, &url, home)?;
+        let bearer_args = bearer::BearerArgs {
+            bearer_file: cli.bearer_file.clone(),
+            bearer_command: cli.bearer_command.clone(),
+        };
+        // `secret_from_env` wraps the raw env String in `Zeroizing` so
+        // its heap buffer is wiped when the helper returns; the secret
+        // never lives in unzeroed memory beyond the returned
+        // SecretString. (Process env-table cleanup is unnecessary
+        // here: HERMOD_BEARER_TOKEN and --bearer-command are mutually
+        // exclusive at the factory, so the secret never inherits to a
+        // subprocess we spawn.)
+        let env_token = hermod_crypto::secret::secret_from_env("HERMOD_BEARER_TOKEN");
+        let default_path = Some(hermod_daemon::identity::bearer_token_path(home));
+        let provider = bearer::from_env_and_args(&bearer_args, env_token, default_path)?;
+        Ok(client::ClientTarget::Remote { url, provider, pin })
     } else {
         Ok(client::ClientTarget::Local(socket_or_default(
             home,
@@ -432,7 +459,7 @@ fn build_target(
 
 fn build_pin_policy(
     cli: &Cli,
-    url: &str,
+    url: &url::Url,
     home: &std::path::Path,
 ) -> anyhow::Result<pins::PinPolicy> {
     if cli.insecure_no_pin && cli.pin.is_some() {
@@ -447,11 +474,10 @@ fn build_pin_policy(
         let normalized = pins::PinPolicy::normalize_fingerprint(raw)?;
         return Ok(pins::PinPolicy::Explicit(normalized));
     }
-    let parsed = url::Url::parse(url)?;
-    let host = parsed
+    let host = url
         .host_str()
         .ok_or_else(|| anyhow::anyhow!("--remote URL missing host"))?;
-    let port = parsed
+    let port = url
         .port_or_known_default()
         .ok_or_else(|| anyhow::anyhow!("--remote URL missing port"))?;
     let host_port = format!("{host}:{port}");
@@ -459,17 +485,4 @@ fn build_pin_policy(
         store: pins::RemotePinStore::at_home(home),
         host_port,
     })
-}
-
-fn read_api_token(cli: &Cli, home: &std::path::Path) -> anyhow::Result<String> {
-    if let Ok(t) = std::env::var("HERMOD_API_TOKEN") {
-        return Ok(t.trim().to_string());
-    }
-    let path = cli
-        .token_file
-        .clone()
-        .unwrap_or_else(|| hermod_daemon::identity::api_token_path(home));
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|e| anyhow::anyhow!("remote IPC token not readable at {}: {e}", path.display()))?;
-    Ok(raw.trim().to_string())
 }

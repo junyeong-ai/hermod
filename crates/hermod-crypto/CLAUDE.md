@@ -51,6 +51,10 @@ Secret types implement `ZeroizeOnDrop`:
   workspace level)
 - `WorkspaceSecret`, `WorkspaceMacKey`, `ChannelMacKey`
   (`#[derive(Zeroize, ZeroizeOnDrop)]`)
+- `SecretString` — heap-allocated text-shaped secret (IPC bearer,
+  audit-webhook bearer, command-minted OIDC tokens). `Display` is
+  intentionally not implemented and `PartialEq` is not derived;
+  comparison goes through `expose_secret()` + `constant_time_eq`.
 
 Adding a new secret-bearing type ⇒ derive both. No exceptions.
 

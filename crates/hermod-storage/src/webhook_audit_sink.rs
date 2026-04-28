@@ -37,6 +37,7 @@
 //! of truth regardless of webhook health.
 
 use async_trait::async_trait;
+use hermod_crypto::SecretString;
 use reqwest::Client;
 use std::sync::Arc;
 use std::time::Duration;
@@ -95,7 +96,7 @@ impl std::fmt::Debug for WebhookAuditSink {
 #[derive(Debug, Clone)]
 pub struct WebhookAuditSinkConfig {
     pub url: String,
-    pub bearer_token: Option<String>,
+    pub bearer_token: Option<SecretString>,
     pub queue_capacity: usize,
     pub timeout: Duration,
 }
@@ -110,8 +111,8 @@ impl WebhookAuditSinkConfig {
         }
     }
 
-    pub fn bearer_token(mut self, token: impl Into<String>) -> Self {
-        self.bearer_token = Some(token.into());
+    pub fn bearer_token(mut self, token: SecretString) -> Self {
+        self.bearer_token = Some(token);
         self
     }
 }
@@ -130,7 +131,7 @@ impl WebhookAuditSink {
 
         let (tx, rx) = mpsc::channel(config.queue_capacity);
         let url: Arc<str> = config.url.into();
-        let bearer = config.bearer_token.map(Arc::<str>::from);
+        let bearer: Option<Arc<SecretString>> = config.bearer_token.map(Arc::new);
         let worker_url = url.clone();
         let worker_bearer = bearer.clone();
         info!(url = %url, capacity = config.queue_capacity, "audit webhook sink spawned");
@@ -171,7 +172,7 @@ impl AuditSink for WebhookAuditSink {
 async fn worker_loop(
     client: Client,
     url: Arc<str>,
-    bearer: Option<Arc<str>>,
+    bearer: Option<Arc<SecretString>>,
     mut rx: mpsc::Receiver<AuditEntry>,
 ) {
     while let Some(entry) = rx.recv().await {
@@ -180,7 +181,7 @@ async fn worker_loop(
     debug!(url = %url, "audit webhook worker exited (channel closed)");
 }
 
-async fn post_one(client: &Client, url: &str, bearer: Option<&str>, entry: &AuditEntry) {
+async fn post_one(client: &Client, url: &str, bearer: Option<&SecretString>, entry: &AuditEntry) {
     let body = WebhookBody {
         ts: entry.ts.to_string(),
         ts_ms: entry.ts.unix_ms(),
@@ -191,7 +192,7 @@ async fn post_one(client: &Client, url: &str, bearer: Option<&str>, entry: &Audi
     };
     let mut req = client.post(url).json(&body);
     if let Some(tok) = bearer {
-        req = req.bearer_auth(tok);
+        req = req.bearer_auth(tok.expose_secret());
     }
     match req.send().await {
         Ok(resp) => {
@@ -230,8 +231,8 @@ mod tests {
     use super::*;
     use hermod_core::{AgentId, Timestamp};
     use std::str::FromStr;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpListener;
 
@@ -371,7 +372,7 @@ mod tests {
         });
 
         let sink = WebhookAuditSink::spawn(
-            WebhookAuditSinkConfig::new(url).bearer_token("secret-tok"),
+            WebhookAuditSinkConfig::new(url).bearer_token(SecretString::new("secret-tok")),
         )
         .unwrap();
         sink.record(entry("auth.test")).await;
@@ -438,9 +439,7 @@ mod tests {
             let mut buf = vec![0u8; content_length];
             let _ = br.read_exact(&mut buf).await;
             let _ = sock
-                .write_all(
-                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 4\r\n\r\nbusy",
-                )
+                .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 4\r\n\r\nbusy")
                 .await;
             let _ = sock.shutdown().await;
         });

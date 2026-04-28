@@ -12,6 +12,17 @@ description  = "Hermod operator CLI (`hermod`) — includes the MCP server that 
 name = "hermod"
 path = "src/main.rs"
 
+[features]
+default  = []
+# Pass-through features so a single workspace build (`cargo build
+# -p hermod-daemon -p hermod-cli --features postgres,gcs`) flips on
+# the same storage backends across both binaries — guarantees a
+# single shared `hermod-storage` compile under cargo's unified
+# resolver instead of two parallel ones.
+postgres = ["hermod-daemon/postgres"]
+gcs      = ["hermod-daemon/gcs"]
+s3       = ["hermod-daemon/s3"]
+
 [dependencies]
 hermod-core      = { workspace = true }
 hermod-crypto    = { workspace = true }
@@ -37,6 +48,8 @@ rustls             = { workspace = true }
 rustls-pki-types   = { workspace = true }
 url                = { workspace = true }
 sha2               = { workspace = true }
+thiserror          = { workspace = true }
+zeroize            = { workspace = true }
 
 [dev-dependencies]
 tempfile           = { workspace = true }
