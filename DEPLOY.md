@@ -165,7 +165,9 @@ hermod status
 
 If the daemon's bearer rotates while the CLI is running, the next
 connect 401s on the cached token, the file is re-read, and the retry
-succeeds — no restart needed.
+succeeds — no restart needed. The same shape works for short-lived
+OIDC tokens via `--bearer-command` (see the SSO-proxy subsection
+below).
 
 `hermod doctor` works against a remote target too — it switches the
 "daemon reachable on Unix socket" check to "remote daemon reachable
@@ -199,6 +201,77 @@ If you'd rather use a publicly trusted cert (browser compatibility,
 middlebox-friendliness), terminate TLS at a reverse proxy (caddy,
 nginx, traefik) and proxy plain WS to `hermodd` listening on
 `127.0.0.1:7824` — the bearer token still authenticates each request.
+
+### Behind an SSO reverse proxy (IAP / oauth2-proxy / Cloudflare Access)
+
+Corporate / zero-trust deployments commonly front the broker with an
+SSO reverse proxy that demands its own OIDC bearer alongside the
+daemon's. The two credentials live in two distinct headers per
+[RFC 7235 §4.4](https://www.rfc-editor.org/rfc/rfc7235.html#section-4.4):
+
+| Header | Audience | Source |
+| --- | --- | --- |
+| `Authorization: Bearer <X>` | hermod daemon (`ipc_remote::serve`) | `--bearer-{file,command}` / `HERMOD_BEARER_TOKEN` |
+| `Proxy-Authorization: Bearer <Y>` | SSO proxy (IAP / oauth2-proxy / …) | `--proxy-bearer-{file,command}` / `HERMOD_PROXY_BEARER_TOKEN` |
+
+Real reverse proxies strip `Proxy-Authorization` before forwarding,
+so the daemon never sees it; the daemon's check on `Authorization`
+is unchanged.
+
+#### Google Cloud IAP (Cloud Run / GCE backend)
+
+```sh
+# Daemon-layer bearer is the long-lived one operators rotate; proxy
+# layer is the short-lived OIDC ID token gcloud mints on demand.
+hermod --remote wss://hermod.your-domain/ \
+       --bearer-file       ~/.hermod/remote_bearer \
+       --proxy-bearer-command \
+         "gcloud auth print-identity-token --audiences=$IAP_CLIENT_ID" \
+       status
+```
+
+`gcloud auth print-identity-token` typically returns a token valid for
+~1 hour; on expiry IAP responds with HTTP 401, and the CLI re-runs the
+command exactly once (single-flight, dedup'd across concurrent
+connects) before retrying.
+
+#### oauth2-proxy + ingress-nginx
+
+```sh
+# When the proxy validates a separate OIDC token but preserves the
+# upstream Authorization header (ingress-nginx
+# auth-response-headers: Authorization configuration), the same shape
+# applies — only the proxy-token mint command differs.
+hermod --remote wss://hermod.your-domain/ \
+       --bearer-file ~/.hermod/remote_bearer \
+       --proxy-bearer-command "your-oidc-mint-script" \
+       status
+```
+
+#### Container / Kubernetes
+
+The bearer-family flags have matching env-var aliases, suitable for
+`Deployment` / `CronJob` specs:
+
+```yaml
+env:
+  - name: HERMOD_REMOTE
+    value: "wss://hermod.your-domain/"
+  - name: HERMOD_BEARER_FILE
+    value: "/etc/hermod/bearer"          # mounted from a Secret
+  - name: HERMOD_PROXY_BEARER_COMMAND
+    value: "gcloud auth print-identity-token --audiences=$(IAP_CLIENT_ID)"
+```
+
+The two families are independently mutually-exclusive: at most one of
+`--bearer-file` / `--bearer-command` / `HERMOD_BEARER_TOKEN`, and at
+most one of `--proxy-bearer-file` / `--proxy-bearer-command` /
+`HERMOD_PROXY_BEARER_TOKEN`.
+
+If only the daemon family is set the CLI sends only `Authorization`
+(non-SSO deployments). If neither family is set, the CLI falls back
+to `$HERMOD_HOME/identity/bearer_token` for `Authorization` and
+sends no `Proxy-Authorization` — the on-host "just works" shape.
 
 ## 4. Docker / Compose
 
