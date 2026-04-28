@@ -7,13 +7,15 @@ over the same daemon, not duplicates.
 ## Module layout
 
 ```
-client.rs            local Unix-socket IPC client + remote dispatch
-remote.rs            WSS+Bearer remote-IPC client (TLS pin policy + 401-retry)
+client.rs            local Unix-socket IPC client + remote dispatch + RemoteAuth { daemon, proxy }
+remote.rs            WSS+Bearer remote-IPC client (TLS pin policy + dual-header + 401/407 retry)
 bearer/              BearerProvider trait + 3 implementations
-  mod.rs             trait, BearerToken, TokenEpoch, BearerError, from_env_and_args factory
-  static_provider.rs HERMOD_BEARER_TOKEN-backed provider (no refresh)
-  file.rs            --bearer-file / default $HERMOD_HOME/identity/bearer_token (cold-path read; refresh() re-reads on 401)
-  command.rs         --bearer-command (sh -c, 30s timeout, kill_on_drop, single-flight refresh)
+  mod.rs             trait, BearerToken, TokenEpoch, BearerError, BearerArgs,
+                     daemon_from_env_and_args (required) / proxy_from_env_and_args (optional) factories
+  static_provider.rs HERMOD_BEARER_TOKEN / HERMOD_PROXY_BEARER_TOKEN-backed provider (no refresh)
+  file.rs            --bearer-file / --proxy-bearer-file / default $HERMOD_HOME/identity/bearer_token
+                     (cold-path read; refresh() re-reads on auth failure)
+  command.rs         --bearer-command / --proxy-bearer-command (sh -c, 30s timeout, kill_on_drop, single-flight refresh)
 main.rs              clap CLI dispatch
 commands/            one file per `hermod <subcommand>` (peer, capability, brief, bearer, …)
 mcp/                 MCP server (hand-rolled JSON-RPC over stdio)
@@ -27,23 +29,48 @@ mcp/                 MCP server (hand-rolled JSON-RPC over stdio)
 
 ## BearerProvider abstraction
 
-Every `--remote wss://…` connect goes through a `BearerProvider`. Two
-methods, no boolean flags:
+Every `--remote wss://…` connect goes through one or two
+`BearerProvider`s — one for the daemon-layer `Authorization` header,
+optionally another for the proxy-layer `Proxy-Authorization` header
+when the broker sits behind an SSO reverse proxy (Google Cloud IAP,
+oauth2-proxy, Cloudflare Access, ALB+Cognito). Both sides share the
+same trait; what differs is the factory and the connect path's
+refresh policy.
+
+Trait — two methods, no boolean flags:
 
 - `current()` — return the cached token, minting once on the cold
   path.
 - `refresh(stale: TokenEpoch)` — single-flight: re-mints only if the
   cached epoch is `<= stale`, otherwise returns the already-advanced
-  cache. The connect path retries exactly once on HTTP 401; if
-  `refresh` returns the same epoch (provider declines, e.g.
+  cache. The connect path retries exactly once on HTTP 401 / 407; if
+  no provider advances its epoch (e.g. all sources are
   `StaticBearerProvider`), the failure escalates to fatal.
 
-Source precedence is enforced once in `bearer::from_env_and_args`:
-exactly one of `--bearer-file`, `--bearer-command`,
-`HERMOD_BEARER_TOKEN` may be set. With none set the implicit fallback
-is `$HERMOD_HOME/identity/bearer_token` via `FileBearerProvider`.
-`File` and `Command` providers cache for the process lifetime — the
-401-trigger is the only refresh signal, no time-based heuristics.
+Two paired factories enforce source precedence — daemon-bearer is
+required, proxy-bearer is optional:
+
+- `bearer::daemon_from_env_and_args(args, env_token, default_path)`
+  — exactly one of `--bearer-file`, `--bearer-command`,
+  `HERMOD_BEARER_TOKEN` may be set. With none set, the implicit
+  fallback is `$HERMOD_HOME/identity/bearer_token` via
+  `FileBearerProvider` (the on-host "just works" path).
+- `bearer::proxy_from_env_and_args(args, env_token)` — exactly one
+  of `--proxy-bearer-file`, `--proxy-bearer-command`,
+  `HERMOD_PROXY_BEARER_TOKEN` may be set. Returns `Ok(None)` when
+  zero sources are configured (no SSO proxy fronting the broker).
+
+Connect path refresh policy (`remote::connect_remote_with_refresh`):
+
+- HTTP 407 (Proxy-Authentication-Required) → refresh proxy provider
+  only, retry once.
+- HTTP 401 (Unauthorized) → wire-ambiguous about which layer
+  rejected, so refresh both providers concurrently and retry once.
+- Two consecutive auth failures → fatal.
+
+`File` and `Command` providers cache for the process lifetime —
+the 401/407-trigger is the only refresh signal, no time-based
+heuristics.
 
 ## MCP surface contract
 
