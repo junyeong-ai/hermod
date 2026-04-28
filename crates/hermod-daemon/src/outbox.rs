@@ -18,7 +18,7 @@ use hermod_core::{Endpoint, Timestamp};
 use hermod_protocol::envelope::deserialize_envelope;
 use hermod_routing::RemoteDeliverer;
 use hermod_routing::remote::DeliveryOutcome;
-use hermod_storage::{AuditEntry, Database, AuditSink};
+use hermod_storage::{AuditEntry, AuditSink, Database};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -98,8 +98,12 @@ impl std::fmt::Debug for OutboxWorker {
 }
 
 impl OutboxWorker {
-    pub fn new(db: Arc<dyn Database>, audit_sink: Arc<dyn AuditSink>,
-        remote: RemoteDeliverer, notifier: OutboxNotifier) -> Self {
+    pub fn new(
+        db: Arc<dyn Database>,
+        audit_sink: Arc<dyn AuditSink>,
+        remote: RemoteDeliverer,
+        notifier: OutboxNotifier,
+    ) -> Self {
         Self {
             db,
             audit_sink,
@@ -163,7 +167,8 @@ impl OutboxWorker {
         if !transitioned {
             return;
         }
-        crate::services::audit_or_warn(&*self.audit_sink,
+        crate::services::audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),

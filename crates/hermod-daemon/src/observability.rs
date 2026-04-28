@@ -1,14 +1,23 @@
-//! Optional HTTP listener for `/healthz` (liveness probe) and `/metrics`
-//! (Prometheus text format).
+//! Optional HTTP listener for orchestrator probes and Prometheus
+//! scrape:
+//!
+//! * `/healthz` — **liveness**. 200 if the process is running. Has no
+//!   external dependencies on purpose: a transient DB hiccup must
+//!   not trigger a pod restart, only an LB drain.
+//! * `/readyz` — **readiness**. 200 only when the daemon is in a
+//!   serving state (storage reachable). 503 otherwise → orchestrator
+//!   removes the pod from the load-balancer pool until recovery,
+//!   without restarting the process.
+//! * `/metrics` — Prometheus text format.
 //!
 //! The endpoint is intentionally opt-in via `[daemon] metrics_listen`, since
 //! the federation port is the only public-facing one — the metrics surface
 //! is for the operator's own monitoring stack, typically bound to localhost
 //! or a private network interface.
 //!
-//! Hand-rolled HTTP/1.1 instead of pulling in hyper: this is a single-method,
-//! two-route surface and the runtime cost of a dedicated dependency for it
-//! would dwarf the actual code.
+//! Hand-rolled HTTP/1.1 instead of pulling in hyper: this is a
+//! single-method, three-route surface and the runtime cost of a
+//! dedicated dependency for it would dwarf the actual code.
 
 use hermod_core::Timestamp;
 use hermod_storage::{Database, SESSION_TTL_SECS};
@@ -62,10 +71,16 @@ async fn handle(
     let path = parse_request_path(head);
 
     let response = match path {
-        Some("/healthz") => match db.ping().await {
-            Ok(()) => format_response(200, "text/plain; charset=utf-8", "ok\n"),
+        // Liveness — answering this request is the proof. No backend
+        // checks: a stuck DB must drain via /readyz, not crash-loop
+        // via /healthz.
+        Some("/healthz") => format_response(200, "text/plain; charset=utf-8", "alive\n"),
+        // Readiness — gated on storage reachability. Cheap, no
+        // side effects (a SELECT 1).
+        Some("/readyz") => match db.ping().await {
+            Ok(()) => format_response(200, "text/plain; charset=utf-8", "ready\n"),
             Err(reason) => {
-                let body = format!("unhealthy: {reason}\n");
+                let body = format!("not ready: {reason}\n");
                 format_response(503, "text/plain; charset=utf-8", &body)
             }
         },

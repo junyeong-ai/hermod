@@ -7,7 +7,7 @@ service layer, outbox worker, janitor, and observability endpoint.
 
 ```
 bootstrap/         construction-phase helpers (audit_sink, …)
-config.rs          [identity|daemon|storage|federation|policy|audit|broker]
+config.rs          [identity|daemon|storage|blob|federation|policy|audit|broker]
 dispatcher.rs      RPC method → service-call routing
 federation.rs      WSS+Noise inbound accept loop (Semaphore, per-IP rate limit)
 identity.rs        on-disk seed/cert layout, mode-0600 startup enforce
@@ -15,7 +15,7 @@ inbound/           per-MessageKind acceptors (one impl block per file)
 ipc_remote.rs      WSS+Bearer remote-IPC server
 janitor.rs         periodic sweep (briefs, confirms, sessions, audit archive)
 main.rs            entry: load identity → ensure TLS → connect storage → server::serve
-observability.rs   /healthz + /metrics (Prometheus text, hand-rolled HTTP/1.1)
+observability.rs   /healthz (liveness) + /readyz (readiness) + /metrics (Prometheus, hand-rolled HTTP/1.1)
 outbox.rs          retry queue with claim_token + claimed_at backoff
 paths.rs           HOME / config / blob root resolution
 server.rs          serve() — orchestrates audit sink → transport → services → workers

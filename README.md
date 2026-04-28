@@ -27,7 +27,7 @@ Named for the Norse messenger of the gods.
 - **Composable transports + sinks.** SQLite default + PostgreSQL backend,
   pluggable BlobStore, and audit sinks (file / webhook / peer aggregator) all
   layer through trait objects — pick what fits your deployment.
-- **Operator-grade ops.** Prometheus `/metrics`, `/healthz`, `hermod doctor`
+- **Operator-grade ops.** Prometheus `/metrics`, `/healthz` + `/readyz` probes, `hermod doctor`
   diagnostics, TLS hot-rotate via SIGHUP, identity-seed backup procedure.
 
 ---
@@ -121,9 +121,10 @@ hermod workspace invite @bob
 
 ### Cloud / Kubernetes
 Use the included [`Dockerfile`](./Dockerfile), bind
-`[daemon] metrics_listen` to expose `/healthz` + Prometheus
-`/metrics`, and select the PostgreSQL backend with
-`--features postgres`. See [`DEPLOY.md §5`](./DEPLOY.md).
+`[daemon] metrics_listen` to expose `/healthz` (liveness),
+`/readyz` (readiness), and Prometheus `/metrics`, and select
+the PostgreSQL backend with `--features postgres`. See
+[`DEPLOY.md §5`](./DEPLOY.md).
 
 ### Broker host (Matrix-homeserver pattern)
 Forward envelopes addressed to other peers; with

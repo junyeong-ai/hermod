@@ -60,11 +60,7 @@ pub async fn serve(
     let crate::bootstrap::audit_sink::AuditSinkBundle {
         sink: audit_sink,
         remote: remote_audit_sink,
-    } = crate::bootstrap::audit_sink::build_audit_sink(
-        db.clone(),
-        audit_file_path,
-        &config.audit,
-    )?;
+    } = crate::bootstrap::audit_sink::build_audit_sink(db.clone(), audit_file_path, &config.audit)?;
 
     // Parse `[federation] upstream_broker` once. A malformed value
     // is fatal — the operator should know immediately rather than
@@ -72,8 +68,7 @@ pub async fn serve(
     // itself.
     let upstream_broker = match config.federation.upstream_broker.as_deref() {
         Some(raw) if !raw.trim().is_empty() => Some(
-            UpstreamBroker::from_descriptor(raw.trim())
-                .context("[federation] upstream_broker")?,
+            UpstreamBroker::from_descriptor(raw.trim()).context("[federation] upstream_broker")?,
         ),
         _ => None,
     };
@@ -81,15 +76,9 @@ pub async fn serve(
         // Persist the broker as a directory entry so federation auth
         // (TOFU + TLS pin + Noise pubkey check) lights up on first
         // dial — same path `peer add` and the static seeder use.
-        crate::federation::record_peer(
-            db.as_ref(),
-            ub.endpoint.clone(),
-            ub.pubkey,
-            None,
-            None,
-        )
-        .await
-        .context("[federation] upstream_broker registration")?;
+        crate::federation::record_peer(db.as_ref(), ub.endpoint.clone(), ub.pubkey, None, None)
+            .await
+            .context("[federation] upstream_broker registration")?;
         info!(
             endpoint = %hermod_core::Endpoint::Wss(ub.endpoint.clone()),
             "[federation] upstream_broker registered"
@@ -153,8 +142,7 @@ pub async fn serve(
     // composition. Discovered peers flow through the same `record_peer`
     // path as operator-issued `peer add`, so TOFU + TLS pinning still
     // apply downstream.
-    let discoverer: Option<Arc<dyn hermod_discovery::Discoverer>> = if config.federation.enabled
-    {
+    let discoverer: Option<Arc<dyn hermod_discovery::Discoverer>> = if config.federation.enabled {
         // Trait imported in scope so `s.name()` resolves on every backend
         // type, not just on the trait object.
         use hermod_discovery::Discoverer as _;
@@ -343,14 +331,8 @@ pub async fn serve(
                         continue;
                     };
                     let peer_asserted = peer.alias.clone();
-                    match crate::federation::record_peer(
-                        db,
-                        endpoint,
-                        pubkey,
-                        peer_asserted,
-                        None,
-                    )
-                    .await
+                    match crate::federation::record_peer(db, endpoint, pubkey, peer_asserted, None)
+                        .await
                     {
                         Ok(_) => {}
                         Err(e) => {
@@ -397,7 +379,7 @@ pub async fn serve(
 
     let (janitor_shutdown_tx, janitor_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-    // Optional plaintext HTTP listener for /healthz + /metrics. Bound only
+    // Optional plaintext HTTP listener for /healthz + /readyz + /metrics. Bound only
     // when an operator opts in via [daemon] metrics_listen — never on by
     // default since the daemon's only public-facing port is the federation
     // listener.
@@ -461,16 +443,31 @@ pub async fn serve(
         ),
     ));
 
-    let presence = PresenceService::new(db.clone(), audit_sink.clone(), self_id.clone(), messages.clone());
+    let presence = PresenceService::new(
+        db.clone(),
+        audit_sink.clone(),
+        self_id.clone(),
+        messages.clone(),
+    );
     let capabilities = CapabilityService::new(db.clone(), audit_sink.clone(), signer.clone());
     capabilities.set_message_service(messages.clone());
     let dispatcher = Dispatcher {
         status: StatusService::new(db.clone(), key_ref, started),
         messages: messages.clone(),
         agents: AgentService::new(db.clone(), audit_sink.clone(), presence.clone()),
-        briefs: BriefService::new(db.clone(), audit_sink.clone(), self_id.clone(), messages.clone()),
+        briefs: BriefService::new(
+            db.clone(),
+            audit_sink.clone(),
+            self_id.clone(),
+            messages.clone(),
+        ),
         presence: presence.clone(),
-        mcp: McpService::new(db.clone(), audit_sink.clone(), self_id.clone(), presence.clone()),
+        mcp: McpService::new(
+            db.clone(),
+            audit_sink.clone(),
+            self_id.clone(),
+            presence.clone(),
+        ),
         workspaces: WorkspaceService::new(
             db.clone(),
             audit_sink.clone(),
@@ -479,10 +476,31 @@ pub async fn serve(
             messages.clone(),
         ),
         workspace_observability: observability,
-        channels: ChannelService::new(db.clone(), audit_sink.clone(), self_id.clone(), messages.clone()),
-        broadcasts: BroadcastService::new(db.clone(), audit_sink.clone(), self_id.clone(), messages),
-        confirmations: ConfirmationService::new(db.clone(), audit_sink.clone(), self_id.clone(), inbound.clone()),
-        peers: PeerService::new(db.clone(), audit_sink.clone(), self_id.clone(), presence.clone(), remote.pool()),
+        channels: ChannelService::new(
+            db.clone(),
+            audit_sink.clone(),
+            self_id.clone(),
+            messages.clone(),
+        ),
+        broadcasts: BroadcastService::new(
+            db.clone(),
+            audit_sink.clone(),
+            self_id.clone(),
+            messages,
+        ),
+        confirmations: ConfirmationService::new(
+            db.clone(),
+            audit_sink.clone(),
+            self_id.clone(),
+            inbound.clone(),
+        ),
+        peers: PeerService::new(
+            db.clone(),
+            audit_sink.clone(),
+            self_id.clone(),
+            presence.clone(),
+            remote.pool(),
+        ),
         permissions,
         audit: AuditService::new(db.clone(), config.policy.audit_retention_secs),
         capabilities,
@@ -506,9 +524,13 @@ pub async fn serve(
         audit_retention: (config.policy.audit_retention_secs > 0)
             .then(|| std::time::Duration::from_secs(config.policy.audit_retention_secs)),
     };
-    let janitor =
-        crate::janitor::JanitorWorker::new(db.clone(), audit_sink.clone(), self_id.clone(), janitor_config)
-            .with_presence(presence.clone());
+    let janitor = crate::janitor::JanitorWorker::new(
+        db.clone(),
+        audit_sink.clone(),
+        self_id.clone(),
+        janitor_config,
+    )
+    .with_presence(presence.clone());
     tokio::spawn(async move {
         janitor.run(janitor_shutdown_rx).await;
     });
@@ -571,6 +593,7 @@ pub async fn serve(
         pool_shutdown_tx,
         remote,
         db,
+        config.daemon.shutdown_grace_secs,
     )
     .await;
     Ok(())
@@ -586,8 +609,9 @@ pub async fn serve(
 ///      that can be retried after restart.
 ///   5. Close the storage backend (SQLite WAL flush, etc.).
 ///
-/// Steps 3-5 together are bounded by `SHUTDOWN_GRACE_SECS` so a stuck
-/// worker can't block the daemon from exiting forever.
+/// Steps 3-5 together are bounded by `grace_secs` so a stuck worker
+/// can't block the daemon from exiting forever.
+#[allow(clippy::too_many_arguments)]
 async fn shutdown_sequence(
     listener: UnixIpcListener,
     discoverer: Option<Arc<dyn hermod_discovery::Discoverer>>,
@@ -596,6 +620,7 @@ async fn shutdown_sequence(
     pool_shutdown_tx: tokio::sync::oneshot::Sender<()>,
     remote: hermod_routing::RemoteDeliverer,
     db: Arc<dyn Database>,
+    grace_secs: u64,
 ) {
     drop(listener);
     if let Some(d) = discoverer {
@@ -609,13 +634,11 @@ async fn shutdown_sequence(
         remote.pool().close_all().await;
         db.shutdown().await;
     };
-    let grace = std::time::Duration::from_secs(SHUTDOWN_GRACE_SECS);
+    let grace = std::time::Duration::from_secs(grace_secs);
     if tokio::time::timeout(grace, drain).await.is_err() {
-        tracing::warn!(secs = SHUTDOWN_GRACE_SECS, "shutdown drain timed out");
+        tracing::warn!(secs = grace_secs, "shutdown drain timed out");
     }
 }
-
-const SHUTDOWN_GRACE_SECS: u64 = 30;
 
 async fn handle_connection(
     stream: hermod_transport::UnixIpcStream,
@@ -674,8 +697,8 @@ impl UpstreamBroker {
             hermod_core::Endpoint::Wss(w) => w,
             other => anyhow::bail!("must be wss://, got {other}"),
         };
-        let bytes = hex::decode(pubkey_hex)
-            .with_context(|| format!("pubkey hex {pubkey_hex:?}"))?;
+        let bytes =
+            hex::decode(pubkey_hex).with_context(|| format!("pubkey hex {pubkey_hex:?}"))?;
         if bytes.len() != hermod_core::PubkeyBytes::LEN {
             anyhow::bail!(
                 "pubkey must be {} bytes, got {}",

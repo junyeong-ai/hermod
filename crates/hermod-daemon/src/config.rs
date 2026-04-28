@@ -220,11 +220,22 @@ pub struct DaemonConfig {
     /// the daemon's TLS material. None disables the listener.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ipc_listen_wss: Option<String>,
-    /// Optional plaintext HTTP bind for `/healthz` (liveness) and `/metrics`
-    /// (Prometheus). Bind to `127.0.0.1:9690` for sidecar use, or to a private
-    /// interface for cluster scrape. None disables the listener entirely.
+    /// Optional plaintext HTTP bind for `/healthz` (liveness),
+    /// `/readyz` (readiness), and `/metrics` (Prometheus). Bind to
+    /// `127.0.0.1:9690` for sidecar use, or to a private interface
+    /// for cluster scrape. None disables the listener entirely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics_listen: Option<String>,
+    /// Grace budget for the SIGTERM ordered drain (listener stop →
+    /// discovery deregister → outbox / janitor / pool flush → DB
+    /// shutdown). Cloud Run / Kubernetes default
+    /// `terminationGracePeriodSeconds` is 30s; the default 25s here
+    /// leaves a 5s margin for the runtime to log + exit. Operators
+    /// who raise their platform's grace (slow audit federation drain)
+    /// raise this match, and operators who lower it (fast pod
+    /// recycle) lower this too.
+    #[serde(default = "defaults::shutdown_grace")]
+    pub shutdown_grace_secs: u64,
 }
 
 impl Default for DaemonConfig {
@@ -234,6 +245,7 @@ impl Default for DaemonConfig {
             listen_ws: None,
             ipc_listen_wss: None,
             metrics_listen: None,
+            shutdown_grace_secs: defaults::shutdown_grace(),
         }
     }
 }
@@ -365,6 +377,9 @@ mod defaults {
     pub fn audit_retention() -> u64 {
         30 * 24 * 3600
     }
+    pub fn shutdown_grace() -> u64 {
+        25
+    }
 }
 
 impl Config {
@@ -430,6 +445,19 @@ impl Config {
         if self.policy.discovery_retention_secs == 0 {
             anyhow::bail!("[policy] discovery_retention_secs must be > 0");
         }
+        // Shutdown grace > 0 (zero means "exit immediately, drop
+        // every in-flight envelope") and < 600s (k8s hard ceiling on
+        // `terminationGracePeriodSeconds`; beyond that the kernel
+        // SIGKILLs us anyway and the wait is dead time).
+        if self.daemon.shutdown_grace_secs == 0 {
+            anyhow::bail!("[daemon] shutdown_grace_secs must be > 0");
+        }
+        if self.daemon.shutdown_grace_secs > 600 {
+            anyhow::bail!(
+                "[daemon] shutdown_grace_secs = {} exceeds 600s (k8s terminationGracePeriodSeconds ceiling)",
+                self.daemon.shutdown_grace_secs
+            );
+        }
         Ok(())
     }
 
@@ -449,6 +477,11 @@ impl Config {
         }
         if let Ok(v) = std::env::var("HERMOD_DAEMON_METRICS_LISTEN") {
             self.daemon.metrics_listen = Some(v);
+        }
+        if let Ok(v) = std::env::var("HERMOD_DAEMON_SHUTDOWN_GRACE_SECS") {
+            self.daemon.shutdown_grace_secs = v
+                .parse()
+                .with_context(|| format!("invalid HERMOD_DAEMON_SHUTDOWN_GRACE_SECS = {v:?}"))?;
         }
         if let Ok(v) = std::env::var("HERMOD_STORAGE_DSN") {
             self.storage.dsn = v;

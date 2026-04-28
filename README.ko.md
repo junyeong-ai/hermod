@@ -26,7 +26,7 @@ identity, 또는 팀 전체 — 모두 같은 프로토콜, 모두 서명되고 
 - **컴포저블 transport + sink.** SQLite 기본 + PostgreSQL backend, pluggable
   BlobStore, audit sink (file / webhook / peer aggregator) — 모두 trait object로
   계층화. 배포 환경에 맞게 선택.
-- **운영자 등급 ops.** Prometheus `/metrics`, `/healthz`, `hermod doctor` 자가
+- **운영자 등급 ops.** Prometheus `/metrics`, `/healthz` + `/readyz` probe, `hermod doctor` 자가
   진단, SIGHUP 통한 TLS hot-rotate, identity-seed 백업 절차.
 
 ---
@@ -114,8 +114,9 @@ hermod workspace invite @bob
 
 ### Cloud / Kubernetes
 포함된 [`Dockerfile`](./Dockerfile), `[daemon] metrics_listen` 바인딩으로
-`/healthz` + Prometheus `/metrics` 노출, `--features postgres`로 PostgreSQL
-backend 선택. [`DEPLOY.md §5`](./DEPLOY.md) 참고.
+`/healthz` (liveness), `/readyz` (readiness), Prometheus `/metrics`
+노출, `--features postgres`로 PostgreSQL backend 선택.
+[`DEPLOY.md §5`](./DEPLOY.md) 참고.
 
 ### Broker 호스트 (Matrix homeserver 패턴)
 다른 peer 주소의 envelope을 forward; `[broker] mode = "relay_and_witness"`
