@@ -1,5 +1,5 @@
 use anyhow::Result;
-use hermod_daemon::identity::layout::{IdentityFileKind, LayoutError};
+use hermod_daemon::home_layout::{HomeFileKind, LayoutError, Presence};
 use std::path::Path;
 
 use crate::client::ClientTarget;
@@ -25,22 +25,37 @@ pub async fn run(home: &Path, target: &ClientTarget) -> Result<()> {
         "run `hermod init` to write a default config".into()
     });
 
-    // Identity file/directory mode audit driven by the daemon's
-    // single-source-of-truth `identity::layout::spec`. Adding a new
-    // identity file there automatically adds a row here.
-    for (file, finding) in hermod_daemon::identity::layout::audit(home) {
+    // $HERMOD_HOME mode audit driven by the daemon's single-source-of-truth
+    // `home_layout::spec`. Adding a new file there automatically adds
+    // a row here — boot enforcement, doctor output, and chmod hints
+    // stay in sync via one declarative list.
+    for (file, finding) in hermod_daemon::home_layout::audit(home) {
         match finding {
             Ok(()) => report.pass(&format!("{} ({:o})", file.label, file.required_mode)),
+            Err(LayoutError::Missing { .. }) if file.presence == Presence::Optional => {
+                // Optional files (hermod.db-wal/-shm, archive/,
+                // blob-store/) are absent in normal pre-write states.
+                // Skip silently — first write creates them under the
+                // canonical mode (umask 0o077).
+            }
             Err(LayoutError::Missing { .. }) => match file.kind {
-                IdentityFileKind::Secret | IdentityFileKind::Directory => {
+                HomeFileKind::Secret | HomeFileKind::Directory => {
                     report.fail(file.label, "run `hermod init` to generate it".into())
                 }
-                IdentityFileKind::Public => {
-                    // Public file missing pre-init is normal; daemon
-                    // first-run creates it.
+                HomeFileKind::Public | HomeFileKind::OperatorManaged => {
+                    // Public + operator-managed missing is non-fatal;
+                    // surface as a note for visibility.
+                    report.note(&format!("{} not present", file.label));
                 }
             },
-            Err(e) => report.fail(file.label, e.to_string()),
+            Err(e) => match file.kind {
+                HomeFileKind::Public | HomeFileKind::OperatorManaged => {
+                    report.note(&format!("{} ({})", file.label, e))
+                }
+                HomeFileKind::Secret | HomeFileKind::Directory => {
+                    report.fail(file.label, e.to_string())
+                }
+            },
         }
     }
 

@@ -58,6 +58,7 @@ rustls-pki-types   = { workspace = true }
 strum              = { workspace = true }
 futures            = { workspace = true }
 zeroize            = { workspace = true }
+libc               = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -30,11 +30,15 @@ pub struct LocalFsBlobStore {
 impl LocalFsBlobStore {
     pub fn new(root: PathBuf) -> Result<Self, BlobError> {
         std::fs::create_dir_all(&root)?;
-        // Lock to operator-only access. Best effort on non-Unix.
+        // Lock to operator-only access. Fail loud if the chmod fails —
+        // a wide-open blob root would leak file payloads to other
+        // local users (T6 in `docs/threat-model.md`). Daemon's
+        // `home_layout::enforce` re-checks this at boot for any
+        // pre-existing root that may have been chmod-relaxed.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700));
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
         }
         Ok(Self { root })
     }

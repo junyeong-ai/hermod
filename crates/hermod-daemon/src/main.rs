@@ -18,7 +18,7 @@ mod outbox;
 mod server;
 mod services;
 
-use hermod_daemon::{config::Config, identity, paths};
+use hermod_daemon::{config::Config, home_layout, identity, paths};
 
 use crate::server::serve;
 
@@ -40,6 +40,11 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Process umask FIRST — every subsequent file create defaults to
+    // 0o600, every dir create to 0o700. Mirrors systemd `UMask=0077`.
+    // Must precede `init_tracing` and any other I/O.
+    home_layout::set_secure_umask();
+
     init_tracing();
 
     let cli = Cli::parse();
@@ -56,11 +61,11 @@ async fn main() -> anyhow::Result<()> {
     let storage_dsn = paths::expand_dsn(&config.storage.dsn, &home);
     let blob_dsn = paths::expand_dsn(&config.blob.dsn, &home);
 
-    // Identity layout enforcement — fail loud on dir mode breach
-    // before any secret file is touched. The matching post-init
-    // `layout::enforce` below covers every secret file once
-    // `ensure_tls` / `ensure_bearer_token` have populated them.
-    identity::layout::ensure_dir(&home).context("identity directory")?;
+    // Layout: ensure $HERMOD_HOME and identity/ exist with the
+    // required mode (creates if missing, fail-loud if existing
+    // permissive). The matching post-init `home_layout::enforce`
+    // below covers every secret file once they've been populated.
+    home_layout::ensure_dirs(&home).context("home layout")?;
 
     let identity = identity::load(&home)
         .context("load identity (run `hermod init` first to generate an identity)")?;
@@ -114,11 +119,12 @@ async fn main() -> anyhow::Result<()> {
 
     let bearer_token = std::sync::Arc::new(hermod_daemon::identity::ensure_bearer_token(&home)?);
 
-    // Post-init enforcement: every spec'd secret file now exists with
-    // its canonical mode (the writers in `identity::*` always produce
-    // 0o600 / 0o644). Fail loud if anything was tampered between
-    // creation and now.
-    identity::layout::enforce(&home).context("identity layout")?;
+    // Post-init enforcement: every spec'd secret file across
+    // $HERMOD_HOME (identity, hermod.db*, blob-store/, archive/)
+    // now exists with its canonical mode — umask 0o077 governed all
+    // create()s, atomic writers chmodded explicitly. Fail loud if
+    // anything was tampered between creation and now.
+    home_layout::enforce(&home).context("home layout")?;
 
     let audit_file_path = config
         .audit

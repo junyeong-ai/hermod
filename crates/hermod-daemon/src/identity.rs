@@ -1,10 +1,11 @@
-//! On-disk identity layout and the helpers that read / create the
-//! files inside `$HERMOD_HOME/identity/`.
+//! On-disk identity helpers.
 //!
-//! Mode policy lives in [`layout`] — every file's required mode and
-//! the boot-time enforcement that refuses to start on a breach. The
-//! helpers here trust that the layout has already been ensured (boot
-//! calls [`layout::ensure_dir`] before any of them run).
+//! Mode policy lives in [`crate::home_layout`] — every file's required
+//! mode and the boot-time enforcement that refuses to start on a
+//! breach. The helpers here trust that the layout has already been
+//! ensured (boot calls `home_layout::ensure_dirs` before any of them
+//! run, and `home_layout::set_secure_umask` already moved the process
+//! umask to `0o077` so every new file naturally lands at `0o600`).
 //!
 //! ```text
 //! $HERMOD_HOME/identity/
@@ -14,13 +15,13 @@
 //!   bearer_token     (mode 0600, hex-encoded random bytes — Remote IPC bearer)
 //! ```
 
-pub mod layout;
-
 use anyhow::{Context, Result};
 use hermod_crypto::{Keypair, SecretString, TlsMaterial};
 use std::fs;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
+
+use crate::home_layout;
 
 pub fn identity_dir(home: &Path) -> PathBuf {
     home.join("identity")
@@ -65,7 +66,7 @@ pub fn rotate_bearer_token(home: &Path) -> Result<SecretString> {
 
 fn write_new_bearer_token(home: &Path) -> Result<SecretString> {
     use rand::RngCore;
-    layout::ensure_dir(home)?;
+    home_layout::ensure_dirs(home)?;
     // Wrap the random bytes in `Zeroizing` so the stack array is wiped
     // when this function returns — same hygiene as `Keypair::generate`.
     // The hex-encoded `String` is moved into the returned
@@ -96,7 +97,7 @@ pub fn load(home: &Path) -> Result<Keypair> {
 }
 
 pub fn save(home: &Path, keypair: &Keypair) -> Result<PathBuf> {
-    layout::ensure_dir(home)?;
+    home_layout::ensure_dirs(home)?;
     let path = secret_path(home);
     write_secret_atomic(&path, &keypair.to_secret_seed())?;
     Ok(path)
@@ -114,7 +115,7 @@ pub fn ensure_tls(home: &Path, keypair: &Keypair) -> Result<TlsMaterial> {
         return TlsMaterial::from_pem(cert_pem, key_pem)
             .with_context(|| "decode existing tls material");
     }
-    layout::ensure_dir(home)?;
+    home_layout::ensure_dirs(home)?;
     let material = TlsMaterial::generate(&keypair.agent_id()).context("generate TLS material")?;
     write_public_atomic(&cert_p, material.cert_pem.as_bytes())?;
     write_secret_atomic(&key_p, material.key_pem.as_bytes())?;
@@ -132,11 +133,11 @@ pub fn ensure_exists(home: &Path) -> Result<(Keypair, PathBuf)> {
     }
 }
 
-/// Atomically write `bytes` to `path` with mode 0600 from creation. The
-/// secret never appears on disk in a partially-written or world-readable
-/// state: we open a sibling temp file with the restrictive mode, write
-/// the full payload, fsync, then rename over `path`. A crash before the
-/// rename leaves the original file (or no file) intact.
+/// Atomically write `bytes` to `path` with mode 0600. The secret never
+/// appears on disk in a partially-written or world-readable state: we
+/// open a sibling temp file with the restrictive mode, write the full
+/// payload, fsync, set the final permissions explicitly (overrides any
+/// process umask), then rename over `path`.
 #[cfg(unix)]
 fn write_secret_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     write_atomic_with_mode(path, bytes, 0o600)
@@ -147,10 +148,12 @@ fn write_secret_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     fs::write(path, bytes)
 }
 
-/// Atomically write `bytes` to `path` with mode 0644 from creation —
-/// the public-file equivalent of [`write_secret_atomic`]. Used for
-/// `tls.crt`, which peers fetch and the daemon must guarantee remains
-/// readable + canonical-mode after every regenerate.
+/// Atomically write `bytes` to `path` with mode 0644 — the public-file
+/// equivalent of [`write_secret_atomic`]. Used for `tls.crt`, which
+/// peers fetch and which the daemon must guarantee remains
+/// canonical-mode regardless of the inherited umask (the daemon
+/// installs `umask 0o077`, which would otherwise mask `0o644` →
+/// `0o600`).
 #[cfg(unix)]
 fn write_public_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     write_atomic_with_mode(path, bytes, 0o644)
@@ -164,7 +167,7 @@ fn write_public_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(unix)]
 fn write_atomic_with_mode(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let tmp = parent.join(format!(
@@ -182,6 +185,12 @@ fn write_atomic_with_mode(path: &Path, bytes: &[u8], mode: u32) -> std::io::Resu
     f.write_all(bytes)?;
     f.sync_all()?;
     drop(f);
+
+    // Explicit set_permissions overrides any process umask that may
+    // have masked the OpenOptions::mode at create time. Critical for
+    // public files (`tls.crt` at 0o644) under the daemon's
+    // `umask 0o077`.
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
 
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);

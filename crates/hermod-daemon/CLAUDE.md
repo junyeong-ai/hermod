@@ -10,9 +10,8 @@ bootstrap/         construction-phase helpers (audit_sink, …)
 config.rs          [identity|daemon|storage|blob|federation|policy|audit|broker]
 dispatcher.rs      RPC method → service-call routing
 federation.rs      WSS+Noise inbound accept loop (Semaphore, per-IP rate limit)
-identity/
-  mod.rs           on-disk seed/cert/bearer helpers (load, save, ensure_tls, ensure_bearer_token)
-  layout.rs        single source of truth: spec(), ensure_dir(), enforce(), audit() — boot fail-loud + doctor audit
+home_layout.rs     single source of truth for $HERMOD_HOME mode policy: spec(), set_secure_umask(), prepare_dirs() (init), ensure_dirs() (boot), enforce(), audit() (doctor)
+identity.rs        on-disk seed/cert/bearer helpers (load, save, ensure_tls, ensure_bearer_token)
 inbound/           per-MessageKind acceptors (one impl block per file)
 ipc_remote.rs      WSS+Bearer remote-IPC server
 janitor.rs         periodic sweep (briefs, confirms, sessions, audit archive)
@@ -62,29 +61,37 @@ circular dependencies with `MessageService`:
   Backed by trait objects (`MessageRelayResponder`,
   `CapabilityPromptForwarder`) in `services/permission_relay.rs`.
 
-## Identity layout policy
+## $HERMOD_HOME layout policy
 
-Every file under `$HERMOD_HOME/identity/` is declared once in
-`identity::layout::spec(home)` — the single source of truth. Three
-APIs derive from that one list:
+Every file under `$HERMOD_HOME/` is declared once in
+`home_layout::spec(home)` — the single source of truth covering the
+home dir itself, `config.toml`, `identity/*`, `hermod.db*`,
+`blob-store/`, and `archive/`. Five APIs derive from that one list:
 
-- `layout::ensure_dir(home)` — create-or-verify the parent dir
-  (mode 0o700). Called by every helper that writes into `identity/`,
-  so callers don't pre-create the dir.
-- `layout::enforce(home)` — fail-loud check called once at daemon
-  boot, after `ensure_tls` / `ensure_bearer_token` have populated
-  every file. Wrong mode ⇒ refuse to start.
-- `layout::audit(home)` — non-fatal per-file report consumed by
-  `hermod doctor`. Public files (TLS cert) appear in the report
-  but are not enforced at boot.
+- `home_layout::set_secure_umask()` — process-global `umask 0o077`
+  set at the very top of `main()`, mirroring systemd `UMask=0077`.
+  Every subsequent file create defaults to 0o600, every dir to 0o700.
+- `home_layout::prepare_dirs(home)` — `hermod init` path. Creates +
+  chmods `$HERMOD_HOME` and `identity/` to 0o700, repairing existing
+  permissive modes. Explicit operator action ⇒ silent repair OK.
+- `home_layout::ensure_dirs(home)` — daemon boot path. Strict
+  fail-loud — refuses to chmod existing dirs (sshd `StrictModes`).
+- `home_layout::enforce(home)` — boot post-init check; refuses to
+  start on any `Secret` / `Directory` mode breach. `Public` and
+  `OperatorManaged` kinds are reported by `audit` but not enforced.
+- `home_layout::audit(home)` — non-fatal per-file report consumed by
+  `hermod doctor`.
 
-**No silent repair.** A mode breach is a fail-loud signal; auto-repair
-would mask intrusions (sshd `StrictModes` model). Operators chmod
-manually; the change lands in shell history.
+**No silent repair on the daemon side.** A mode breach is a fail-loud
+signal; auto-repair would mask intrusions. Operators chmod manually;
+the change lands in shell history. The init path is the one
+exception (it's an explicit operator-driven bootstrap).
 
-**Adding a new identity file** ⇒ one new `IdentityFile` entry in
-`spec()` plus one `write_*_atomic` call site. Boot enforcement, doctor
-audit, and `chmod` hints all update automatically.
+**Adding a new file under `$HERMOD_HOME`** ⇒ one new `HomeFile` entry
+in `spec()`. Boot enforcement, doctor audit, and `chmod` hints all
+update automatically. If the daemon writes the file directly, ensure
+the writer uses `set_permissions` explicitly so the umask 0o077
+doesn't mask `Public`-kind modes (e.g. `tls.crt` at 0o644).
 
 ## Broker mode
 

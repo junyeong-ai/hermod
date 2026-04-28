@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use std::path::Path;
 
-use hermod_daemon::{config::Config, identity};
+use hermod_daemon::{config::Config, home_layout, identity};
 
 #[derive(Args, Debug)]
 pub struct InitArgs {
@@ -21,7 +21,11 @@ pub struct InitArgs {
 }
 
 pub async fn run(args: InitArgs, home: &Path) -> Result<()> {
-    std::fs::create_dir_all(home)?;
+    // Bring `$HERMOD_HOME` and `identity/` to the canonical 0o700
+    // mode. Init is the explicit operator-driven bootstrap, so it
+    // chmods existing dirs down (the daemon's strict `ensure_dirs`
+    // refuses to touch existing modes — see `home_layout` docs).
+    home_layout::prepare_dirs(home).context("prepare $HERMOD_HOME layout")?;
     let config_path = Config::write_template(home)?;
 
     let id_path = identity::secret_path(home);
@@ -77,8 +81,21 @@ fn archive_existing_state(home: &Path) -> Result<()> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs().to_string())
         .unwrap_or_else(|_| "0".to_string());
-    let archive = home.join("archive").join(&stamp);
+    let archive_root = home.join("archive");
+    let archive = archive_root.join(&stamp);
     std::fs::create_dir_all(&archive).with_context(|| format!("create {}", archive.display()))?;
+    // Lock the archive root and the timestamped subdir to operator-
+    // only access — they hold former identity material and DB
+    // contents. Matches the rest of the $HERMOD_HOME mode policy
+    // (`hermod_daemon::home_layout`). Fail loud if chmod fails.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&archive_root, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("chmod {}", archive_root.display()))?;
+        std::fs::set_permissions(&archive, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("chmod {}", archive.display()))?;
+    }
 
     // Identity material (key, TLS, bearer token).
     let identity_dir = home.join("identity");

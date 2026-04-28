@@ -618,7 +618,29 @@ impl Config {
         std::fs::create_dir_all(home)?;
         let default = Self::default();
         let text = toml::to_string_pretty(&default)?;
-        std::fs::write(&path, text)?;
+        // Atomic create with mode 0o600 from open(2) — closes the
+        // TOCTOU window between `fs::write`'s default-umask create
+        // and a follow-up chmod. config.toml may carry
+        // `[audit] webhook_bearer_token`; operators who need a wider
+        // mode chmod themselves after init.
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)?;
+            f.write_all(text.as_bytes())?;
+            // Re-assert mode in case the running process's umask
+            // masked the create-time mode bit.
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&path, text)?;
+        }
         Ok(path)
     }
 }
