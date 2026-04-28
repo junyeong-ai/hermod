@@ -1,27 +1,32 @@
 //! Subprocess-backed bearer source.
 //!
-//! Backs `--bearer-command <SHELL>`. The command runs under `sh -c`,
-//! inherits the caller's environment, has 30 s to print its token to
-//! stdout, then is reaped. Stdout is trimmed and treated as the bearer.
-//! Non-zero exit, empty stdout, or timeout each surface a typed
-//! [`BearerError`] so the operator sees the auth provider's actual
-//! failure mode (`gcloud auth login` expired, network down, …).
+//! Backs `--bearer-command <SHELL>` (daemon family) and
+//! `--proxy-bearer-command <SHELL>` (proxy family). The command runs
+//! under `sh -c`, inherits the caller's environment, has 30 s to
+//! print its token to stdout, then is reaped. Stdout is trimmed and
+//! treated as the bearer. Non-zero exit, empty stdout, or timeout
+//! each surface a typed [`BearerError`] so the operator sees the auth
+//! provider's actual failure mode (`gcloud auth login` expired,
+//! network down, …).
 //!
 //! ## Single-flight refresh
 //!
-//! 100 concurrent connects that all 401 must collapse into one
+//! 100 concurrent connects that all auth-fail must collapse into one
 //! subprocess invocation. The token cache is `Mutex<Option<BearerToken>>`
 //! and `refresh(stale)` only mints fresh material if the cached token's
 //! epoch is `<= stale`. Callers that arrive after the lock holder has
-//! already advanced the epoch get the freshly-cached value.
+//! already advanced the epoch get the freshly-cached value. Each
+//! `CommandBearerProvider` instance is independent — when both
+//! families are command-backed (daemon + proxy), each has its own
+//! mutex and its own subprocess invocation policy.
 //!
 //! ## Why not parse `exp` from the token?
 //!
 //! Best-effort JWT parsing is the textbook flimsy heuristic: opaque
 //! OAuth bearers aren't JWTs at all, and a parse-failure either pins
 //! the cache forever or pessimistically re-mints on every connect.
-//! 401-trigger refresh is source-agnostic, deterministic, and
-//! sufficient for any OAuth/OIDC-shaped credential.
+//! Auth-failure-trigger refresh is source-agnostic, deterministic,
+//! and sufficient for any OAuth/OIDC-shaped credential.
 
 use std::time::Duration;
 

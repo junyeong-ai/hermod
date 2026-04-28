@@ -1,10 +1,19 @@
 //! Bearer credential providers for the Remote IPC client.
 //!
-//! Every outbound `--remote wss://…` connection presents an
-//! `Authorization: Bearer <token>` header validated by the hermod
-//! daemon. This module abstracts where the token comes from (env var,
-//! file on disk, mint-on-demand shell command) behind a single trait
-//! so the connect path stays source-agnostic.
+//! Every outbound `--remote wss://…` connection presents one or two
+//! `Bearer` headers:
+//!
+//! * `Authorization: Bearer <daemon-token>` — always set; validated by
+//!   the hermod daemon.
+//! * `Proxy-Authorization: Bearer <proxy-token>` — set when the CLI is
+//!   running behind an SSO reverse proxy (Google Cloud IAP,
+//!   oauth2-proxy, Cloudflare Access, ALB+Cognito, …) that demands its
+//!   own bearer alongside the daemon's. Per RFC 7235 §4.4 the proxy
+//!   strips this header before forwarding to the backend.
+//!
+//! The two headers are independent; the same provider taxonomy backs
+//! both. A connect path holds an [`Arc<dyn BearerProvider>`] for the
+//! daemon side and an `Option<Arc<dyn BearerProvider>>` for the proxy.
 //!
 //! ## Refresh model
 //!
@@ -23,11 +32,12 @@
 //! ## Source taxonomy
 //!
 //!   * [`StaticBearerProvider`] — value handed in at startup
-//!     (`HERMOD_BEARER_TOKEN`). Never expires; refresh returns the same
-//!     value (callers escalate to fatal).
-//!   * [`FileBearerProvider`] — reads `--bearer-file` once on the cold
-//!     path; subsequent reads happen only via `refresh`. Same
-//!     deterministic model as the command source — no time-based
+//!     (`HERMOD_BEARER_TOKEN` / `HERMOD_PROXY_BEARER_TOKEN`). Never
+//!     expires; refresh returns the same value (callers escalate to
+//!     fatal).
+//!   * [`FileBearerProvider`] — reads `--bearer-file` / `--proxy-bearer-file`
+//!     once on the cold path; subsequent reads happen only via `refresh`.
+//!     Same deterministic model as the command source — no time-based
 //!     heuristic that could silently advance the epoch under an
 //!     in-flight retry.
 //!   * [`CommandBearerProvider`] — runs the configured shell command
@@ -145,13 +155,15 @@ pub trait BearerProvider: Send + Sync + std::fmt::Debug {
 }
 
 /// Operator-supplied bearer source declarations. Captured from CLI args
-/// and environment by [`daemon_from_env_and_args`] before any IPC
-/// happens; the connect path never re-inspects env vars.
+/// and environment by [`daemon_from_env_and_args`] /
+/// [`proxy_from_env_and_args`] before any IPC happens; the connect path
+/// never re-inspects env vars.
 ///
-/// Field names are family-neutral (`file` / `command`) so the same
-/// shape can back additional header families without renaming. The
-/// flag-name strings surfaced in error messages live in the
-/// family-specific factory, not in this struct.
+/// The same shape backs both header families — the daemon's
+/// `Authorization` and the SSO proxy's `Proxy-Authorization` — because
+/// they share the file/command/env source axis. The flag-name strings
+/// surfaced in error messages live in the family-specific factory, not
+/// in this struct.
 #[derive(Debug, Default)]
 pub struct BearerArgs {
     pub file: Option<PathBuf>,
@@ -159,7 +171,8 @@ pub struct BearerArgs {
 }
 
 /// Flag names surfaced when the source is ambiguous. One per bearer
-/// family so the operator sees the names they actually typed.
+/// family — daemon-bearer flags vs proxy-bearer flags — so the operator
+/// sees the names they actually typed.
 struct FamilyFlags {
     file: &'static str,
     command: &'static str,
@@ -170,6 +183,12 @@ const DAEMON_FLAGS: FamilyFlags = FamilyFlags {
     file: "--bearer-file",
     command: "--bearer-command",
     env: "HERMOD_BEARER_TOKEN",
+};
+
+const PROXY_FLAGS: FamilyFlags = FamilyFlags {
+    file: "--proxy-bearer-file",
+    command: "--proxy-bearer-command",
+    env: "HERMOD_PROXY_BEARER_TOKEN",
 };
 
 /// Resolve "where does the daemon-layer bearer come from" exactly once
@@ -199,6 +218,21 @@ pub fn daemon_from_env_and_args(
         // token via 401-trigger refresh.
         None => Ok(Arc::new(FileBearerProvider::new(default_path))),
     }
+}
+
+/// Resolve "where does the proxy-layer bearer come from", or return
+/// `None` if no source is configured.
+///
+/// Unlike the daemon side, there is no implicit fallback: SSO proxy
+/// credentials never live at a canonical disk location. Zero sources
+/// is the "no proxy in front of me" deployment shape and yields
+/// `Ok(None)`; the connect path then sends only the `Authorization`
+/// header.
+pub fn proxy_from_env_and_args(
+    args: &BearerArgs,
+    env_token: Option<SecretString>,
+) -> Result<Option<Arc<dyn BearerProvider>>> {
+    resolve_source(args, env_token, &PROXY_FLAGS)
 }
 
 /// Shared dispatch: at most one source set, picked into a provider.
@@ -245,8 +279,10 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    // ---- daemon family -----------------------------------------------------
+
     #[tokio::test]
-    async fn no_source_falls_back_to_default_path() {
+    async fn daemon_no_source_falls_back_to_default_path() {
         let dir = tempdir().unwrap();
         let default_path = dir.path().join("bearer_token");
         std::fs::write(&default_path, "default-tok").unwrap();
@@ -257,7 +293,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_file_wins() {
+    async fn daemon_explicit_file_wins() {
         let dir = tempdir().unwrap();
         let explicit = dir.path().join("explicit");
         std::fs::write(&explicit, "from-flag").unwrap();
@@ -276,7 +312,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn env_token_dispatches_static_provider() {
+    async fn daemon_env_token_dispatches_static_provider() {
         let dir = tempdir().unwrap();
         let provider = daemon_from_env_and_args(
             &BearerArgs::default(),
@@ -290,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn two_sources_is_ambiguous() {
+    fn daemon_two_sources_is_ambiguous() {
         let dir = tempdir().unwrap();
         let result = daemon_from_env_and_args(
             &BearerArgs {
@@ -307,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn three_sources_lists_all() {
+    fn daemon_three_sources_lists_all() {
         let dir = tempdir().unwrap();
         let result = daemon_from_env_and_args(
             &BearerArgs {
@@ -321,5 +357,79 @@ mod tests {
         assert!(err.contains("--bearer-file"));
         assert!(err.contains("--bearer-command"));
         assert!(err.contains("HERMOD_BEARER_TOKEN"));
+    }
+
+    // ---- proxy family ------------------------------------------------------
+
+    #[test]
+    fn proxy_no_source_yields_none() {
+        let provider = proxy_from_env_and_args(&BearerArgs::default(), None).unwrap();
+        assert!(provider.is_none());
+    }
+
+    #[tokio::test]
+    async fn proxy_explicit_file_wins() {
+        let dir = tempdir().unwrap();
+        let explicit = dir.path().join("proxy");
+        std::fs::write(&explicit, "proxy-tok").unwrap();
+        let provider = proxy_from_env_and_args(
+            &BearerArgs {
+                file: Some(explicit),
+                command: None,
+            },
+            None,
+        )
+        .unwrap()
+        .expect("Some");
+        let t = provider.current().await.unwrap();
+        assert_eq!(t.secret().expose_secret(), "proxy-tok");
+    }
+
+    #[tokio::test]
+    async fn proxy_env_token_dispatches_static_provider() {
+        let provider = proxy_from_env_and_args(
+            &BearerArgs::default(),
+            Some(SecretString::new("proxy-env".to_string())),
+        )
+        .unwrap()
+        .expect("Some");
+        let t = provider.current().await.unwrap();
+        assert_eq!(t.secret().expose_secret(), "proxy-env");
+        assert_eq!(t.epoch(), TokenEpoch::ZERO);
+    }
+
+    #[test]
+    fn proxy_two_sources_is_ambiguous_with_proxy_flag_names() {
+        let dir = tempdir().unwrap();
+        let result = proxy_from_env_and_args(
+            &BearerArgs {
+                file: Some(dir.path().join("a")),
+                command: Some("echo b".into()),
+            },
+            None,
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("ambiguous"), "got: {err}");
+        assert!(err.contains("--proxy-bearer-file"));
+        assert!(err.contains("--proxy-bearer-command"));
+        // Critical: must NOT mention the daemon-family flag names — operators
+        // would chase the wrong flag.
+        assert!(!err.contains("HERMOD_BEARER_TOKEN"));
+    }
+
+    #[test]
+    fn proxy_three_sources_lists_all_proxy_names() {
+        let dir = tempdir().unwrap();
+        let result = proxy_from_env_and_args(
+            &BearerArgs {
+                file: Some(dir.path().join("a")),
+                command: Some("echo b".into()),
+            },
+            Some(SecretString::new("c".to_string())),
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("--proxy-bearer-file"));
+        assert!(err.contains("--proxy-bearer-command"));
+        assert!(err.contains("HERMOD_PROXY_BEARER_TOKEN"));
     }
 }

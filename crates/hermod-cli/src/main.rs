@@ -23,29 +23,62 @@ struct Cli {
     /// Connect to a remote daemon via WSS+Bearer instead of the local Unix
     /// socket. Example: `--remote wss://my-daemon.example.com:7824/`.
     /// One of `--bearer-file`, `--bearer-command`, or
-    /// `HERMOD_BEARER_TOKEN` supplies the bearer; with none of those
-    /// set the CLI falls back to `$HERMOD_HOME/identity/bearer_token`.
+    /// `HERMOD_BEARER_TOKEN` supplies the daemon-layer bearer; with
+    /// none of those set the CLI falls back to
+    /// `$HERMOD_HOME/identity/bearer_token`. When the daemon sits
+    /// behind an SSO reverse proxy (Google Cloud IAP, oauth2-proxy,
+    /// Cloudflare Access, ALB+Cognito, …), additionally configure
+    /// `--proxy-bearer-*` to populate the `Proxy-Authorization` header
+    /// the proxy expects.
     #[arg(long, env = "HERMOD_REMOTE")]
     remote: Option<String>,
 
-    /// File containing the bearer token for remote IPC. Plain-text
-    /// contents; surrounding whitespace is trimmed. Re-read on each
-    /// connect with a 30 s cache, so a `hermod bearer rotate` (or any
-    /// external tool that updates the file) is picked up by the next
-    /// connect without restarting the CLI.
+    /// File containing the daemon-layer bearer token for remote IPC,
+    /// sent as `Authorization: Bearer <contents>`. Plain-text
+    /// contents; surrounding whitespace is trimmed. Read once on the
+    /// cold path; re-read only when the daemon rejects the token with
+    /// HTTP 401, so a `hermod bearer rotate` (or any external tool
+    /// that updates the file) is picked up by the next connect
+    /// without restarting the CLI. Mutually exclusive with
+    /// `--bearer-command` and `HERMOD_BEARER_TOKEN`.
     #[arg(long, env = "HERMOD_BEARER_FILE", requires = "remote")]
     bearer_file: Option<PathBuf>,
 
-    /// Shell command that prints the bearer token to stdout. Invoked
-    /// at connect time and re-invoked exactly once if the daemon
-    /// rejects the token with HTTP 401 (e.g. expired OIDC ID token
-    /// behind Google Cloud IAP). The command's trimmed stdout is sent
-    /// verbatim as the `Authorization: Bearer <stdout>` value. Mutually
-    /// exclusive with `--bearer-file` and `HERMOD_BEARER_TOKEN`.
+    /// Shell command that prints the daemon-layer bearer token to
+    /// stdout, sent as `Authorization: Bearer <stdout>`. Invoked at
+    /// connect time and re-invoked exactly once if the daemon rejects
+    /// the token with HTTP 401 (e.g. expired OIDC ID token behind
+    /// Google Cloud IAP). Single-flight: concurrent retries collapse
+    /// into one subprocess invocation. Mutually exclusive with
+    /// `--bearer-file` and `HERMOD_BEARER_TOKEN`.
     ///
     /// Example: `--bearer-command "gcloud auth print-identity-token --audiences=$IAP_CLIENT_ID"`
     #[arg(long, env = "HERMOD_BEARER_COMMAND", requires = "remote")]
     bearer_command: Option<String>,
+
+    /// File containing the proxy-layer bearer token for remote IPC,
+    /// sent as `Proxy-Authorization: Bearer <contents>` per RFC 7235
+    /// §4.4 to authenticate against an SSO reverse proxy fronting the
+    /// daemon (Google Cloud IAP, oauth2-proxy, Cloudflare Access,
+    /// ALB+Cognito). Plain-text contents; surrounding whitespace is
+    /// trimmed. Read once on the cold path; re-read only when the
+    /// proxy rejects the token with HTTP 401 / 407. Mutually
+    /// exclusive with `--proxy-bearer-command` and
+    /// `HERMOD_PROXY_BEARER_TOKEN`.
+    #[arg(long, env = "HERMOD_PROXY_BEARER_FILE", requires = "remote")]
+    proxy_bearer_file: Option<PathBuf>,
+
+    /// Shell command that prints the proxy-layer bearer token to
+    /// stdout, sent as `Proxy-Authorization: Bearer <stdout>` to the
+    /// SSO reverse proxy fronting the daemon. Invoked at connect time
+    /// and re-invoked exactly once if the proxy rejects the token
+    /// with HTTP 401 / 407. Single-flight: concurrent retries
+    /// collapse into one subprocess invocation. Mutually exclusive
+    /// with `--proxy-bearer-file` and `HERMOD_PROXY_BEARER_TOKEN`.
+    ///
+    /// Example: `--proxy-bearer-command "gcloud auth print-identity-token --audiences=$IAP_CLIENT_ID"`
+    #[arg(long, env = "HERMOD_PROXY_BEARER_COMMAND", requires = "remote")]
+    proxy_bearer_command: Option<String>,
 
     /// SHA-256 fingerprint of the remote daemon's TLS cert (any case;
     /// colons optional). When set, the connection fails loud if the
@@ -425,6 +458,18 @@ fn socket_or_default(home: &std::path::Path, explicit: Option<PathBuf>) -> PathB
 
 /// Build a `ClientTarget` from the parsed top-level args. Remote IPC takes
 /// precedence — when `--remote URL` is set the local socket is ignored.
+///
+/// Two bearer families are resolved here, both into trait objects:
+/// the daemon-layer bearer (always required) and the proxy-layer bearer
+/// (optional, only set when the deployment fronts the broker with an
+/// SSO reverse proxy). `secret_from_env` wraps each env-supplied token
+/// in `Zeroizing` so its heap buffer is wiped on return; the secrets
+/// never live in unzeroed memory beyond the factory call. The two
+/// families are independently mutually-exclusive: `HERMOD_BEARER_TOKEN`
+/// vs `--bearer-command` is one mutex; `HERMOD_PROXY_BEARER_TOKEN` vs
+/// `--proxy-bearer-command` is another. Within each family the secret
+/// never inherits to a subprocess we spawn (the command source is
+/// resolved as the only source if the env source is set).
 fn build_target(
     cli: &Cli,
     home: &std::path::Path,
@@ -434,23 +479,23 @@ fn build_target(
         let url = url::Url::parse(raw_url)
             .map_err(|e| anyhow::anyhow!("invalid --remote URL {raw_url:?}: {e}"))?;
         let pin = build_pin_policy(cli, &url, home)?;
+
         let daemon_args = bearer::BearerArgs {
             file: cli.bearer_file.clone(),
             command: cli.bearer_command.clone(),
         };
-        // `secret_from_env` wraps the raw env String in `Zeroizing` so
-        // its heap buffer is wiped when the helper returns; the secret
-        // never lives in unzeroed memory beyond the returned
-        // SecretString. The factory enforces mutual exclusion within
-        // the daemon family (file / command / env-token), so the env
-        // secret never inherits to a subprocess we spawn.
-        let env_token = hermod_crypto::secret::secret_from_env("HERMOD_BEARER_TOKEN");
-        let default_path = hermod_daemon::identity::bearer_token_path(home);
-        let daemon = bearer::daemon_from_env_and_args(&daemon_args, env_token, default_path)?;
-        let auth = client::RemoteAuth {
-            daemon,
-            proxy: None,
+        let daemon_env = hermod_crypto::secret::secret_from_env("HERMOD_BEARER_TOKEN");
+        let daemon_default = hermod_daemon::identity::bearer_token_path(home);
+        let daemon = bearer::daemon_from_env_and_args(&daemon_args, daemon_env, daemon_default)?;
+
+        let proxy_args = bearer::BearerArgs {
+            file: cli.proxy_bearer_file.clone(),
+            command: cli.proxy_bearer_command.clone(),
         };
+        let proxy_env = hermod_crypto::secret::secret_from_env("HERMOD_PROXY_BEARER_TOKEN");
+        let proxy = bearer::proxy_from_env_and_args(&proxy_args, proxy_env)?;
+
+        let auth = client::RemoteAuth { daemon, proxy };
         Ok(client::ClientTarget::Remote { url, auth, pin })
     } else {
         Ok(client::ClientTarget::Local(socket_or_default(

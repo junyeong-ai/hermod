@@ -1,9 +1,10 @@
 //! Static bearer source — value handed in once at process start.
 //!
-//! Backs `HERMOD_BEARER_TOKEN`. Has no notion of refresh: `refresh` returns
-//! the same token and same epoch, so the connect path's
-//! "epoch unchanged ⇒ provider declined" rule escalates two consecutive
-//! 401s to fatal automatically.
+//! Backs the env-supplied token sources: `HERMOD_BEARER_TOKEN` (daemon
+//! family) and `HERMOD_PROXY_BEARER_TOKEN` (proxy family). Has no
+//! notion of refresh: `refresh` returns the same token and same epoch,
+//! so the connect path's "epoch unchanged ⇒ provider declined" rule
+//! escalates two consecutive auth failures to fatal automatically.
 
 use async_trait::async_trait;
 use hermod_crypto::SecretString;

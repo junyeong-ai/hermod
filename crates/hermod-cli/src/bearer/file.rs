@@ -2,17 +2,22 @@
 //!
 //! Reads the token from a path on disk. Used by:
 //!
-//!   * `--bearer-file <PATH>` — explicit operator-supplied path.
-//!   * Implicit default — `$HERMOD_HOME/identity/bearer_token` when no
-//!     explicit source is declared.
+//!   * `--bearer-file <PATH>` / `--proxy-bearer-file <PATH>` —
+//!     explicit operator-supplied path for the daemon and proxy
+//!     bearer families respectively.
+//!   * Implicit default (daemon family only) —
+//!     `$HERMOD_HOME/identity/bearer_token` when no explicit
+//!     daemon-bearer source is declared. The proxy family has no
+//!     implicit fallback (no canonical disk location for SSO proxy
+//!     credentials).
 //!
 //! The cold path reads the file once and caches the result for the rest
 //! of the process lifetime. Re-reads happen only via [`refresh`], which
-//! the connect path triggers exactly once per HTTP 401 (see
+//! the connect path triggers exactly once per HTTP 401 / 407 (see
 //! [`crate::remote::connect_remote_with_refresh`]). This matches the
 //! [`CommandBearerProvider`] model: deterministic, source-agnostic
 //! refresh, no time-based heuristics that could silently advance the
-//! epoch out from under an in-flight 401-retry.
+//! epoch out from under an in-flight retry.
 //!
 //! `hermod bearer rotate` followed by an in-shell `hermod --remote …`
 //! still works: the new connect 401s on the old cached token, refresh
