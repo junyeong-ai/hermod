@@ -28,8 +28,12 @@ pub struct BroadcastService {
 }
 
 impl BroadcastService {
-    pub fn new(db: Arc<dyn Database>, audit_sink: Arc<dyn AuditSink>,
-        self_id: AgentId, messages: MessageService) -> Self {
+    pub fn new(
+        db: Arc<dyn Database>,
+        audit_sink: Arc<dyn AuditSink>,
+        self_id: AgentId,
+        messages: MessageService,
+    ) -> Self {
         Self {
             db,
             audit_sink,
@@ -144,7 +148,8 @@ impl BroadcastService {
         .await;
         let fanout: u32 = outcomes.into_iter().filter(|ok| *ok).count() as u32;
 
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: now,

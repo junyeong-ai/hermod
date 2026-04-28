@@ -99,11 +99,7 @@ impl std::fmt::Debug for WorkspaceObservabilityService {
 }
 
 impl WorkspaceObservabilityService {
-    pub fn new(
-        db: Arc<dyn Database>,
-        audit_sink: Arc<dyn AuditSink>,
-        self_id: AgentId,
-    ) -> Self {
+    pub fn new(db: Arc<dyn Database>, audit_sink: Arc<dyn AuditSink>, self_id: AgentId) -> Self {
         Self {
             db,
             audit_sink,
@@ -404,8 +400,7 @@ impl WorkspaceObservabilityService {
             .collect();
 
         // Seed: our own view of the workspace.
-        let mut union: std::collections::HashSet<AgentId> =
-            known_members.into_iter().collect();
+        let mut union: std::collections::HashSet<AgentId> = known_members.into_iter().collect();
         union.insert(self.self_id.clone());
 
         if targets.is_empty() {
@@ -422,7 +417,8 @@ impl WorkspaceObservabilityService {
 
         let request_envelope_id = MessageId::new();
         let (tx, mut rx) = mpsc::unbounded_channel::<RosterChunk>();
-        self.register_pending_roster(request_envelope_id, tx).await?;
+        self.register_pending_roster(request_envelope_id, tx)
+            .await?;
 
         let body = MessageBody::WorkspaceRosterRequest {
             workspace_id: workspace_id_bytes,
@@ -495,7 +491,8 @@ impl WorkspaceObservabilityService {
 
             let request_envelope_id = MessageId::new();
             let (tx, mut rx) = mpsc::unbounded_channel::<ChannelsChunk>();
-            self.register_pending_channels(request_envelope_id, tx).await?;
+            self.register_pending_channels(request_envelope_id, tx)
+                .await?;
 
             let body = MessageBody::WorkspaceChannelsRequest {
                 workspace_id: workspace_id_bytes,
@@ -514,7 +511,10 @@ impl WorkspaceObservabilityService {
                     break;
                 }
                 match tokio::time::timeout(remaining, rx.recv()).await {
-                    Ok(Some(ChannelsChunk { responder, channels })) => {
+                    Ok(Some(ChannelsChunk {
+                        responder,
+                        channels,
+                    })) => {
                         debug!(
                             responder = %responder,
                             n_channels = channels.len(),
@@ -706,8 +706,10 @@ pub fn verify_roster_response_mac(
         (Some(s), Some(claim)) if claim.len() == 32 => {
             let mut got = [0u8; 32];
             got.copy_from_slice(claim);
-            s.workspace_mac_key()
-                .verify(&canonical_roster_mac_input(workspace_id, sorted_members), &got)
+            s.workspace_mac_key().verify(
+                &canonical_roster_mac_input(workspace_id, sorted_members),
+                &got,
+            )
         }
         (None, None) => true,
         _ => false,
@@ -786,8 +788,18 @@ mod tests {
         let mac = secret
             .workspace_mac_key()
             .mac(&canonical_roster_mac_input(&ws, &members));
-        assert!(verify_roster_response_mac(Some(&secret), &ws, &members, Some(&mac)));
-        assert!(!verify_roster_response_mac(Some(&secret), &ws, &members, Some(&[0u8; 32])));
+        assert!(verify_roster_response_mac(
+            Some(&secret),
+            &ws,
+            &members,
+            Some(&mac)
+        ));
+        assert!(!verify_roster_response_mac(
+            Some(&secret),
+            &ws,
+            &members,
+            Some(&[0u8; 32])
+        ));
         // Public workspace: secret None, hmac None.
         assert!(verify_roster_response_mac(None, &ws, &members, None));
         assert!(!verify_roster_response_mac(None, &ws, &members, Some(&mac)));

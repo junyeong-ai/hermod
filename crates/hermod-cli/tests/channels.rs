@@ -424,7 +424,11 @@ fn mcp_permission_relay_round_trip() {
     let request_id = extract_field(&prompt, "request_id")
         .expect("permission event must carry request_id")
         .to_string();
-    assert_eq!(request_id.len(), 5, "short id must be 5 chars: {request_id}");
+    assert_eq!(
+        request_id.len(),
+        5,
+        "short id must be 5 chars: {request_id}"
+    );
     assert!(
         request_id
             .chars()
@@ -465,12 +469,20 @@ fn mcp_channel_emits_file_delivery() {
     let bob_pk = bob.pubkey_hex();
 
     alice.run(&[
-        "peer", "add", "--endpoint", &format!("wss://{}", bob.fed_addr),
-        "--pubkey-hex", &bob_pk,
+        "peer",
+        "add",
+        "--endpoint",
+        &format!("wss://{}", bob.fed_addr),
+        "--pubkey-hex",
+        &bob_pk,
     ]);
     bob.run(&[
-        "peer", "add", "--endpoint", &format!("wss://{}", alice.fed_addr),
-        "--pubkey-hex", &alice_pk,
+        "peer",
+        "add",
+        "--endpoint",
+        &format!("wss://{}", alice.fed_addr),
+        "--pubkey-hex",
+        &alice_pk,
     ]);
     alice.run(&["peer", "trust", &bob_id, "verified"]);
     bob.run(&["peer", "trust", &alice_id, "verified"]);
@@ -503,11 +515,16 @@ fn mcp_channel_emits_file_delivery() {
     reader.read_line(&mut init_line).unwrap();
 
     bob.run(&[
-        "message", "send-file",
-        "--to", &alice_id,
-        "--file", file_path.to_str().unwrap(),
-        "--mime", "text/plain",
-        "--name", "snippet.txt",
+        "message",
+        "send-file",
+        "--to",
+        &alice_id,
+        "--file",
+        file_path.to_str().unwrap(),
+        "--mime",
+        "text/plain",
+        "--name",
+        "snippet.txt",
     ]);
 
     let notif = read_until(&mut reader, |s| s.contains("\"kind\":\"file\""));
@@ -587,12 +604,20 @@ fn federated_permission_relay_round_trip() {
     // (Sensitivity::Review) reaches Damon without confirmation hold,
     // and PermissionResponse reaches Olive without hold.
     olive.run(&[
-        "peer", "add", "--endpoint", &format!("wss://{}", damon.fed_addr),
-        "--pubkey-hex", &damon_pk,
+        "peer",
+        "add",
+        "--endpoint",
+        &format!("wss://{}", damon.fed_addr),
+        "--pubkey-hex",
+        &damon_pk,
     ]);
     damon.run(&[
-        "peer", "add", "--endpoint", &format!("wss://{}", olive.fed_addr),
-        "--pubkey-hex", &olive_pk,
+        "peer",
+        "add",
+        "--endpoint",
+        &format!("wss://{}", olive.fed_addr),
+        "--pubkey-hex",
+        &olive_pk,
     ]);
     olive.run(&["peer", "trust", &damon_id, "verified"]);
     damon.run(&["peer", "trust", &olive_id, "verified"]);

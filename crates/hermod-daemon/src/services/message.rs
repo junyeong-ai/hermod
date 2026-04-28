@@ -7,7 +7,7 @@ use hermod_protocol::ipc::methods::{
 };
 use hermod_routing::remote::DeliveryOutcome;
 use hermod_routing::{AccessController, RateLimiter, RemoteDeliverer, RouteDecision, Router};
-use hermod_storage::{AuditEntry, Database, InboxFilter, MessageRecord, AuditSink};
+use hermod_storage::{AuditEntry, AuditSink, Database, InboxFilter, MessageRecord};
 use std::sync::Arc;
 
 use crate::outbox::OutboxNotifier;
@@ -81,7 +81,10 @@ impl MessageService {
                 "DM body exceeds {MAX_DIRECT_TEXT_BYTES} bytes"
             )));
         }
-        if let MessageBody::File { name, hash, data, .. } = &params.body {
+        if let MessageBody::File {
+            name, hash, data, ..
+        } = &params.body
+        {
             if data.len() > hermod_core::MAX_FILE_PAYLOAD_BYTES {
                 return Err(ServiceError::InvalidParam(format!(
                     "file `{name}` is {} bytes (cap {})",
@@ -340,14 +343,20 @@ impl MessageService {
         Ok(MessageAckResult { acked })
     }
 
-    async fn audit_send(&self, envelope: &Envelope, status: MessageStatus, decision: &RouteDecision) {
+    async fn audit_send(
+        &self,
+        envelope: &Envelope,
+        status: MessageStatus,
+        decision: &RouteDecision,
+    ) {
         let route = match decision {
             RouteDecision::Loopback => "loopback",
             RouteDecision::LocalKnown => "local",
             RouteDecision::Remote(_) => "remote",
             RouteDecision::Brokered(_) => "brokered",
         };
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),
@@ -375,7 +384,8 @@ impl MessageService {
         if ids.is_empty() {
             return;
         }
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),

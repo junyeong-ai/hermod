@@ -8,8 +8,8 @@
 use hermod_core::{Envelope, Timestamp};
 use hermod_storage::AuditEntry;
 
-use super::scope::FederationRejection;
 use super::InboundProcessor;
+use super::scope::FederationRejection;
 use crate::services::audit_or_warn;
 
 impl InboundProcessor {
@@ -32,9 +32,7 @@ impl InboundProcessor {
         // Store on the audience side. Idempotent via INSERT OR IGNORE
         // on the jti primary key.
         let now = Timestamp::now();
-        let exp_ts = claim
-            .exp
-            .and_then(|ms| Timestamp::from_unix_ms(ms).ok());
+        let exp_ts = claim.exp.and_then(|ms| Timestamp::from_unix_ms(ms).ok());
         self.db
             .capabilities()
             .upsert_received(&hermod_storage::CapabilityRecord {

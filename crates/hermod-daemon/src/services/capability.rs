@@ -95,7 +95,8 @@ impl CapabilityService {
         };
         self.db.capabilities().upsert(&record).await?;
 
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),
@@ -127,14 +128,11 @@ impl CapabilityService {
         &self,
         params: CapabilityDeliverParams,
     ) -> Result<CapabilityDeliverResult, ServiceError> {
-        let messages = self
-            .messages
-            .get()
-            .ok_or_else(|| {
-                ServiceError::InvalidParam(
-                    "capability deliver attempted before MessageService was wired".into(),
-                )
-            })?;
+        let messages = self.messages.get().ok_or_else(|| {
+            ServiceError::InvalidParam(
+                "capability deliver attempted before MessageService was wired".into(),
+            )
+        })?;
 
         // 1. Issue under the existing path so the audit + storage
         //    side-effects mirror a regular `capability.issue`.
@@ -163,7 +161,8 @@ impl CapabilityService {
             })
             .await?;
 
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),
@@ -193,7 +192,8 @@ impl CapabilityService {
         let now = Timestamp::now();
         let revoked = self.db.capabilities().revoke(&params.token_id, now).await?;
         if revoked {
-            audit_or_warn(&*self.audit_sink,
+            audit_or_warn(
+                &*self.audit_sink,
                 AuditEntry {
                     id: None,
                     ts: now,

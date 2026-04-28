@@ -117,8 +117,8 @@ pub async fn send(args: SendArgs, target: &ClientTarget) -> Result<()> {
 }
 
 pub async fn send_file(args: SendFileArgs, target: &ClientTarget) -> Result<()> {
-    let data = std::fs::read(&args.file)
-        .with_context(|| format!("read {}", args.file.display()))?;
+    let data =
+        std::fs::read(&args.file).with_context(|| format!("read {}", args.file.display()))?;
     if data.len() > hermod_core::MAX_FILE_PAYLOAD_BYTES {
         anyhow::bail!(
             "file is {} bytes; cap is {} bytes ({})",
@@ -133,12 +133,14 @@ pub async fn send_file(args: SendFileArgs, target: &ClientTarget) -> Result<()> 
             .file
             .file_name()
             .and_then(|n| n.to_str().map(str::to_string))
-            .ok_or_else(|| anyhow::anyhow!("could not derive a UTF-8 file name from {}", args.file.display()))?,
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "could not derive a UTF-8 file name from {}",
+                    args.file.display()
+                )
+            })?,
     };
-    let mime = args
-        .mime
-        .clone()
-        .unwrap_or_else(|| guess_mime(&args.file));
+    let mime = args.mime.clone().unwrap_or_else(|| guess_mime(&args.file));
     let hash = blake3::hash(&data);
 
     let mut c = target.connect().await?;
@@ -185,7 +187,9 @@ fn guess_mime(path: &std::path::Path) -> String {
         Some("html") | Some("htm") => "text/html",
         Some("css") => "text/css",
         Some("js") | Some("mjs") => "application/javascript",
-        Some("rs") | Some("py") | Some("go") | Some("ts") | Some("tsx") | Some("jsx") => "text/plain",
+        Some("rs") | Some("py") | Some("go") | Some("ts") | Some("tsx") | Some("jsx") => {
+            "text/plain"
+        }
         Some("png") => "image/png",
         Some("jpg") | Some("jpeg") => "image/jpeg",
         Some("gif") => "image/gif",

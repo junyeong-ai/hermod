@@ -24,8 +24,8 @@
 //!     gating when transport adds an `accept_with_metadata` method.
 
 use hermod_core::{Endpoint, PubkeyBytes, Timestamp, TrustLevel, WssEndpoint};
-use hermod_routing::{Transport, TransportConnection};
 use hermod_protocol::wire::{AckStatus, Pong, WireFrame};
+use hermod_routing::{Transport, TransportConnection};
 use hermod_storage::{AgentRecord, Database};
 use std::net::SocketAddr;
 use std::sync::Arc;

@@ -1,8 +1,8 @@
-use std::sync::Arc;
 use hermod_core::Timestamp;
 use hermod_crypto::Keypair;
 use hermod_protocol::ipc::methods::{IdentityGetResult, StatusGetResult};
 use hermod_storage::{Database, SESSION_TTL_SECS};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::services::ServiceError;

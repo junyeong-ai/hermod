@@ -122,10 +122,10 @@ mod tests {
     fn mdns_beacon_canonical_is_stable() {
         let agent_id = "abcdefghijklmnopqrstuvwxyz";
         let pubkey = [42u8; 32];
-        let a = canonical_mdns_beacon_bytes(agent_id, &pubkey, 7823, 1_700_000_000_000, 3600)
-            .unwrap();
-        let b = canonical_mdns_beacon_bytes(agent_id, &pubkey, 7823, 1_700_000_000_000, 3600)
-            .unwrap();
+        let a =
+            canonical_mdns_beacon_bytes(agent_id, &pubkey, 7823, 1_700_000_000_000, 3600).unwrap();
+        let b =
+            canonical_mdns_beacon_bytes(agent_id, &pubkey, 7823, 1_700_000_000_000, 3600).unwrap();
         assert_eq!(a, b);
 
         // Field-order sensitivity: changing port must change bytes.

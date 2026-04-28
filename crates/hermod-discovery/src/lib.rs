@@ -7,8 +7,8 @@
 use async_trait::async_trait;
 use hermod_core::{AgentAlias, Endpoint, PubkeyBytes};
 use hermod_crypto::Signer;
-use std::sync::Arc;
 use std::str::FromStr;
+use std::sync::Arc;
 use thiserror::Error;
 
 pub mod mdns;

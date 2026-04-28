@@ -1,10 +1,10 @@
-use std::sync::Arc;
 use hermod_core::{AgentAlias, AgentId, MessageBody, MessagePriority, Timestamp};
 use hermod_protocol::ipc::methods::{
     BriefPublishParams, BriefPublishResult, BriefReadParams, BriefReadResult, BriefView,
 };
-use hermod_storage::{AuditEntry, BriefRecord, Database, AuditSink};
+use hermod_storage::{AuditEntry, AuditSink, BriefRecord, Database};
 use std::str::FromStr;
+use std::sync::Arc;
 
 use crate::services::{ServiceError, audit_or_warn, fanout, message::MessageService};
 
@@ -24,8 +24,12 @@ pub struct BriefService {
 }
 
 impl BriefService {
-    pub fn new(db: Arc<dyn Database>, audit_sink: Arc<dyn AuditSink>,
-        self_id: AgentId, messages: MessageService) -> Self {
+    pub fn new(
+        db: Arc<dyn Database>,
+        audit_sink: Arc<dyn AuditSink>,
+        self_id: AgentId,
+        messages: MessageService,
+    ) -> Self {
         Self {
             db,
             audit_sink,
@@ -97,7 +101,8 @@ impl BriefService {
         )
         .await?;
 
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: now,

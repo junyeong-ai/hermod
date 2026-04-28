@@ -27,9 +27,9 @@ use hermod_protocol::ipc::methods::{MessageSendParams, PermissionBehavior};
 use hermod_storage::Database;
 use std::sync::Arc;
 
+use crate::services::ServiceError;
 use crate::services::message::MessageService;
 use crate::services::permission::{PromptForwardPayload, PromptForwarder, RelayResponder};
-use crate::services::ServiceError;
 
 /// Ships verdicts back to the originating peer via `MessageService`.
 #[derive(Clone)]
@@ -40,7 +40,8 @@ pub struct MessageRelayResponder {
 
 impl std::fmt::Debug for MessageRelayResponder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MessageRelayResponder").finish_non_exhaustive()
+        f.debug_struct("MessageRelayResponder")
+            .finish_non_exhaustive()
     }
 }
 

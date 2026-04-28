@@ -10,8 +10,8 @@ use tracing::debug;
 
 use hermod_storage::AuditEntry;
 
-use super::scope::FederationRejection;
 use super::InboundProcessor;
+use super::scope::FederationRejection;
 use crate::services::audit_or_warn;
 
 impl InboundProcessor {
@@ -236,7 +236,13 @@ impl InboundProcessor {
         let now = Timestamp::now();
         self.db
             .discovered_channels()
-            .observe(&workspace_id, &channel_id, channel_name, &envelope.from.id, now)
+            .observe(
+                &workspace_id,
+                &channel_id,
+                channel_name,
+                &envelope.from.id,
+                now,
+            )
             .await
             .map_err(|e| FederationRejection::Storage(e.to_string()))?;
         self.db

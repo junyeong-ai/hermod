@@ -94,8 +94,8 @@ impl Router {
 mod tests {
     use super::*;
     use hermod_core::{PubkeyBytes, Timestamp, TrustLevel, WssEndpoint};
-    use hermod_storage::AgentRecord;
     use hermod_crypto::{Keypair, LocalKeySigner, Signer};
+    use hermod_storage::AgentRecord;
 
     async fn fresh_router(self_id: AgentId) -> (Router, Arc<dyn Database>) {
         let signer: Arc<dyn Signer> = Arc::new(LocalKeySigner::new(Arc::new(Keypair::generate())));
@@ -160,7 +160,10 @@ mod tests {
     async fn remote_via_directory_endpoint() {
         let (router, db) = fresh_router(agent_id(1)).await;
         upsert(&db, agent_id(2), Some(wss("peer", 7823))).await;
-        let dec = router.resolve(&AgentAddress::local(agent_id(2))).await.unwrap();
+        let dec = router
+            .resolve(&AgentAddress::local(agent_id(2)))
+            .await
+            .unwrap();
         assert_eq!(dec, RouteDecision::Remote(wss("peer", 7823)));
     }
 
@@ -168,7 +171,10 @@ mod tests {
     async fn local_known_when_no_endpoint_and_no_broker() {
         let (router, db) = fresh_router(agent_id(1)).await;
         upsert(&db, agent_id(2), None).await;
-        let dec = router.resolve(&AgentAddress::local(agent_id(2))).await.unwrap();
+        let dec = router
+            .resolve(&AgentAddress::local(agent_id(2)))
+            .await
+            .unwrap();
         assert_eq!(dec, RouteDecision::LocalKnown);
     }
 
@@ -177,7 +183,10 @@ mod tests {
         let (router, db) = fresh_router(agent_id(1)).await;
         let router = router.with_upstream_broker(wss("broker", 7823));
         upsert(&db, agent_id(2), None).await;
-        let dec = router.resolve(&AgentAddress::local(agent_id(2))).await.unwrap();
+        let dec = router
+            .resolve(&AgentAddress::local(agent_id(2)))
+            .await
+            .unwrap();
         assert_eq!(dec, RouteDecision::Brokered(wss("broker", 7823)));
     }
 
@@ -188,7 +197,10 @@ mod tests {
         let (router, db) = fresh_router(agent_id(1)).await;
         let router = router.with_upstream_broker(wss("broker", 7823));
         upsert(&db, agent_id(2), Some(wss("peer", 9000))).await;
-        let dec = router.resolve(&AgentAddress::local(agent_id(2))).await.unwrap();
+        let dec = router
+            .resolve(&AgentAddress::local(agent_id(2)))
+            .await
+            .unwrap();
         assert_eq!(dec, RouteDecision::Remote(wss("peer", 9000)));
     }
 

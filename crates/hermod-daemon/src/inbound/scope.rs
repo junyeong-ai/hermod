@@ -166,7 +166,11 @@ pub(crate) fn validate_inbound_body_size(
             }
         }
         B::WorkspaceRosterRequest { workspace_id, hmac } => {
-            bound("WorkspaceRosterRequest.workspace_id", workspace_id.len(), 16)?;
+            bound(
+                "WorkspaceRosterRequest.workspace_id",
+                workspace_id.len(),
+                16,
+            )?;
             if let Some(h) = hmac {
                 bound("WorkspaceRosterRequest.hmac", h.len(), 32)?;
             }
@@ -177,7 +181,11 @@ pub(crate) fn validate_inbound_body_size(
             hmac,
             ..
         } => {
-            bound("WorkspaceRosterResponse.workspace_id", workspace_id.len(), 16)?;
+            bound(
+                "WorkspaceRosterResponse.workspace_id",
+                workspace_id.len(),
+                16,
+            )?;
             // Cap at MAX_WORKSPACE_MEMBERS_PER_RESPONSE so a malicious
             // peer can't return a giant list. 1024 is well above any
             // realistic team size; bigger workspaces should paginate

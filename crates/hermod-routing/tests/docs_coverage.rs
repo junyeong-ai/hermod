@@ -130,9 +130,11 @@ fn extract_static_actions(src: &str) -> std::collections::HashSet<String> {
             // empty strings or unrelated `action: "..."` matches.
             let dots: Vec<&str> = action.split('.').collect();
             if dots.len() >= 2
-                && dots
-                    .iter()
-                    .all(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
+                && dots.iter().all(|s| {
+                    !s.is_empty()
+                        && s.chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                })
             {
                 out.insert(action.to_string());
             }

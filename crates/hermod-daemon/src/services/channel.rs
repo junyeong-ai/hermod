@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use hermod_core::WorkspaceVisibility;
 use hermod_core::{AgentAddress, AgentId, Endpoint, MessageBody, MessagePriority, Timestamp};
 use hermod_crypto::{ChannelId, WorkspaceId, public_channel_id};
@@ -9,8 +8,9 @@ use hermod_protocol::ipc::methods::{
     ChannelListParams, ChannelListResult, ChannelMessageView, ChannelMuteParams, ChannelMuteResult,
     ChannelView, DiscoveredChannelView, MessageSendParams,
 };
-use hermod_storage::{AuditEntry, ChannelRecord, Database, WorkspaceRecord, AuditSink};
+use hermod_storage::{AuditEntry, AuditSink, ChannelRecord, Database, WorkspaceRecord};
 use serde_bytes::ByteBuf;
+use std::sync::Arc;
 use tracing::warn;
 
 use crate::services::{ServiceError, audit_or_warn, message::MessageService};
@@ -28,8 +28,12 @@ pub struct ChannelService {
 }
 
 impl ChannelService {
-    pub fn new(db: Arc<dyn Database>, audit_sink: Arc<dyn AuditSink>,
-        self_id: AgentId, messages: MessageService) -> Self {
+    pub fn new(
+        db: Arc<dyn Database>,
+        audit_sink: Arc<dyn AuditSink>,
+        self_id: AgentId,
+        messages: MessageService,
+    ) -> Self {
         Self {
             db,
             audit_sink,
@@ -67,7 +71,8 @@ impl ChannelService {
             })
             .await?;
 
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: now,
@@ -129,7 +134,8 @@ impl ChannelService {
         if !removed {
             return Err(ServiceError::NotFound);
         }
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),
@@ -196,7 +202,8 @@ impl ChannelService {
             }
         }
 
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),
@@ -283,7 +290,8 @@ impl ChannelService {
             })
             .await?;
 
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: now,
@@ -312,7 +320,8 @@ impl ChannelService {
         if !updated {
             return Err(ServiceError::NotFound);
         }
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),

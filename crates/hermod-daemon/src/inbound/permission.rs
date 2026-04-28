@@ -6,8 +6,8 @@
 use hermod_core::{Envelope, Timestamp};
 use hermod_storage::AuditEntry;
 
-use super::scope::{FederationRejection, PermissionPromptFields};
 use super::InboundProcessor;
+use super::scope::{FederationRejection, PermissionPromptFields};
 use crate::services::audit_or_warn;
 
 impl InboundProcessor {
@@ -40,9 +40,7 @@ impl InboundProcessor {
                 )
                 .await
         {
-            return Err(FederationRejection::Invalid(format!(
-                "relay receive: {e}"
-            )));
+            return Err(FederationRejection::Invalid(format!("relay receive: {e}")));
         }
         audit_or_warn(
             &*self.audit_sink,
@@ -96,9 +94,7 @@ impl InboundProcessor {
         let matched = if let Some(svc) = &self.permission {
             svc.apply_relayed_verdict(request_id.to_string(), typed, envelope.from.id.clone())
                 .await
-                .map_err(|e| {
-                    FederationRejection::Invalid(format!("relay verdict apply: {e}"))
-                })?
+                .map_err(|e| FederationRejection::Invalid(format!("relay verdict apply: {e}")))?
         } else {
             false
         };

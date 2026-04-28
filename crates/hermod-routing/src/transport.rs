@@ -164,11 +164,7 @@ pub trait Transport: Send + Sync + std::fmt::Debug + 'static {
     /// Default impl returns `Backend("not supported")` — backends
     /// that don't terminate TLS (raw TCP, in-process test transport,
     /// gRPC delegating TLS to a sidecar) leave it unimplemented.
-    async fn reload_tls(
-        &self,
-        _cert_pem: &str,
-        _key_pem: &str,
-    ) -> Result<(), PeerTransportError> {
+    async fn reload_tls(&self, _cert_pem: &str, _key_pem: &str) -> Result<(), PeerTransportError> {
         Err(PeerTransportError::Backend(
             "transport does not support TLS hot-rotate".into(),
         ))

@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use hermod_core::{
     AgentAddress, AgentAlias, AgentId, MessageBody, MessagePriority, PubkeyBytes, Timestamp,
     WorkspaceVisibility,
@@ -10,9 +9,10 @@ use hermod_protocol::ipc::methods::{
     WorkspaceInviteResult, WorkspaceJoinParams, WorkspaceJoinResult, WorkspaceListResult,
     WorkspaceMuteParams, WorkspaceMuteResult, WorkspaceView,
 };
-use hermod_storage::{AuditEntry, Database, WorkspaceRecord, AuditSink};
+use hermod_storage::{AuditEntry, AuditSink, Database, WorkspaceRecord};
 use serde_bytes::ByteBuf;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use crate::services::{ServiceError, audit_or_warn, message::MessageService};
 
@@ -85,7 +85,8 @@ impl WorkspaceService {
             .touch(&id, &self.self_id, now)
             .await?;
 
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: now,
@@ -137,7 +138,8 @@ impl WorkspaceService {
             .touch(&id, &self.self_id, now)
             .await?;
 
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: now,
@@ -180,7 +182,8 @@ impl WorkspaceService {
         if !removed {
             return Err(ServiceError::NotFound);
         }
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),
@@ -253,7 +256,8 @@ impl WorkspaceService {
             .touch(&workspace.id, &recipient_id, Timestamp::now())
             .await?;
 
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),
@@ -312,7 +316,8 @@ impl WorkspaceService {
         if !updated {
             return Err(ServiceError::NotFound);
         }
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),

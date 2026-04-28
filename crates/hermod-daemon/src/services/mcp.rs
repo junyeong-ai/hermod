@@ -15,13 +15,15 @@
 //! serialises writers, so the second transaction sees the first attach's row
 //! already committed.
 
-use std::sync::Arc;
 use hermod_core::{AgentId, Timestamp};
 use hermod_protocol::ipc::methods::{
     McpAttachParams, McpAttachResult, McpDetachParams, McpDetachResult, McpHeartbeatParams,
     McpHeartbeatResult,
 };
-use hermod_storage::{AuditEntry, Database, HEARTBEAT_INTERVAL_SECS, McpSession, SESSION_TTL_SECS, AuditSink};
+use hermod_storage::{
+    AuditEntry, AuditSink, Database, HEARTBEAT_INTERVAL_SECS, McpSession, SESSION_TTL_SECS,
+};
+use std::sync::Arc;
 use ulid::Ulid;
 
 use crate::services::{ServiceError, audit_or_warn, presence::PresenceService};
@@ -35,8 +37,12 @@ pub struct McpService {
 }
 
 impl McpService {
-    pub fn new(db: Arc<dyn Database>, audit_sink: Arc<dyn AuditSink>,
-        self_id: AgentId, presence: PresenceService) -> Self {
+    pub fn new(
+        db: Arc<dyn Database>,
+        audit_sink: Arc<dyn AuditSink>,
+        self_id: AgentId,
+        presence: PresenceService,
+    ) -> Self {
         Self {
             db,
             audit_sink,
@@ -74,7 +80,8 @@ impl McpService {
             )
             .await?;
 
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: now,
@@ -127,7 +134,8 @@ impl McpService {
             .detach_atomic(&params.session_id, now, ttl_ms)
             .await?;
 
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: now,

@@ -100,7 +100,8 @@ impl AccessController {
         if !self.policy.require_capability {
             return Ok(AccessVerdict::Accept);
         }
-        self.evaluate_caps(sender, required_scope, target, caps).await
+        self.evaluate_caps(sender, required_scope, target, caps)
+            .await
     }
 
     /// Like [`Self::check_caps`] but enforces the cap check
@@ -115,7 +116,8 @@ impl AccessController {
         target: Option<&AgentId>,
         caps: &[CapabilityToken],
     ) -> Result<AccessVerdict> {
-        self.evaluate_caps(sender, required_scope, target, caps).await
+        self.evaluate_caps(sender, required_scope, target, caps)
+            .await
     }
 
     async fn evaluate_caps(

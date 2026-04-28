@@ -11,7 +11,6 @@
 //! cache the advertised value in their own `agent_presence.peer_live`
 //! columns; that's how cross-daemon liveness propagation works.
 
-use std::sync::Arc;
 use hermod_core::{AgentAlias, AgentId, MessageBody, MessagePriority, Timestamp};
 use hermod_protocol::ipc::methods::{
     PresenceClearManualParams, PresenceClearManualResult, PresenceGetParams, PresenceGetResult,
@@ -22,6 +21,7 @@ use hermod_storage::{
     AuditEntry, Database, PEER_LIVE_TTL_SECS, SESSION_TTL_SECS, effective_status,
 };
 use std::str::FromStr;
+use std::sync::Arc;
 
 use crate::services::{ServiceError, audit_or_warn, fanout, message::MessageService};
 
@@ -46,8 +46,12 @@ pub struct PresenceService {
 }
 
 impl PresenceService {
-    pub fn new(db: Arc<dyn Database>, audit_sink: Arc<dyn AuditSink>,
-        self_id: AgentId, messages: MessageService) -> Self {
+    pub fn new(
+        db: Arc<dyn Database>,
+        audit_sink: Arc<dyn AuditSink>,
+        self_id: AgentId,
+        messages: MessageService,
+    ) -> Self {
         Self {
             db,
             audit_sink,
@@ -74,7 +78,8 @@ impl PresenceService {
 
         let outcome = self.broadcast_self().await?;
 
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: now,
@@ -106,7 +111,8 @@ impl PresenceService {
         let now = Timestamp::now();
         self.db.presences().clear_manual(&self.self_id).await?;
         let outcome = self.broadcast_self().await?;
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: now,

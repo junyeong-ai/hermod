@@ -10,8 +10,8 @@ use hermod_core::{Envelope, MessageStatus, Timestamp};
 use hermod_protocol::envelope::serialize_envelope;
 use hermod_storage::{AuditEntry, MessageRecord};
 
-use super::scope::FederationRejection;
 use super::InboundProcessor;
+use super::scope::FederationRejection;
 use crate::services::audit_or_warn;
 
 impl InboundProcessor {

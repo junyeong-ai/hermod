@@ -13,7 +13,7 @@ Hermod is a Rust workspace with eight crates:
 | `hermod-routing` | Federation peer connections, outbox delivery, capability access checks, rate limiting, confirmation matrix. |
 | `hermod-discovery` | Static + mDNS peer discovery. |
 | `hermod-transport` | WebSocket + TLS + Unix-socket plumbing. |
-| `hermod-daemon` | The `hermodd` binary: services, dispatcher, inbound processor, observability (metrics + healthz). |
+| `hermod-daemon` | The `hermodd` binary: services, dispatcher, inbound processor, observability (metrics + healthz + readyz). |
 | `hermod-cli` | The `hermod` binary: CLI subcommands, MCP stdio bridge, channel emitter. |
 
 ## How to add things

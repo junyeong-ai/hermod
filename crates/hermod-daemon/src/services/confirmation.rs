@@ -1,11 +1,11 @@
-use std::sync::Arc;
 use hermod_core::{AgentId, Timestamp};
 use hermod_protocol::ipc::methods::{
     ConfirmationAcceptParams, ConfirmationAcceptResult, ConfirmationListParams,
     ConfirmationListResult, ConfirmationRejectParams, ConfirmationRejectResult,
     PendingConfirmationView,
 };
-use hermod_storage::{AuditEntry, ConfirmationStatus, Database, AuditSink};
+use hermod_storage::{AuditEntry, AuditSink, ConfirmationStatus, Database};
+use std::sync::Arc;
 
 use crate::inbound::InboundProcessor;
 use crate::services::{ServiceError, audit_or_warn};
@@ -31,8 +31,12 @@ impl std::fmt::Debug for ConfirmationService {
 }
 
 impl ConfirmationService {
-    pub fn new(db: Arc<dyn Database>, audit_sink: Arc<dyn AuditSink>,
-        self_id: AgentId, inbound: InboundProcessor) -> Self {
+    pub fn new(
+        db: Arc<dyn Database>,
+        audit_sink: Arc<dyn AuditSink>,
+        self_id: AgentId,
+        inbound: InboundProcessor,
+    ) -> Self {
         Self {
             db,
             audit_sink,
@@ -127,7 +131,8 @@ impl ConfirmationService {
             // dedupe at the messages / channel_messages tables).
         }
 
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: now,
@@ -175,7 +180,8 @@ impl ConfirmationService {
                 now,
             )
             .await?;
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: now,

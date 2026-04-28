@@ -88,8 +88,7 @@ pub fn permission_verdict(request_id: &str, behavior: PermissionBehavior) -> Val
 fn strip_nulls(meta: Value) -> Value {
     match meta {
         Value::Object(m) => {
-            let kept: Map<String, Value> =
-                m.into_iter().filter(|(_, v)| !v.is_null()).collect();
+            let kept: Map<String, Value> = m.into_iter().filter(|(_, v)| !v.is_null()).collect();
             Value::Object(kept)
         }
         other => other,
@@ -103,11 +102,8 @@ pub fn validate_meta_keys(meta: &Value) -> bool {
     let Some(obj) = meta.as_object() else {
         return true;
     };
-    obj.keys().all(|k| {
-        !k.is_empty()
-            && k.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-    })
+    obj.keys()
+        .all(|k| !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
 }
 
 #[cfg(test)]
@@ -169,13 +165,11 @@ mod tests {
         // In release builds debug_assert! is a no-op; assert! is not.
         // This test guarantees the channel builder catches bad meta in
         // both profiles by triggering a panic on a hyphenated key.
-        let res = std::panic::catch_unwind(|| {
-            channel(
-                "hi".into(),
-                json!({"chat-id": "x"}),
-            )
-        });
-        assert!(res.is_err(), "hyphenated meta key must panic in any profile");
+        let res = std::panic::catch_unwind(|| channel("hi".into(), json!({"chat-id": "x"})));
+        assert!(
+            res.is_err(),
+            "hyphenated meta key must panic in any profile"
+        );
     }
 
     #[test]

@@ -58,7 +58,10 @@ mod tests {
     #[test]
     fn alphabet_excludes_l_and_uppercase_and_digits() {
         for &b in ALPHABET {
-            assert!(b.is_ascii_lowercase(), "non-lowercase byte in alphabet: {b}");
+            assert!(
+                b.is_ascii_lowercase(),
+                "non-lowercase byte in alphabet: {b}"
+            );
             assert_ne!(b, b'l', "alphabet must exclude `l`");
         }
         // Sanity on the documented size.
@@ -72,19 +75,22 @@ mod tests {
             let id = generate(&mut rng);
             assert_eq!(id.len(), LEN);
             assert!(is_valid(&id), "generated id failed is_valid: {id}");
-            assert!(!id.contains('l'), "generated id contains forbidden `l`: {id}");
+            assert!(
+                !id.contains('l'),
+                "generated id contains forbidden `l`: {id}"
+            );
         }
     }
 
     #[test]
     fn is_valid_rejects_obvious_bad_inputs() {
         assert!(!is_valid(""));
-        assert!(!is_valid("abcd"));      // too short
-        assert!(!is_valid("abcdef"));    // too long
-        assert!(!is_valid("abcde\n"));   // wrong length + non-alpha
-        assert!(!is_valid("abcdL"));     // uppercase
-        assert!(!is_valid("ab1de"));     // digit
-        assert!(!is_valid("ablde"));     // contains forbidden `l`
+        assert!(!is_valid("abcd")); // too short
+        assert!(!is_valid("abcdef")); // too long
+        assert!(!is_valid("abcde\n")); // wrong length + non-alpha
+        assert!(!is_valid("abcdL")); // uppercase
+        assert!(!is_valid("ab1de")); // digit
+        assert!(!is_valid("ablde")); // contains forbidden `l`
     }
 
     #[test]

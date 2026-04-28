@@ -4,7 +4,7 @@ use hermod_protocol::ipc::methods::{
     PeerRemoveResult, PeerRepinParams, PeerRepinResult, PeerSummary, PeerTrustParams,
 };
 use hermod_routing::PeerPool;
-use hermod_storage::{AuditEntry, Database, AuditSink};
+use hermod_storage::{AuditEntry, AuditSink, Database};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -69,7 +69,8 @@ impl PeerService {
             conflicting_id,
         } = &outcome
         {
-            audit_or_warn(&*self.audit_sink,
+            audit_or_warn(
+                &*self.audit_sink,
                 AuditEntry {
                     id: None,
                     ts: Timestamp::now(),
@@ -86,7 +87,8 @@ impl PeerService {
             .await;
         }
 
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),
@@ -163,7 +165,8 @@ impl PeerService {
             self.pool.evict_endpoint(ep).await;
         }
         if outcome.existed {
-            audit_or_warn(&*self.audit_sink,
+            audit_or_warn(
+                &*self.audit_sink,
                 AuditEntry {
                     id: None,
                     ts: Timestamp::now(),
@@ -214,7 +217,8 @@ impl PeerService {
         if let Some(ep) = &endpoint {
             self.pool.evict_endpoint(ep).await;
         }
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),
@@ -254,7 +258,8 @@ impl PeerService {
             )
         })?;
 
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),

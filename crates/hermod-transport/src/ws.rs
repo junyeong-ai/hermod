@@ -133,11 +133,7 @@ impl WsListener {
     /// PEM and atomically swaps the acceptor; existing in-flight
     /// connections keep their handshake's pinned acceptor reference,
     /// new accepts use the swapped one.
-    pub async fn reload_tls(
-        &self,
-        cert_pem: &str,
-        key_pem: &str,
-    ) -> Result<(), TransportError> {
+    pub async fn reload_tls(&self, cert_pem: &str, key_pem: &str) -> Result<(), TransportError> {
         let Some(slot) = &self.tls else {
             return Err(TransportError::WebSocket(
                 "listener is plain TCP — reload_tls has nothing to swap".into(),
@@ -510,7 +506,10 @@ mod tests {
 
         // First client sees the original cert.
         let mut c1 = connect_tls("127.0.0.1", addr.port()).await.unwrap();
-        assert_eq!(c1.peer_tls_fingerprint(), Some(original.fingerprint.as_str()));
+        assert_eq!(
+            c1.peer_tls_fingerprint(),
+            Some(original.fingerprint.as_str())
+        );
         c1.send_binary(b"first".to_vec()).await.unwrap();
         let _ = c1.recv_binary().await.unwrap();
 
@@ -522,7 +521,10 @@ mod tests {
 
         // Second client sees the rotated cert.
         let mut c2 = connect_tls("127.0.0.1", addr.port()).await.unwrap();
-        assert_eq!(c2.peer_tls_fingerprint(), Some(rotated.fingerprint.as_str()));
+        assert_eq!(
+            c2.peer_tls_fingerprint(),
+            Some(rotated.fingerprint.as_str())
+        );
         c2.send_binary(b"second".to_vec()).await.unwrap();
         let _ = c2.recv_binary().await.unwrap();
 
@@ -561,7 +563,10 @@ mod tests {
             s.close().await.ok();
         });
         let mut c = connect_tls("127.0.0.1", addr.port()).await.unwrap();
-        assert_eq!(c.peer_tls_fingerprint(), Some(original.fingerprint.as_str()));
+        assert_eq!(
+            c.peer_tls_fingerprint(),
+            Some(original.fingerprint.as_str())
+        );
         c.send_binary(b"ping".to_vec()).await.unwrap();
         let _ = c.recv_binary().await.unwrap();
         server.await.unwrap();

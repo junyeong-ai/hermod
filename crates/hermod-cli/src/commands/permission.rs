@@ -75,11 +75,7 @@ pub struct DelegateArgs {
 pub async fn delegate(args: DelegateArgs, target: &ClientTarget) -> Result<()> {
     let mut c = target.connect().await?;
     let audience = resolve_to(&args.agent, &mut c).await?;
-    let exp_secs = args
-        .ttl
-        .as_deref()
-        .map(parse_duration)
-        .transpose()?;
+    let exp_secs = args.ttl.as_deref().map(parse_duration).transpose()?;
     let r = c
         .capability_deliver(CapabilityDeliverParams {
             audience,
@@ -97,8 +93,7 @@ async fn resolve_to(
     client: &mut crate::client::DaemonClient,
 ) -> Result<AgentAddress> {
     if let Some(alias_raw) = reference.strip_prefix('@') {
-        let alias =
-            AgentAlias::from_str(alias_raw).map_err(|e| invalid("alias", alias_raw, e))?;
+        let alias = AgentAlias::from_str(alias_raw).map_err(|e| invalid("alias", alias_raw, e))?;
         let desc = client
             .agent_get(hermod_protocol::ipc::methods::AgentGetParams {
                 agent: alias.to_string(),

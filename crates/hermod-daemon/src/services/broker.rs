@@ -48,11 +48,11 @@
 //! on hop count alone, since wall-clock TTL admits arbitrary per-hop
 //! delay manipulation.
 
+use hermod_core::Timestamp;
 use hermod_core::{AgentId, Envelope};
 use hermod_protocol::envelope::serialize_envelope;
 use hermod_routing::{RemoteDeliverer, remote::DeliveryOutcome};
 use hermod_storage::{AuditEntry, AuditSink, Database};
-use hermod_core::Timestamp;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -195,8 +195,13 @@ impl BrokerService {
         let outbound_hops = match inbound_hops.checked_add(1) {
             Some(n) if n <= hermod_protocol::wire::MAX_RELAY_HOPS => n,
             _ => {
-                self.witness(source_hop, envelope, RelayWitnessVerb::Rejected, Some("hops_exceeded"))
-                    .await;
+                self.witness(
+                    source_hop,
+                    envelope,
+                    RelayWitnessVerb::Rejected,
+                    Some("hops_exceeded"),
+                )
+                .await;
                 return RelayOutcome::LoopDetected;
             }
         };
@@ -212,8 +217,13 @@ impl BrokerService {
         let recipient_record = match self.db.agents().get(&envelope.to.id).await {
             Ok(Some(rec)) => rec,
             Ok(None) => {
-                self.witness(source_hop, envelope, RelayWitnessVerb::Rejected, Some("no_route"))
-                    .await;
+                self.witness(
+                    source_hop,
+                    envelope,
+                    RelayWitnessVerb::Rejected,
+                    Some("no_route"),
+                )
+                .await;
                 return RelayOutcome::NoRoute;
             }
             Err(e) => {
@@ -224,8 +234,13 @@ impl BrokerService {
         let endpoint = match recipient_record.endpoint {
             Some(ep) if !ep.is_local() => ep,
             _ => {
-                self.witness(source_hop, envelope, RelayWitnessVerb::Rejected, Some("no_endpoint"))
-                    .await;
+                self.witness(
+                    source_hop,
+                    envelope,
+                    RelayWitnessVerb::Rejected,
+                    Some("no_endpoint"),
+                )
+                .await;
                 return RelayOutcome::NoRoute;
             }
         };
@@ -235,29 +250,54 @@ impl BrokerService {
         // construction — we never mutate `envelope` between deserialise
         // and re-serialise.
         if serialize_envelope(envelope).is_err() {
-            self.witness(source_hop, envelope, RelayWitnessVerb::Rejected, Some("serialize"))
-                .await;
+            self.witness(
+                source_hop,
+                envelope,
+                RelayWitnessVerb::Rejected,
+                Some("serialize"),
+            )
+            .await;
             return RelayOutcome::Deferred("serialize".into());
         }
 
-        match self.remote.forward(envelope, &endpoint, outbound_hops).await {
+        match self
+            .remote
+            .forward(envelope, &endpoint, outbound_hops)
+            .await
+        {
             Ok(DeliveryOutcome::Delivered) => {
-                self.witness(source_hop, envelope, RelayWitnessVerb::Forwarded, None).await;
+                self.witness(source_hop, envelope, RelayWitnessVerb::Forwarded, None)
+                    .await;
                 RelayOutcome::Forwarded
             }
             Ok(DeliveryOutcome::Deferred) => {
-                self.witness(source_hop, envelope, RelayWitnessVerb::Rejected, Some("deferred"))
-                    .await;
+                self.witness(
+                    source_hop,
+                    envelope,
+                    RelayWitnessVerb::Rejected,
+                    Some("deferred"),
+                )
+                .await;
                 RelayOutcome::Deferred("upstream deferred".into())
             }
             Ok(DeliveryOutcome::Rejected) => {
-                self.witness(source_hop, envelope, RelayWitnessVerb::Rejected, Some("upstream_reject"))
-                    .await;
+                self.witness(
+                    source_hop,
+                    envelope,
+                    RelayWitnessVerb::Rejected,
+                    Some("upstream_reject"),
+                )
+                .await;
                 RelayOutcome::Deferred("upstream rejected".into())
             }
             Err(e) => {
-                self.witness(source_hop, envelope, RelayWitnessVerb::Rejected, Some(&e.to_string()))
-                    .await;
+                self.witness(
+                    source_hop,
+                    envelope,
+                    RelayWitnessVerb::Rejected,
+                    Some(&e.to_string()),
+                )
+                .await;
                 RelayOutcome::Deferred(e.to_string())
             }
         }

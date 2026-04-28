@@ -1,12 +1,12 @@
-use std::sync::Arc;
 use hermod_core::{AgentAlias, AgentId, PubkeyBytes, Timestamp};
 use hermod_crypto::{agent_id_from_pubkey, fingerprint_from_pubkey};
 use hermod_protocol::ipc::methods::{
     AgentGetParams, AgentGetResult, AgentListParams, AgentListResult, AgentRegisterParams,
     AgentRegisterResult, AgentSummary, AliasOutcomeView,
 };
-use hermod_storage::{AgentRecord, AliasOutcome, AuditEntry, Database, AuditSink};
+use hermod_storage::{AgentRecord, AliasOutcome, AuditEntry, AuditSink, Database};
 use std::str::FromStr;
+use std::sync::Arc;
 
 use crate::services::{ServiceError, audit_or_warn, presence::PresenceService};
 
@@ -18,9 +18,16 @@ pub struct AgentService {
 }
 
 impl AgentService {
-    pub fn new(db: Arc<dyn Database>, audit_sink: Arc<dyn AuditSink>,
-        presence: PresenceService) -> Self {
-        Self { db, audit_sink, presence }
+    pub fn new(
+        db: Arc<dyn Database>,
+        audit_sink: Arc<dyn AuditSink>,
+        presence: PresenceService,
+    ) -> Self {
+        Self {
+            db,
+            audit_sink,
+            presence,
+        }
     }
 
     /// Return agents that are currently *live* (live=true). Listing offline
@@ -115,7 +122,8 @@ impl AgentService {
             conflicting_id,
         } = &outcome
         {
-            audit_or_warn(&*self.audit_sink,
+            audit_or_warn(
+                &*self.audit_sink,
                 AuditEntry {
                     id: None,
                     ts: now,
@@ -132,7 +140,8 @@ impl AgentService {
             .await;
         }
 
-        audit_or_warn(&*self.audit_sink,
+        audit_or_warn(
+            &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: now,

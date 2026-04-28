@@ -206,10 +206,9 @@ pub fn summarize(envelope: &Envelope) -> String {
             "capability grant from {}: scope `{scope}`",
             envelope.from.id
         ),
-        MessageBody::AuditFederate { action, .. } => format!(
-            "audit federation from {}: {action}",
-            envelope.from.id
-        ),
+        MessageBody::AuditFederate { action, .. } => {
+            format!("audit federation from {}: {action}", envelope.from.id)
+        }
         MessageBody::WorkspaceRosterRequest { workspace_id, .. } => format!(
             "workspace roster request from {}: workspace {}",
             envelope.from.id,

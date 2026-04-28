@@ -104,8 +104,7 @@ impl MdnsDiscoverer {
             while let Ok(event) = receiver.recv_async().await {
                 match event {
                     ServiceEvent::ServiceResolved(info) => {
-                        if let Some(peer) =
-                            peer_from_info(&info, &own_for_task, &*auditor_for_task)
+                        if let Some(peer) = peer_from_info(&info, &own_for_task, &*auditor_for_task)
                         {
                             let key = info.get_fullname().to_string();
                             if let Ok(mut g) = cache_for_task.lock() {
@@ -200,7 +199,10 @@ impl MdnsDiscoverer {
             Some(s) => s,
             None => return BeaconVerdict::MalformedFields,
         };
-        let pubkey = match info.get_property_val_str("pubkey").and_then(parse_pubkey_hex) {
+        let pubkey = match info
+            .get_property_val_str("pubkey")
+            .and_then(parse_pubkey_hex)
+        {
             Some(p) => p,
             None => return BeaconVerdict::MalformedFields,
         };
@@ -233,7 +235,10 @@ impl MdnsDiscoverer {
         let age_ms = now_ms - ts_ms;
         let validity_ms = (validity_secs as i64) * 1000;
         if age_ms > validity_ms {
-            return BeaconVerdict::Stale { age_ms, validity_ms };
+            return BeaconVerdict::Stale {
+                age_ms,
+                validity_ms,
+            };
         }
         if age_ms < -BEACON_FUTURE_SKEW_MS {
             return BeaconVerdict::Future { skew_ms: -age_ms };

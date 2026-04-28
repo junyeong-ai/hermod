@@ -8,8 +8,8 @@
 
 use hermod_core::{AgentId, Envelope, Timestamp, TrustLevel};
 
-use super::scope::{workspace_id_from_bytes, FederationRejection};
 use super::InboundProcessor;
+use super::scope::{FederationRejection, workspace_id_from_bytes};
 
 impl InboundProcessor {
     pub(super) async fn accept_workspace_roster_request(
@@ -21,9 +21,14 @@ impl InboundProcessor {
         let svc = self.observability.as_ref().ok_or_else(|| {
             FederationRejection::Storage("workspace observability not wired".into())
         })?;
-        svc.authorise(&envelope.from.id, &workspace_id_from_bytes(workspace_id)?, workspace_id, hmac)
-            .await
-            .map_err(FederationRejection::Unauthorized)?;
+        svc.authorise(
+            &envelope.from.id,
+            &workspace_id_from_bytes(workspace_id)?,
+            workspace_id,
+            hmac,
+        )
+        .await
+        .map_err(FederationRejection::Unauthorized)?;
         svc.handle_roster_request(&envelope.from.id, envelope.id, workspace_id)
             .await
             .map_err(|e| FederationRejection::Storage(e.to_string()))
@@ -80,7 +85,9 @@ impl InboundProcessor {
                     .await
                     .map_err(|e| FederationRejection::Storage(e.to_string()))?;
                 if !known.iter().any(|m| m == &envelope.from.id) {
-                    return Err(FederationRejection::Unauthorized("public workspace: unknown responder"));
+                    return Err(FederationRejection::Unauthorized(
+                        "public workspace: unknown responder",
+                    ));
                 }
             } else {
                 return Err(FederationRejection::Unauthorized("roster mac mismatch"));
@@ -176,7 +183,9 @@ impl InboundProcessor {
                     .await
                     .map_err(|e| FederationRejection::Storage(e.to_string()))?;
                 if !known.iter().any(|m| m == &envelope.from.id) {
-                    return Err(FederationRejection::Unauthorized("public workspace: unknown responder"));
+                    return Err(FederationRejection::Unauthorized(
+                        "public workspace: unknown responder",
+                    ));
                 }
             } else {
                 return Err(FederationRejection::Unauthorized("channels mac mismatch"));

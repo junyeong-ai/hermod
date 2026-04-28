@@ -174,5 +174,4 @@ mod tests {
         let bad = json!({"params": {"tool_name": "Bash"}});
         assert!(parse_request_params(&bad).is_none());
     }
-
 }

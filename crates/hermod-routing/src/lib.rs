@@ -13,7 +13,7 @@ pub mod router;
 pub mod transport;
 pub mod wss_noise;
 
-pub use access::{AccessController, AccessVerdict, AccessPolicy, scope};
+pub use access::{AccessController, AccessPolicy, AccessVerdict, scope};
 pub use confirmation::{Sensitivity, Verdict, classify, decide, summarize};
 pub use error::{Result, RoutingError};
 pub use pool::{PeerPool, spawn_sweeper};

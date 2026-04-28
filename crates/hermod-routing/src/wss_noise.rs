@@ -141,14 +141,11 @@ impl Transport for WssNoiseTransport {
         }))
     }
 
-    async fn reload_tls(
-        &self,
-        cert_pem: &str,
-        key_pem: &str,
-    ) -> Result<(), PeerTransportError> {
+    async fn reload_tls(&self, cert_pem: &str, key_pem: &str) -> Result<(), PeerTransportError> {
         if self.tls_material.is_none() {
             return Err(PeerTransportError::Backend(
-                "WssNoiseTransport configured outbound-only — reload_tls has nothing to swap".into(),
+                "WssNoiseTransport configured outbound-only — reload_tls has nothing to swap"
+                    .into(),
             ));
         }
         // Validate the new material by building an acceptor against
@@ -163,13 +160,12 @@ impl Transport for WssNoiseTransport {
             // every active listener spawned from this transport.
             // Build the new acceptor via a throwaway listener so we
             // hit the same parse/validate path.
-            let validator =
-                hermod_transport::ws::WsListener::bind_tls_shared(
-                    "127.0.0.1:0".parse().unwrap(),
-                    shared.clone(),
-                )
-                .await
-                .map_err(|e| PeerTransportError::Io(e.to_string()))?;
+            let validator = hermod_transport::ws::WsListener::bind_tls_shared(
+                "127.0.0.1:0".parse().unwrap(),
+                shared.clone(),
+            )
+            .await
+            .map_err(|e| PeerTransportError::Io(e.to_string()))?;
             validator
                 .reload_tls(cert_pem, key_pem)
                 .await
@@ -181,14 +177,13 @@ impl Transport for WssNoiseTransport {
             // `127.0.0.1:0`, snapshotting its shared acceptor, then
             // dropping the listener (the TCP socket goes away with
             // it; only the `Arc<RwLock<…>>` survives).
-            let throwaway =
-                hermod_transport::ws::WsListener::bind_tls(
-                    "127.0.0.1:0".parse().unwrap(),
-                    cert_pem,
-                    key_pem,
-                )
-                .await
-                .map_err(|e| PeerTransportError::Io(e.to_string()))?;
+            let throwaway = hermod_transport::ws::WsListener::bind_tls(
+                "127.0.0.1:0".parse().unwrap(),
+                cert_pem,
+                key_pem,
+            )
+            .await
+            .map_err(|e| PeerTransportError::Io(e.to_string()))?;
             *guard = throwaway.shared_tls_acceptor();
         }
         Ok(())
