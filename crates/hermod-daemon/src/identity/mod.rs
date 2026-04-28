@@ -1,19 +1,27 @@
+//! On-disk identity layout and the helpers that read / create the
+//! files inside `$HERMOD_HOME/identity/`.
+//!
+//! Mode policy lives in [`layout`] — every file's required mode and
+//! the boot-time enforcement that refuses to start on a breach. The
+//! helpers here trust that the layout has already been ensured (boot
+//! calls [`layout::ensure_dir`] before any of them run).
+//!
+//! ```text
+//! $HERMOD_HOME/identity/
+//!   ed25519_secret   (mode 0600, 32 raw bytes)
+//!   tls.crt          (mode 0644, PEM cert; SAN covers localhost + 127.0.0.1 + ::1)
+//!   tls.key          (mode 0600, PEM private key)
+//!   bearer_token     (mode 0600, hex-encoded random bytes — Remote IPC bearer)
+//! ```
+
+pub mod layout;
+
 use anyhow::{Context, Result};
 use hermod_crypto::{Keypair, SecretString, TlsMaterial};
 use std::fs;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
-/// On-disk identity layout:
-///
-/// ```text
-/// $HERMOD_HOME/
-///   identity/
-///     ed25519_secret   (mode 0600, 32 raw bytes)
-///     tls.crt          (PEM cert; SubjectAlternativeNames cover localhost + 127.0.0.1 + ::1)
-///     tls.key          (mode 0600, PEM private key)
-///     bearer_token     (mode 0600, hex-encoded random bytes — Remote IPC bearer)
-/// ```
 pub fn identity_dir(home: &Path) -> PathBuf {
     home.join("identity")
 }
@@ -57,6 +65,7 @@ pub fn rotate_bearer_token(home: &Path) -> Result<SecretString> {
 
 fn write_new_bearer_token(home: &Path) -> Result<SecretString> {
     use rand::RngCore;
+    layout::ensure_dir(home)?;
     // Wrap the random bytes in `Zeroizing` so the stack array is wiped
     // when this function returns — same hygiene as `Keypair::generate`.
     // The hex-encoded `String` is moved into the returned
@@ -66,9 +75,6 @@ fn write_new_bearer_token(home: &Path) -> Result<SecretString> {
     // Borrow (via `as_slice`) — copying with `*bytes` would leave a
     // 32-byte unzeroed copy on `hex::encode`'s stack frame.
     let token = hex::encode(bytes.as_slice());
-    let dir = identity_dir(home);
-    fs::create_dir_all(&dir)?;
-    restrict_dir_permissions(&dir)?;
     let p = bearer_token_path(home);
     write_secret_atomic(&p, token.as_bytes())?;
     Ok(SecretString::new(token))
@@ -76,7 +82,6 @@ fn write_new_bearer_token(home: &Path) -> Result<SecretString> {
 
 pub fn load(home: &Path) -> Result<Keypair> {
     let p = secret_path(home);
-    enforce_secret_mode(&p)?;
     let bytes = fs::read(&p).with_context(|| format!("read {}", p.display()))?;
     if bytes.len() != 32 {
         anyhow::bail!(
@@ -90,44 +95,8 @@ pub fn load(home: &Path) -> Result<Keypair> {
     Ok(Keypair::from_secret_seed(&seed))
 }
 
-/// Refuse to read the identity secret if it's accessible to anyone but
-/// the owner. `hermod doctor` flags the same condition for operators
-/// who haven't started the daemon yet; the boot-time check here is
-/// the actual enforcement — a daemon that starts on a world-readable
-/// secret has already lost the security argument before the first
-/// envelope flies.
-#[cfg(unix)]
-fn enforce_secret_mode(p: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let meta = fs::metadata(p).with_context(|| format!("stat identity secret {}", p.display()))?;
-    let mode = meta.permissions().mode() & 0o777;
-    if mode & 0o077 != 0 {
-        anyhow::bail!(
-            "identity secret {} has insecure mode {:#o} \
-             (group/other readable); refusing to start. \
-             Run `chmod 0600 {}` and retry.",
-            p.display(),
-            mode,
-            p.display()
-        );
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn enforce_secret_mode(_p: &Path) -> Result<()> {
-    // Non-Unix platforms have a different ACL model — the daemon
-    // can't enforce the equivalent invariant from `metadata`. Operators
-    // on those platforms are expected to confine `$HERMOD_HOME` via
-    // the platform's native ACL tooling. `hermod doctor` flags the
-    // unenforceable case for visibility.
-    Ok(())
-}
-
 pub fn save(home: &Path, keypair: &Keypair) -> Result<PathBuf> {
-    let dir = identity_dir(home);
-    fs::create_dir_all(&dir)?;
-    restrict_dir_permissions(&dir)?;
+    layout::ensure_dir(home)?;
     let path = secret_path(home);
     write_secret_atomic(&path, &keypair.to_secret_seed())?;
     Ok(path)
@@ -145,11 +114,9 @@ pub fn ensure_tls(home: &Path, keypair: &Keypair) -> Result<TlsMaterial> {
         return TlsMaterial::from_pem(cert_pem, key_pem)
             .with_context(|| "decode existing tls material");
     }
-    let dir = identity_dir(home);
-    fs::create_dir_all(&dir)?;
-    restrict_dir_permissions(&dir)?;
+    layout::ensure_dir(home)?;
     let material = TlsMaterial::generate(&keypair.agent_id()).context("generate TLS material")?;
-    fs::write(&cert_p, &material.cert_pem)?;
+    write_public_atomic(&cert_p, material.cert_pem.as_bytes())?;
     write_secret_atomic(&key_p, material.key_pem.as_bytes())?;
     Ok(material)
 }
@@ -172,15 +139,37 @@ pub fn ensure_exists(home: &Path) -> Result<(Keypair, PathBuf)> {
 /// rename leaves the original file (or no file) intact.
 #[cfg(unix)]
 fn write_secret_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_with_mode(path, bytes, 0o600)
+}
+
+#[cfg(not(unix))]
+fn write_secret_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    fs::write(path, bytes)
+}
+
+/// Atomically write `bytes` to `path` with mode 0644 from creation —
+/// the public-file equivalent of [`write_secret_atomic`]. Used for
+/// `tls.crt`, which peers fetch and the daemon must guarantee remains
+/// readable + canonical-mode after every regenerate.
+#[cfg(unix)]
+fn write_public_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_with_mode(path, bytes, 0o644)
+}
+
+#[cfg(not(unix))]
+fn write_public_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    fs::write(path, bytes)
+}
+
+#[cfg(unix)]
+fn write_atomic_with_mode(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
 
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let tmp = parent.join(format!(
         ".{}.tmp.{}",
-        path.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("secret"),
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("file"),
         std::process::id()
     ));
 
@@ -188,7 +177,7 @@ fn write_secret_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         .write(true)
         .create(true)
         .truncate(true)
-        .mode(0o600)
+        .mode(mode)
         .open(&tmp)?;
     f.write_all(bytes)?;
     f.sync_all()?;
@@ -198,22 +187,5 @@ fn write_secret_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn write_secret_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    fs::write(path, bytes)
-}
-
-#[cfg(unix)]
-fn restrict_dir_permissions(dir: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let perms = std::fs::Permissions::from_mode(0o700);
-    std::fs::set_permissions(dir, perms)
-}
-
-#[cfg(not(unix))]
-fn restrict_dir_permissions(_dir: &Path) -> std::io::Result<()> {
     Ok(())
 }

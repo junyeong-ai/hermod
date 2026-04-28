@@ -1,4 +1,5 @@
 use anyhow::Result;
+use hermod_daemon::identity::layout::{IdentityFileKind, LayoutError};
 use std::path::Path;
 
 use crate::client::ClientTarget;
@@ -15,10 +16,6 @@ const EXPECTED_SCHEMA_VERSION: &str = "1";
 pub async fn run(home: &Path, target: &ClientTarget) -> Result<()> {
     let mut report = Report::new();
     let cfg_path = home.join("config.toml");
-    let identity_dir = home.join("identity");
-    let identity_secret = identity_dir.join("ed25519_secret");
-    let bearer_token = identity_dir.join("bearer_token");
-    let tls_key = identity_dir.join("tls.key");
 
     report.check("$HERMOD_HOME exists and is readable", home.is_dir(), || {
         format!("create it: mkdir -p {} && hermod init", home.display())
@@ -28,31 +25,22 @@ pub async fn run(home: &Path, target: &ClientTarget) -> Result<()> {
         "run `hermod init` to write a default config".into()
     });
 
-    report.check(
-        "identity/ed25519_secret present",
-        identity_secret.exists(),
-        || "run `hermod init` to generate an identity".into(),
-    );
-
-    if identity_dir.exists() {
-        report.check(
-            "identity/ has restricted permissions (0700)",
-            check_mode(&identity_dir, 0o700),
-            || format!("chmod 700 {}", identity_dir.display()),
-        );
-    }
-
-    for (label, p) in [
-        ("identity secret", &identity_secret),
-        ("bearer_token", &bearer_token),
-        ("tls.key", &tls_key),
-    ] {
-        if p.exists() {
-            report.check(
-                &format!("{label} has restricted permissions (0600)"),
-                check_mode(p, 0o600),
-                || format!("chmod 600 {}", p.display()),
-            );
+    // Identity file/directory mode audit driven by the daemon's
+    // single-source-of-truth `identity::layout::spec`. Adding a new
+    // identity file there automatically adds a row here.
+    for (file, finding) in hermod_daemon::identity::layout::audit(home) {
+        match finding {
+            Ok(()) => report.pass(&format!("{} ({:o})", file.label, file.required_mode)),
+            Err(LayoutError::Missing { .. }) => match file.kind {
+                IdentityFileKind::Secret | IdentityFileKind::Directory => {
+                    report.fail(file.label, "run `hermod init` to generate it".into())
+                }
+                IdentityFileKind::Public => {
+                    // Public file missing pre-init is normal; daemon
+                    // first-run creates it.
+                }
+            },
+            Err(e) => report.fail(file.label, e.to_string()),
         }
     }
 
@@ -257,18 +245,6 @@ pub async fn run(home: &Path, target: &ClientTarget) -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
-}
-
-#[cfg(unix)]
-fn check_mode(p: &Path, expected: u32) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(p)
-        .map(|m| m.permissions().mode() & 0o777 == expected)
-        .unwrap_or(false)
-}
-#[cfg(not(unix))]
-fn check_mode(_: &Path, _: u32) -> bool {
-    true
 }
 
 struct Report {

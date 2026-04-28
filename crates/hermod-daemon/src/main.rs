@@ -56,6 +56,12 @@ async fn main() -> anyhow::Result<()> {
     let storage_dsn = paths::expand_dsn(&config.storage.dsn, &home);
     let blob_dsn = paths::expand_dsn(&config.blob.dsn, &home);
 
+    // Identity layout enforcement — fail loud on dir mode breach
+    // before any secret file is touched. The matching post-init
+    // `layout::enforce` below covers every secret file once
+    // `ensure_tls` / `ensure_bearer_token` have populated them.
+    identity::layout::ensure_dir(&home).context("identity directory")?;
+
     let identity = identity::load(&home)
         .context("load identity (run `hermod init` first to generate an identity)")?;
 
@@ -107,6 +113,13 @@ async fn main() -> anyhow::Result<()> {
     services::ensure_self_agent(&*db, &identity, self_alias).await?;
 
     let bearer_token = std::sync::Arc::new(hermod_daemon::identity::ensure_bearer_token(&home)?);
+
+    // Post-init enforcement: every spec'd secret file now exists with
+    // its canonical mode (the writers in `identity::*` always produce
+    // 0o600 / 0o644). Fail loud if anything was tampered between
+    // creation and now.
+    identity::layout::enforce(&home).context("identity layout")?;
+
     let audit_file_path = config
         .audit
         .file_path

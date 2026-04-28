@@ -59,5 +59,8 @@ strum              = { workspace = true }
 futures            = { workspace = true }
 zeroize            = { workspace = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

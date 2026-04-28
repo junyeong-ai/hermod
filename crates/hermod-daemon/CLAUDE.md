@@ -10,7 +10,9 @@ bootstrap/         construction-phase helpers (audit_sink, …)
 config.rs          [identity|daemon|storage|blob|federation|policy|audit|broker]
 dispatcher.rs      RPC method → service-call routing
 federation.rs      WSS+Noise inbound accept loop (Semaphore, per-IP rate limit)
-identity.rs        on-disk seed/cert layout, mode-0600 startup enforce
+identity/
+  mod.rs           on-disk seed/cert/bearer helpers (load, save, ensure_tls, ensure_bearer_token)
+  layout.rs        single source of truth: spec(), ensure_dir(), enforce(), audit() — boot fail-loud + doctor audit
 inbound/           per-MessageKind acceptors (one impl block per file)
 ipc_remote.rs      WSS+Bearer remote-IPC server
 janitor.rs         periodic sweep (briefs, confirms, sessions, audit archive)
@@ -59,6 +61,30 @@ circular dependencies with `MessageService`:
   — federation-relay verdicts back to originator + fan-out to delegates.
   Backed by trait objects (`MessageRelayResponder`,
   `CapabilityPromptForwarder`) in `services/permission_relay.rs`.
+
+## Identity layout policy
+
+Every file under `$HERMOD_HOME/identity/` is declared once in
+`identity::layout::spec(home)` — the single source of truth. Three
+APIs derive from that one list:
+
+- `layout::ensure_dir(home)` — create-or-verify the parent dir
+  (mode 0o700). Called by every helper that writes into `identity/`,
+  so callers don't pre-create the dir.
+- `layout::enforce(home)` — fail-loud check called once at daemon
+  boot, after `ensure_tls` / `ensure_bearer_token` have populated
+  every file. Wrong mode ⇒ refuse to start.
+- `layout::audit(home)` — non-fatal per-file report consumed by
+  `hermod doctor`. Public files (TLS cert) appear in the report
+  but are not enforced at boot.
+
+**No silent repair.** A mode breach is a fail-loud signal; auto-repair
+would mask intrusions (sshd `StrictModes` model). Operators chmod
+manually; the change lands in shell history.
+
+**Adding a new identity file** ⇒ one new `IdentityFile` entry in
+`spec()` plus one `write_*_atomic` call site. Boot enforcement, doctor
+audit, and `chmod` hints all update automatically.
 
 ## Broker mode
 
