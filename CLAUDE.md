@@ -5,9 +5,11 @@ Code. Two binaries: `hermodd` (daemon) and `hermod` (CLI / MCP server).
 Pure Rust, edition 2024.
 
 Per-crate detail loads on demand from `crates/<crate>/CLAUDE.md` when
-you touch files in that directory. Cross-cutting topic rules live in
-`.claude/rules/`. Operator-facing docs (deployment, threat model,
-audit catalogue) live under `DEPLOY.md` and `docs/`.
+you read files in that directory. Cross-cutting topic rules live under
+`.claude/rules/` and load automatically (path-scoped where noted).
+Operator and security docs live at `DEPLOY.md`, `CONTRIBUTING.md`, and
+`docs/{audit_actions,confirmation,threat-model}.md` — read on demand
+when the task touches them.
 
 ---
 
@@ -41,9 +43,8 @@ cargo fmt --all -- --check
 bash scripts/check_naming.sh                       # IPC method / dispatcher / audit-action / repo-impl shapes
 ```
 
-The fuzz harness is a separate, workspace-excluded crate at `fuzz/`.
-Run campaigns with `cargo install cargo-fuzz` once and then
-`cargo fuzz run <target>` (see `fuzz/README.md`).
+The fuzz harness is a separate, workspace-excluded crate at `fuzz/`
+(`cargo install cargo-fuzz` once, then `cargo fuzz run <target>`).
 
 ---
 
@@ -78,18 +79,6 @@ Run campaigns with `cargo install cargo-fuzz` once and then
 - **Hop counter caps mesh cycles.** `wire::MAX_RELAY_HOPS = 4`.
   Brokers increment + reject on overflow; receivers defensively check.
 
-Cross-cutting rules with their own files (loaded automatically):
-
-- `.claude/rules/naming-taxonomy.md` — suffix conventions for new
-  types (`*Verdict`, `*Outcome`, `*Sink`, `*Provider`, …) + RPC
-  method shape.
-- `.claude/rules/clean-slate.md` — pre-v1 policy: rename in place,
-  no aliases, no deprecation periods, up-only migrations.
-- `.claude/rules/lints-and-tests.md` — workspace lint floor + when
-  to add a test + e2e release-binary dependency.
-- `.claude/rules/audit-emission.md` — path-scoped to daemon +
-  audit sinks: `audit_or_warn` + typed `federation` field + doc parity.
-
 ---
 
 ## Documentation contracts
@@ -106,16 +95,3 @@ Cross-cutting rules with their own files (loaded automatically):
   counts, test counts, crate counts). Maintenance cost without
   behavior signal — keep them out of `README.md` / `DEPLOY.md` /
   `CLAUDE.md`.
-
----
-
-## Imports
-
-- `@DEPLOY.md` — operator deployment scenarios (single-user,
-  federation, Docker, k8s, Claude Code, broker mode, audit federation,
-  TLS rotate).
-- `@docs/threat-model.md` — security spec (trust boundaries,
-  threats, invariants).
-- `@docs/audit_actions.md` — audit-row catalogue.
-- `@docs/confirmation.md` — trust-gate decision matrix.
-- `@CONTRIBUTING.md` — contributor workflow.
