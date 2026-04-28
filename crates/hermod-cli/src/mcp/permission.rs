@@ -25,7 +25,7 @@
 //! The daemon already has a single source of truth for resolved events
 //! — its in-memory ring buffer with monotonic sequence numbers. Cursor
 //! polling is the pattern used by the inbox / confirmation streams in
-//! [`super::channel`], so adding a third cursor keeps the design
+//! [`mod@super::channel`], so adding a third cursor keeps the design
 //! language consistent. Long-polling would deliver lower latency but at
 //! the cost of new IPC machinery; we can switch to it if approval
 //! latency ever shows up as a real complaint.

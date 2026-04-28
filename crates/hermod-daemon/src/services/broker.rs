@@ -2,7 +2,7 @@
 //! other peers.
 //!
 //! When `[broker] mode = "relay_only"` or `"relay_and_witness"`, this
-//! service is wired into [`InboundProcessor`] via the
+//! service is wired into [`crate::inbound::InboundProcessor`] via the
 //! `with_broker_service` builder method. The inbound pipeline's
 //! standard `to.id == self_id` check is relaxed: envelopes addressed
 //! to other peers are handed to this service instead of being

@@ -1,8 +1,9 @@
 //! HTTP-push audit sink.
 //!
 //! POSTs every audit row as a single JSON object to a configurable
-//! webhook URL. Composes alongside [`StorageAuditSink`] /
-//! [`FileAuditSink`] / `RemoteAuditSink` via [`TeeAuditSink`].
+//! webhook URL. Composes alongside [`crate::StorageAuditSink`] /
+//! [`crate::FileAuditSink`] / `RemoteAuditSink` via
+//! [`crate::TeeAuditSink`].
 //!
 //! Designed for managed log-aggregation endpoints where the operator
 //! prefers push over pull:

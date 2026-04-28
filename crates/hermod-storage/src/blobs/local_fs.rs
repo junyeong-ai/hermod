@@ -1,10 +1,10 @@
-//! Filesystem-backed [`BlobStore`].
+//! Filesystem-backed [`crate::BlobStore`].
 //!
 //! Layout: `<root>/<bucket>/<sanitized-key>`. Locations are
 //! `local-fs://<bucket>/<sanitized-key>` strings — operators can map
-//! a location back to a path via [`location_to_path`] for direct
-//! inspection (e.g. Claude's `Read` tool reading a file in the
-//! operator's inbox).
+//! a location back to a path via
+//! [`LocalFsBlobStore::location_to_path`] for direct inspection
+//! (e.g. Claude's `Read` tool reading a file in the operator's inbox).
 //!
 //! Atomicity: writes go to `.<key>.tmp.<ulid>` then `rename(2)` over
 //! the final path — `rename` on POSIX is atomic within the same

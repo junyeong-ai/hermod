@@ -7,12 +7,12 @@
 //! ## Concurrent workers
 //!
 //! Each worker generates a unique `worker_id` (ULID) at startup and uses
-//! [`MessageRepository::claim_pending_remote`] to atomically grab a batch
-//! of rows. SQLite's IMMEDIATE transaction inside that call serialises
-//! the SELECT-then-UPDATE so two workers never deliver the same row.
-//! [`CLAIM_TTL`] caps how long a claim is honoured: a worker that
-//! crashed mid-batch leaves rows owned for at most that long before
-//! another worker picks them back up.
+//! [`hermod_storage::MessageRepository::claim_pending_remote`] to
+//! atomically grab a batch of rows. SQLite's IMMEDIATE transaction
+//! inside that call serialises the SELECT-then-UPDATE so two workers
+//! never deliver the same row. [`CLAIM_TTL`] caps how long a claim is
+//! honoured: a worker that crashed mid-batch leaves rows owned for at
+//! most that long before another worker picks them back up.
 
 use hermod_core::{Endpoint, Timestamp};
 use hermod_protocol::envelope::deserialize_envelope;

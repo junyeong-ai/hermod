@@ -491,10 +491,11 @@ async fn next_ack(conn: &mut dyn TransportConnection, expect: MessageId) -> Resu
 /// accumulating forever — the symptom is "memory crawls up and probes
 /// stop firing" with no obvious failure on the metrics dashboard.
 ///
-/// Panic budget: at most [`MAX_SWEEPER_RESTARTS`] restarts per
-/// [`RESTART_WINDOW`]. Past that, the supervisor stops respawning and
-/// logs at `error!` — recurrent panics indicate a real bug, and a
-/// crash-loop would just fill the log.
+/// Panic budget: at most `MAX_SWEEPER_RESTARTS` restarts per
+/// `RESTART_WINDOW` (defined as function-local consts below). Past
+/// that, the supervisor stops respawning and logs at `error!` —
+/// recurrent panics indicate a real bug, and a crash-loop would
+/// just fill the log.
 pub fn spawn_sweeper(pool: PeerPool, shutdown: tokio::sync::oneshot::Receiver<()>) {
     /// Maximum panic count within `RESTART_WINDOW` before the supervisor
     /// gives up and the daemon admin must take over.

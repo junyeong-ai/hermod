@@ -123,7 +123,7 @@ impl CapabilityService {
     /// Issue a fresh capability and deliver it to the audience by
     /// envelope (`CapabilityGrant`). Combines `capability.issue` +
     /// `message.send` so the operator's CLI has a one-shot
-    /// "delegate <agent>" flow.
+    /// `delegate <agent>` flow.
     pub async fn deliver(
         &self,
         params: CapabilityDeliverParams,

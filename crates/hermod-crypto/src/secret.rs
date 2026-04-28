@@ -16,7 +16,7 @@
 //! ## Boundary helpers
 //!
 //! Building a `SecretString` from an external source ([`read_secret_file`],
-//! [`take_secret_env`]) routes the raw bytes through a `Zeroizing` buffer
+//! [`secret_from_env`]) routes the raw bytes through a `Zeroizing` buffer
 //! so the *source* allocation is wiped after the secret is copied — not
 //! just the destination `SecretString`. Without these helpers a naive
 //! `SecretString::new(std::fs::read_to_string(p)?.trim().to_string())`

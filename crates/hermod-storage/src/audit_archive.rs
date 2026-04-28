@@ -4,7 +4,7 @@
 //! otherwise grow unboundedly. The hash-chain forbids deleting middle
 //! rows directly. The pattern is: at the day boundary, freeze every
 //! row from the previous day into a gzip-compressed JSONL file and
-//! hand it to the [`BlobStore`]; index the chunk in
+//! hand it to the [`crate::BlobStore`]; index the chunk in
 //! `audit_archive_index`; only then DELETE the rows from `audit_log`.
 //!
 //! Chain continuity across archives is preserved by recording each

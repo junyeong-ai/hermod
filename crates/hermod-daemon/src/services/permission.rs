@@ -53,9 +53,10 @@ use tokio::sync::{Mutex, OnceCell};
 use crate::services::{ServiceError, audit_or_warn};
 
 /// Ships a finalised verdict back to the originating peer of a relayed
-/// permission prompt. Production uses [`MessageService`] to wrap the
-/// verdict in a `PermissionResponse` envelope; tests substitute an
-/// in-memory recorder. Wired exactly once at daemon construction via
+/// permission prompt. Production uses
+/// [`crate::services::message::MessageService`] to wrap the verdict in
+/// a `PermissionResponse` envelope; tests substitute an in-memory
+/// recorder. Wired exactly once at daemon construction via
 /// [`PermissionService::set_relay_responder`].
 #[async_trait]
 pub trait RelayResponder: Send + Sync + 'static {

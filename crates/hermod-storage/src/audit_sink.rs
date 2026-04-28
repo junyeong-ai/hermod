@@ -1,7 +1,7 @@
 //! Audit emission abstraction.
 //!
 //! Services emit audit rows through a [`AuditSink`] rather than calling
-//! the [`AuditRepository`] directly. The default `StorageAuditSink`
+//! the [`crate::AuditRepository`] directly. The default `StorageAuditSink`
 //! writes to the local hash-chained log; composable backends like
 //! `TeeAuditSink` mirror to additional destinations (Kafka, OpenTelemetry,
 //! a remote Hermod's `audit.federate.ingest` RPC) without touching every

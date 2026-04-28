@@ -1,8 +1,9 @@
 //! Append-only JSONL audit sink.
 //!
-//! Operators wire this alongside the [`StorageAuditSink`] via
-//! [`TeeAuditSink`] when they want every audit row mirrored to a flat
-//! file. The file format is one JSON object per line — the format every
+//! Operators wire this alongside the [`crate::StorageAuditSink`] via
+//! [`crate::TeeAuditSink`] when they want every audit row mirrored to
+//! a flat file. The file format is one JSON object per line — the
+//! format every
 //! log-shipping pipeline (promtail / vector / fluent-bit / filebeat)
 //! consumes natively. The SQLite hash-chain remains the cryptographic
 //! source of truth; this file is the operator-readable forwarding stream.

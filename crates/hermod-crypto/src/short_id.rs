@@ -7,9 +7,9 @@
 //! * **Unambiguous in handwriting / autocorrect** — lowercase, no `l`
 //!   (could read as `1` or `I`), no digits.
 //! * **Drawn from a fixed alphabet a regex can pin** — the operator's
-//!   reply ("yes <id>" / "no <id>") is parsed by `^\s*(y|yes|n|no)\s+
-//!   ([a-km-z]{5})\s*$/i`. Anything outside the alphabet falls through
-//!   as ordinary chat.
+//!   reply (`yes <id>` / `no <id>`) is parsed by
+//!   `^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i`. Anything outside the
+//!   alphabet falls through as ordinary chat.
 //!
 //! With 25 letters and length 5, the space is `25^5 = 9_765_625`.
 //! Approval requests live for a few minutes at most, so collision

@@ -1,11 +1,11 @@
 //! Adapter from the discovery crate's [`BeaconAuditor`] callback shape
 //! onto the daemon's hash-chained [`AuditSink`] stack.
 //!
-//! Why a tiny adapter and not a direct dependency:
-//! [`hermod-discovery`] should not depend on [`hermod-storage`]. The
-//! discovery crate emits sync, fire-and-forget events; this adapter
-//! lifts each event onto an `AuditEntry` and dispatches via
-//! `tokio::spawn` so the discovery task never blocks on storage.
+//! Why a tiny adapter and not a direct dependency: `hermod-discovery`
+//! should not depend on `hermod-storage`. The discovery crate emits
+//! sync, fire-and-forget events; this adapter lifts each event onto
+//! an `AuditEntry` and dispatches via `tokio::spawn` so the discovery
+//! task never blocks on storage.
 
 use hermod_core::{AgentId, Endpoint, Timestamp};
 use hermod_discovery::BeaconAuditor;

@@ -106,9 +106,8 @@ impl DaemonClient {
 
     /// Open a remote IPC session — `wss://host:port/` with Bearer auth.
     /// The handshake retries exactly once if the remote rejects the
-    /// presented credentials, asking the relevant
-    /// [`BearerProvider`](crate::bearer::BearerProvider) to mint fresh
-    /// material.
+    /// presented credentials, asking the relevant [`BearerProvider`]
+    /// to mint fresh material.
     pub async fn connect_remote(url: &Url, auth: &RemoteAuth, pin: PinPolicy) -> Result<Self> {
         let remote = connect_remote_with_refresh(url, auth, pin)
             .await

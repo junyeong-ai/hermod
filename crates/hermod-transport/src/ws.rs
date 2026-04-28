@@ -116,7 +116,7 @@ impl WsListener {
     /// Bind a TLS-wrapped listener using a caller-provided
     /// [`SharedTlsAcceptor`] so multiple sites (typically the
     /// `WssNoiseTransport` and its listener) can share one rotation
-    /// point. Calling [`reload_tls`] on either end swaps the cert
+    /// point. Calling [`Self::reload_tls`] on either end swaps the cert
     /// chain everywhere the same handle is referenced.
     pub async fn bind_tls_shared(
         addr: SocketAddr,

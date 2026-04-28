@@ -218,7 +218,7 @@ pub struct MessageView {
     pub body: MessageBody,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread: Option<MessageId>,
-    /// Opaque [`hermod_storage::BlobStore`] location for File-kind
+    /// Opaque `hermod_storage::BlobStore` location for File-kind
     /// messages whose payload was written to the store on inbound.
     /// Operator surfaces (CLI, MCP) hand this to the BlobStore to
     /// fetch the bytes.

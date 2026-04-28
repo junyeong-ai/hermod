@@ -497,8 +497,8 @@ pub enum MessageBody {
     /// canonical roster.
     ///
     /// `request_id` is the envelope id of the originating
-    /// [`WorkspaceRosterRequest`] — requester correlates by this
-    /// field. Each member entry carries both the agent_id and the
+    /// [`MessageBody::WorkspaceRosterRequest`] — requester correlates by
+    /// this field. Each member entry carries both the agent_id and the
     /// pubkey, bound by `agent_id == blake3(pubkey)[:26]` so the
     /// receiver can verify and auto-upsert without separate
     /// out-of-band exchange. `hmac` (when present) is computed over
@@ -513,7 +513,7 @@ pub enum MessageBody {
     },
 
     /// Channel listing query — "what channels exist in this workspace?".
-    /// Same auth/sensitivity model as [`WorkspaceRosterRequest`].
+    /// Same auth/sensitivity model as [`MessageBody::WorkspaceRosterRequest`].
     WorkspaceChannelsRequest {
         workspace_id: ByteBuf,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -535,7 +535,7 @@ pub enum MessageBody {
     },
 }
 
-/// One channel descriptor inside a [`WorkspaceChannelsResponse`].
+/// One channel descriptor inside a [`MessageBody::WorkspaceChannelsResponse`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceChannelEntry {
     /// 16-byte channel id (hex-encoded by the storage layer; raw on
@@ -547,7 +547,7 @@ pub struct WorkspaceChannelEntry {
     pub name: String,
 }
 
-/// One member descriptor inside a [`WorkspaceRosterResponse`]. The
+/// One member descriptor inside a [`MessageBody::WorkspaceRosterResponse`]. The
 /// pubkey is bound to the agent_id by
 /// `agent_id == blake3(pubkey)[:26]` so the receiver can verify
 /// every entry independently and reject any responder that lies

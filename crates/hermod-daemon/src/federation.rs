@@ -6,9 +6,9 @@
 //!
 //! The handshake (TLS + Noise XX for the WSS+Noise backend; mTLS for a
 //! future gRPC backend; etc.) is the [`Transport`]'s responsibility —
-//! [`TransportListener::accept`] returns a fully-authenticated
-//! [`TransportConnection`]. This file only sees the post-handshake
-//! identity and the bidirectional frame stream.
+//! [`hermod_routing::TransportListener::accept`] returns a
+//! fully-authenticated [`TransportConnection`]. This file only sees
+//! the post-handshake identity and the bidirectional frame stream.
 //!
 //! ## Slow-loris and flood protection
 //!
@@ -17,11 +17,11 @@
 //!   * An `Arc<Semaphore>` sized by `[policy] max_inflight_handshakes`
 //!     gates the spawn of any handshake task. New connections beyond
 //!     the cap park at `acquire_owned()`.
-//!   * Per-source-IP token bucket (one-second refill at
-//!     [`PER_IP_HANDSHAKES_PER_SEC`]) is a future addition for
-//!     transports that expose source-IP at accept time. The current
-//!     `Transport` trait abstracts that detail away; reintroduce per-IP
-//!     gating when transport adds an `accept_with_metadata` method.
+//!   * Per-source-IP token bucket (one-second refill, future addition)
+//!     for transports that expose source-IP at accept time. The
+//!     current `Transport` trait abstracts that detail away;
+//!     reintroduce per-IP gating when transport adds an
+//!     `accept_with_metadata` method.
 
 use hermod_core::{Endpoint, PubkeyBytes, Timestamp, TrustLevel, WssEndpoint};
 use hermod_protocol::wire::{AckStatus, Pong, WireFrame};

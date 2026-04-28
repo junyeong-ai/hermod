@@ -1,6 +1,7 @@
 //! Outbound audit federation sink.
 //!
-//! Composes inside the global [`AuditSink`] stack via [`TeeAuditSink`].
+//! Composes inside the global [`AuditSink`] stack via
+//! [`hermod_storage::TeeAuditSink`].
 //! Every audit row that flows through the daemon is wrapped into an
 //! `AuditFederate` envelope and shipped to **every** operator-designated
 //! aggregator in parallel. Each aggregator must have opted in to
