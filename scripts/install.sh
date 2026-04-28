@@ -19,6 +19,32 @@
 #   --skip-build             — assume hermod/hermodd already on PATH
 #   --help                   — show this message
 #
+# Deployment patterns (compose the flags above):
+#
+#   1. Local laptop (default — daemon, MCP, and plugin all local):
+#         ./scripts/install.sh
+#
+#   2. Cloud-daemon thin client (laptop ↔ remote daemon over WSS+Bearer):
+#         ./scripts/install.sh --no-service --no-mcp
+#         # then register MCP that points at the remote daemon:
+#         claude mcp add hermod -s user -- hermod mcp \
+#           --remote wss://broker.example.com/ \
+#           --bearer-file ~/.hermod/remote_bearer
+#         # behind an SSO reverse proxy (IAP / oauth2-proxy / Cloudflare
+#         # Access)? add --proxy-bearer-command to the MCP entry above.
+#         # See DEPLOY.md §3.
+#
+#   3. Admin only (CLI to operate a remote broker — no daemon, no MCP,
+#      no plugin):
+#         ./scripts/install.sh --no-service --no-mcp --no-plugin
+#         hermod --remote wss://broker.example.com/ \
+#                --bearer-file ~/.hermod/remote_bearer status
+#
+#   4. Broker host (server that relays envelopes for federated peers):
+#         ./scripts/install.sh
+#         # then enable [broker] in $HERMOD_HOME/config.toml — see
+#         # DEPLOY.md §4.7.
+#
 # After install:
 #   hermod status            (should print agent_id + uptime)
 #   hermod doctor            (sanity check)
