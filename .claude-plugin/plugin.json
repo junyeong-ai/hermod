@@ -24,6 +24,5 @@
     "email": "ai.junyeong@gmail.com"
   },
   "skills": "./skills/",
-  "commands": "./commands/",
-  "mcpServers": "./.mcp.json"
+  "commands": "./commands/"
 }

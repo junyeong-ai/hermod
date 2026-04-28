@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "hermod": {
-      "command": "hermod",
-      "args": ["mcp"],
-      "env": {}
-    }
-  }
-}
