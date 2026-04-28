@@ -1,9 +1,10 @@
 //! Bearer credential providers for the Remote IPC client.
 //!
 //! Every outbound `--remote wss://…` connection presents an
-//! `Authorization: Bearer <token>` header. This module abstracts where the
-//! token comes from (env var, file on disk, mint-on-demand shell command)
-//! behind a single trait so the connect path stays source-agnostic.
+//! `Authorization: Bearer <token>` header validated by the hermod
+//! daemon. This module abstracts where the token comes from (env var,
+//! file on disk, mint-on-demand shell command) behind a single trait
+//! so the connect path stays source-agnostic.
 //!
 //! ## Refresh model
 //!
@@ -16,8 +17,8 @@
 //!     token is returned without spawning another mint (single-flight).
 //!
 //! [`TokenEpoch`] is the cookie the connect path passes when retrying after
-//! a 401 — it tells the provider "the token I just used was rejected;
-//! mint a new one unless you already have a newer one".
+//! an auth failure — it tells the provider "the token I just used was
+//! rejected; mint a new one unless you already have a newer one".
 //!
 //! ## Source taxonomy
 //!
@@ -28,14 +29,14 @@
 //!     path; subsequent reads happen only via `refresh`. Same
 //!     deterministic model as the command source — no time-based
 //!     heuristic that could silently advance the epoch under an
-//!     in-flight 401-retry.
-//!   * [`CommandBearerProvider`] — runs `--bearer-command` under `sh -c`
-//!     and treats stdout as the token. Single-flight via
-//!     [`TokenEpoch`]; the inner mutex means concurrent 401s collapse
+//!     in-flight retry.
+//!   * [`CommandBearerProvider`] — runs the configured shell command
+//!     under `sh -c` and treats stdout as the token. Single-flight via
+//!     [`TokenEpoch`]; the inner mutex means concurrent retries collapse
 //!     into a single subprocess invocation.
 //!
-//! New sources are added by implementing the trait and adding an arm to
-//! [`from_env_and_args`]; nothing else in the codebase needs to change.
+//! New sources are added by implementing the trait and adding an arm in
+//! [`resolve_source`]; nothing else in the codebase needs to change.
 
 mod command;
 mod file;
@@ -53,9 +54,10 @@ pub use file::FileBearerProvider;
 pub use static_provider::StaticBearerProvider;
 
 /// Monotonically increasing per-provider counter. Used as a cookie by the
-/// connect path's 401-retry: `refresh(stale)` only mints fresh material if
-/// the cached token's epoch is `<= stale.epoch`. This is the single-flight
-/// dedup primitive — N concurrent 401s collapse into one subprocess.
+/// connect path's auth-failure retry: `refresh(stale)` only mints fresh
+/// material if the cached token's epoch is `<= stale.epoch`. This is the
+/// single-flight dedup primitive — N concurrent retries collapse into one
+/// subprocess.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TokenEpoch(u64);
 
@@ -143,63 +145,90 @@ pub trait BearerProvider: Send + Sync + std::fmt::Debug {
 }
 
 /// Operator-supplied bearer source declarations. Captured from CLI args
-/// and environment by [`from_env_and_args`] before any IPC happens; the
-/// connect path never re-inspects env vars.
+/// and environment by [`daemon_from_env_and_args`] before any IPC
+/// happens; the connect path never re-inspects env vars.
+///
+/// Field names are family-neutral (`file` / `command`) so the same
+/// shape can back additional header families without renaming. The
+/// flag-name strings surfaced in error messages live in the
+/// family-specific factory, not in this struct.
 #[derive(Debug, Default)]
 pub struct BearerArgs {
-    pub bearer_file: Option<PathBuf>,
-    pub bearer_command: Option<String>,
+    pub file: Option<PathBuf>,
+    pub command: Option<String>,
 }
 
-/// Resolve "where does the bearer come from" exactly once at startup.
+/// Flag names surfaced when the source is ambiguous. One per bearer
+/// family so the operator sees the names they actually typed.
+struct FamilyFlags {
+    file: &'static str,
+    command: &'static str,
+    env: &'static str,
+}
+
+const DAEMON_FLAGS: FamilyFlags = FamilyFlags {
+    file: "--bearer-file",
+    command: "--bearer-command",
+    env: "HERMOD_BEARER_TOKEN",
+};
+
+/// Resolve "where does the daemon-layer bearer come from" exactly once
+/// at startup.
 ///
 /// Precedence is **explicit > implicit**: any of `--bearer-file`,
 /// `--bearer-command`, or `HERMOD_BEARER_TOKEN` is treated as an
 /// explicit declaration, and at most one may be set. With no explicit
-/// declaration `default_path` (when `Some`) is opened via
-/// [`FileBearerProvider`] — the "just works" path when the CLI runs on
-/// the same host as the daemon and inherits its `bearer_token` file.
-/// `None` plus zero explicit declarations is a configuration error.
+/// declaration `default_path` is opened via [`FileBearerProvider`] —
+/// the "just works" path when the CLI runs on the same host as the
+/// daemon and inherits its `bearer_token` file.
 ///
 /// Returning a trait object means the connect path doesn't know (or
 /// care) which source it got. Adding a fourth source (e.g. an OS
-/// keyring lookup) is a new arm here and a new module — no other call
-/// sites change.
-pub fn from_env_and_args(
+/// keyring lookup) is one new arm in [`resolve_source`] — no other
+/// call sites change.
+pub fn daemon_from_env_and_args(
     args: &BearerArgs,
     env_token: Option<SecretString>,
-    default_path: Option<PathBuf>,
+    default_path: PathBuf,
 ) -> Result<Arc<dyn BearerProvider>> {
-    let mut declared: Vec<&'static str> = Vec::new();
-    if args.bearer_file.is_some() {
-        declared.push("--bearer-file");
+    match resolve_source(args, env_token, &DAEMON_FLAGS)? {
+        Some(p) => Ok(p),
+        // Implicit fallback. Using FileBearerProvider (not Static)
+        // means a `hermod bearer rotate` followed by a
+        // `hermod --remote ...` in the same shell sees the new
+        // token via 401-trigger refresh.
+        None => Ok(Arc::new(FileBearerProvider::new(default_path))),
     }
-    if args.bearer_command.is_some() {
-        declared.push("--bearer-command");
+}
+
+/// Shared dispatch: at most one source set, picked into a provider.
+/// Returns `None` when no source is set at all (callers decide whether
+/// that is an error or a valid no-source state).
+fn resolve_source(
+    args: &BearerArgs,
+    env_token: Option<SecretString>,
+    flags: &FamilyFlags,
+) -> Result<Option<Arc<dyn BearerProvider>>> {
+    let mut declared: Vec<&'static str> = Vec::new();
+    if args.file.is_some() {
+        declared.push(flags.file);
+    }
+    if args.command.is_some() {
+        declared.push(flags.command);
     }
     if env_token.is_some() {
-        declared.push("HERMOD_BEARER_TOKEN");
+        declared.push(flags.env);
     }
 
     match declared.len() {
-        0 => match default_path {
-            // Implicit fallback. Using FileBearerProvider (not Static)
-            // means a `hermod bearer rotate` followed by a
-            // `hermod --remote ...` in the same shell sees the new
-            // token via 401-trigger refresh.
-            Some(path) => Ok(Arc::new(FileBearerProvider::new(path))),
-            None => bail!(
-                "no bearer source — specify one of --bearer-file, \
-                 --bearer-command, or HERMOD_BEARER_TOKEN"
-            ),
-        },
+        0 => Ok(None),
         1 => {
-            if let Some(path) = &args.bearer_file {
-                Ok(Arc::new(FileBearerProvider::new(path.clone())))
-            } else if let Some(cmd) = &args.bearer_command {
-                Ok(Arc::new(CommandBearerProvider::new(cmd.clone())))
+            if let Some(path) = &args.file {
+                Ok(Some(Arc::new(FileBearerProvider::new(path.clone()))))
+            } else if let Some(cmd) = &args.command {
+                Ok(Some(Arc::new(CommandBearerProvider::new(cmd.clone()))))
             } else if let Some(secret) = env_token {
-                Ok(Arc::new(StaticBearerProvider::new(secret)))
+                Ok(Some(Arc::new(StaticBearerProvider::new(secret))))
             } else {
                 unreachable!("declared.len()==1 but no source matched")
             }
@@ -221,16 +250,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let default_path = dir.path().join("bearer_token");
         std::fs::write(&default_path, "default-tok").unwrap();
-        let provider = from_env_and_args(&BearerArgs::default(), None, Some(default_path)).unwrap();
+        let provider =
+            daemon_from_env_and_args(&BearerArgs::default(), None, default_path).unwrap();
         let t = provider.current().await.unwrap();
         assert_eq!(t.secret().expose_secret(), "default-tok");
-    }
-
-    #[test]
-    fn no_source_and_no_default_is_an_error() {
-        let result = from_env_and_args(&BearerArgs::default(), None, None);
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("no bearer source"), "got: {err}");
     }
 
     #[tokio::test]
@@ -238,13 +261,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let explicit = dir.path().join("explicit");
         std::fs::write(&explicit, "from-flag").unwrap();
-        let provider = from_env_and_args(
+        let unused_default = dir.path().join("unused");
+        let provider = daemon_from_env_and_args(
             &BearerArgs {
-                bearer_file: Some(explicit),
-                bearer_command: None,
+                file: Some(explicit),
+                command: None,
             },
             None,
-            None,
+            unused_default,
         )
         .unwrap();
         let t = provider.current().await.unwrap();
@@ -253,10 +277,11 @@ mod tests {
 
     #[tokio::test]
     async fn env_token_dispatches_static_provider() {
-        let provider = from_env_and_args(
+        let dir = tempdir().unwrap();
+        let provider = daemon_from_env_and_args(
             &BearerArgs::default(),
             Some(SecretString::new("env-tok".to_string())),
-            None,
+            dir.path().join("unused"),
         )
         .unwrap();
         let t = provider.current().await.unwrap();
@@ -267,13 +292,13 @@ mod tests {
     #[test]
     fn two_sources_is_ambiguous() {
         let dir = tempdir().unwrap();
-        let result = from_env_and_args(
+        let result = daemon_from_env_and_args(
             &BearerArgs {
-                bearer_file: Some(dir.path().join("a")),
-                bearer_command: Some("echo b".into()),
+                file: Some(dir.path().join("a")),
+                command: Some("echo b".into()),
             },
             None,
-            None,
+            dir.path().join("default"),
         );
         let err = result.unwrap_err().to_string();
         assert!(err.contains("ambiguous"), "got: {err}");
@@ -284,13 +309,13 @@ mod tests {
     #[test]
     fn three_sources_lists_all() {
         let dir = tempdir().unwrap();
-        let result = from_env_and_args(
+        let result = daemon_from_env_and_args(
             &BearerArgs {
-                bearer_file: Some(dir.path().join("a")),
-                bearer_command: Some("echo b".into()),
+                file: Some(dir.path().join("a")),
+                command: Some("echo b".into()),
             },
             Some(SecretString::new("c".to_string())),
-            None,
+            dir.path().join("default"),
         );
         let err = result.unwrap_err().to_string();
         assert!(err.contains("--bearer-file"));

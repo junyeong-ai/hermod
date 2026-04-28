@@ -434,20 +434,19 @@ fn build_target(
         let url = url::Url::parse(raw_url)
             .map_err(|e| anyhow::anyhow!("invalid --remote URL {raw_url:?}: {e}"))?;
         let pin = build_pin_policy(cli, &url, home)?;
-        let bearer_args = bearer::BearerArgs {
-            bearer_file: cli.bearer_file.clone(),
-            bearer_command: cli.bearer_command.clone(),
+        let daemon_args = bearer::BearerArgs {
+            file: cli.bearer_file.clone(),
+            command: cli.bearer_command.clone(),
         };
         // `secret_from_env` wraps the raw env String in `Zeroizing` so
         // its heap buffer is wiped when the helper returns; the secret
         // never lives in unzeroed memory beyond the returned
-        // SecretString. (Process env-table cleanup is unnecessary
-        // here: HERMOD_BEARER_TOKEN and --bearer-command are mutually
-        // exclusive at the factory, so the secret never inherits to a
-        // subprocess we spawn.)
+        // SecretString. The factory enforces mutual exclusion within
+        // the daemon family (file / command / env-token), so the env
+        // secret never inherits to a subprocess we spawn.
         let env_token = hermod_crypto::secret::secret_from_env("HERMOD_BEARER_TOKEN");
-        let default_path = Some(hermod_daemon::identity::bearer_token_path(home));
-        let provider = bearer::from_env_and_args(&bearer_args, env_token, default_path)?;
+        let default_path = hermod_daemon::identity::bearer_token_path(home);
+        let provider = bearer::daemon_from_env_and_args(&daemon_args, env_token, default_path)?;
         Ok(client::ClientTarget::Remote { url, provider, pin })
     } else {
         Ok(client::ClientTarget::Local(socket_or_default(
