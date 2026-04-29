@@ -28,6 +28,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
+use crate::local_agent::LocalAgentRegistry;
+
 const READ_BUF: usize = 2048;
 
 pub async fn serve(
@@ -35,7 +37,7 @@ pub async fn serve(
     db: Arc<dyn Database>,
     started: Instant,
     version: &'static str,
-    local_agents_total: u64,
+    registry: LocalAgentRegistry,
 ) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(addr = %listener.local_addr()?, "metrics listener up");
@@ -49,8 +51,9 @@ pub async fn serve(
             }
         };
         let db = db.clone();
+        let reg = registry.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(sock, db, started, version, local_agents_total).await {
+            if let Err(e) = handle(sock, db, started, version, reg).await {
                 debug!(peer = %peer, error = %e, "metrics connection ended");
             }
         });
@@ -62,7 +65,7 @@ async fn handle(
     db: Arc<dyn Database>,
     started: Instant,
     version: &'static str,
-    local_agents_total: u64,
+    registry: LocalAgentRegistry,
 ) -> anyhow::Result<()> {
     let mut buf = vec![0u8; READ_BUF];
     let n = sock.read(&mut buf).await?;
@@ -87,7 +90,7 @@ async fn handle(
             }
         },
         Some("/metrics") => {
-            let body = render_metrics(&*db, started, version, local_agents_total).await;
+            let body = render_metrics(&*db, started, version, &registry).await;
             format_response(200, "text/plain; version=0.0.4; charset=utf-8", &body)
         }
         _ => format_response(404, "text/plain; charset=utf-8", "not found\n"),
@@ -130,7 +133,7 @@ async fn render_metrics(
     db: &dyn Database,
     started: Instant,
     version: &'static str,
-    local_agents_total: u64,
+    registry: &LocalAgentRegistry,
 ) -> String {
     let uptime_s = started.elapsed().as_secs_f64();
     let now_ms = Timestamp::now().unix_ms();
@@ -233,12 +236,54 @@ async fn render_metrics(
         "Capability rows that are unrevoked and unexpired — i.e. presently authoritative.",
         snapshot.as_ref().map(|s| s.capabilities_active),
     );
+    let agents = registry.list();
     push_gauge(
         &mut out,
         "hermod_local_agents_total",
         "Locally-hosted agents this daemon's registry knows about. Multi-tenant deployments bump as the operator adds projects.",
-        Some(local_agents_total as i64),
+        Some(agents.len() as i64),
     );
+
+    // Per-agent gauges. One sample per locally-hosted agent so
+    // operators can chart "which project is busy" without having
+    // to query each bearer separately. Cheap — counts hit indexed
+    // SQLite columns.
+    let now = Timestamp::now();
+    let session_ttl_ms = (SESSION_TTL_SECS * 1_000) as i64;
+    out.push_str("# HELP hermod_messages_pending_per_agent Direct messages awaiting delivery for one locally-hosted agent.\n");
+    out.push_str("# TYPE hermod_messages_pending_per_agent gauge\n");
+    for agent in &agents {
+        let value = match db.messages().count_pending_to(&agent.agent_id).await {
+            Ok(n) => n,
+            Err(_) => {
+                metric_errors = metric_errors.saturating_add(1);
+                continue;
+            }
+        };
+        let label = agent_label(agent);
+        out.push_str(&format!(
+            "hermod_messages_pending_per_agent{{{label}}} {value}\n"
+        ));
+    }
+    out.push_str("# HELP hermod_mcp_sessions_per_agent MCP stdio sessions currently attached for one locally-hosted agent.\n");
+    out.push_str("# TYPE hermod_mcp_sessions_per_agent gauge\n");
+    for agent in &agents {
+        let value = match db
+            .mcp_sessions()
+            .count_live_for(&agent.agent_id, now, session_ttl_ms)
+            .await
+        {
+            Ok(n) => n as i64,
+            Err(_) => {
+                metric_errors = metric_errors.saturating_add(1);
+                continue;
+            }
+        };
+        let label = agent_label(agent);
+        out.push_str(&format!(
+            "hermod_mcp_sessions_per_agent{{{label}}} {value}\n"
+        ));
+    }
 
     out.push_str("# HELP hermod_metric_query_errors_total Best-effort failure counter for the metric collection itself. Distinguishes \"scrape returned nothing\" from \"a gauge could not be computed\".\n");
     out.push_str("# TYPE hermod_metric_query_errors_total counter\n");
@@ -247,6 +292,18 @@ async fn render_metrics(
     ));
 
     out
+}
+
+/// Build the Prometheus label set for one local agent. `agent_id` is
+/// stable and cardinality-bounded by the registry size; `alias` is
+/// the operator's label and may be absent (we omit the label
+/// entirely in that case so series naming doesn't carry an empty
+/// `alias=""`).
+fn agent_label(agent: &crate::local_agent::LocalAgent) -> String {
+    match agent.local_alias.as_ref() {
+        Some(a) => format!("agent_id=\"{}\",alias=\"{}\"", agent.agent_id, a.as_str(),),
+        None => format!("agent_id=\"{}\"", agent.agent_id),
+    }
 }
 
 fn push_gauge(out: &mut String, name: &str, help: &str, value: Option<i64>) {

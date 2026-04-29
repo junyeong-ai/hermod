@@ -434,7 +434,6 @@ impl DaemonClient {
         self.call(methods::method::PEER_ADVERTISE, params).await
     }
 
-    #[allow(dead_code)]
     pub async fn local_list(&mut self) -> Result<methods::LocalListResult> {
         self.call_noparams(methods::method::LOCAL_LIST).await
     }

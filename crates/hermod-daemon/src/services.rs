@@ -93,7 +93,7 @@ pub use broker::{BrokerService, RelayOutcome};
 pub use capability::CapabilityService;
 pub use channel::ChannelService;
 pub use confirmation::ConfirmationService;
-pub use local_agent::LocalAgentService;
+pub use local_agent::{LocalAgentService, LocalDiscoverHook};
 pub use mcp::McpService;
 pub use message::MessageService;
 pub use peer::PeerService;

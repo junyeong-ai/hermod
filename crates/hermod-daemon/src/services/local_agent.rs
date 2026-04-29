@@ -35,6 +35,20 @@ use crate::local_agent::{
 };
 use crate::services::{ServiceError, audit_or_warn};
 
+/// Static announce parameters threaded into [`LocalAgentService`] so
+/// `local.add` can publish a freshly-provisioned agent's mDNS beacon
+/// immediately. `None` when `[federation] discover_mdns` is off (the
+/// daemon doesn't have an active discoverer).
+#[derive(Clone, Debug)]
+pub struct LocalDiscoverHook {
+    pub discoverer: Arc<dyn hermod_discovery::Discoverer>,
+    /// `<host_id_prefix>.local.` — same hostname the boot-time
+    /// announce loop used.
+    pub hostname: String,
+    pub listen_port: u16,
+    pub validity_secs: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct LocalAgentService {
     db: Arc<dyn Database>,
@@ -48,6 +62,11 @@ pub struct LocalAgentService {
     host_pubkey: hermod_core::PubkeyBytes,
     registry: LocalAgentRegistry,
     home: PathBuf,
+    /// `Some` when mDNS auto-discovery is enabled. The service
+    /// announces a fresh beacon on `local.add` and unannounces on
+    /// `local.remove` so the LAN view stays consistent without a
+    /// daemon restart.
+    discover: Option<LocalDiscoverHook>,
 }
 
 impl LocalAgentService {
@@ -66,7 +85,17 @@ impl LocalAgentService {
             host_pubkey,
             registry,
             home,
+            discover: None,
         }
+    }
+
+    /// Wire the mDNS hook so live `local.add` / `local.remove`
+    /// publish + unannounce beacons. Called by `server.rs` after the
+    /// discoverer is constructed; called only when
+    /// `[federation] discover_mdns = true`.
+    pub fn with_discover_hook(mut self, hook: LocalDiscoverHook) -> Self {
+        self.discover = Some(hook);
+        self
     }
 
     pub async fn list(&self) -> Result<LocalListResult, ServiceError> {
@@ -125,6 +154,29 @@ impl LocalAgentService {
             .insert(agent.clone())
             .map_err(|e| ServiceError::InvalidParam(format!("registry insert: {e}")))?;
 
+        // 4. mDNS announce, when enabled. Best-effort — a failure
+        //    here doesn't undo the disk + DB + registry insert; the
+        //    operator can republish via the next daemon boot.
+        if let Some(hook) = &self.discover {
+            let alias_str = agent.local_alias.as_ref().map(|a| a.as_str().to_string());
+            let signer: Arc<dyn hermod_crypto::Signer> =
+                Arc::new(hermod_crypto::LocalKeySigner::new(agent.keypair.clone()));
+            let params = hermod_discovery::AnnounceParams {
+                hostname: &hook.hostname,
+                port: hook.listen_port,
+                signer,
+                validity_secs: hook.validity_secs,
+                alias: alias_str.as_deref(),
+            };
+            if let Err(e) = hook.discoverer.announce(params).await {
+                tracing::warn!(
+                    agent = %agent.agent_id,
+                    error = %e,
+                    "mdns announce failed for new local agent",
+                );
+            }
+        }
+
         audit_or_warn(
             &*self.audit_sink,
             AuditEntry {
@@ -182,6 +234,19 @@ impl LocalAgentService {
             .remove(&agent.agent_id)
             .await
             .map_err(ServiceError::Storage)?;
+
+        // 4. mDNS unannounce. Best-effort — peers fall off via the
+        //    beacon validity TTL anyway, but explicit unannounce
+        //    drops them immediately.
+        if let Some(hook) = &self.discover
+            && let Err(e) = hook.discoverer.unannounce(agent.agent_id.as_str()).await
+        {
+            tracing::warn!(
+                agent = %agent.agent_id,
+                error = %e,
+                "mdns unannounce failed for removed local agent",
+            );
+        }
 
         audit_or_warn(
             &*self.audit_sink,

@@ -116,6 +116,16 @@ pub trait Discoverer: Send + Sync + std::fmt::Debug {
         Ok(())
     }
 
+    /// Unannounce a single locally-hosted agent's beacon by
+    /// `agent_id`. Called when the operator runs `hermod local rm` so
+    /// the LAN promptly drops the entry instead of waiting for the
+    /// validity TTL. Default no-op for backends that don't publish
+    /// (`StaticDiscoverer`).
+    async fn unannounce(&self, agent_id: &str) -> Result<(), DiscoveryError> {
+        let _ = agent_id;
+        Ok(())
+    }
+
     /// Tear down — unannounce, close sockets, etc. Default no-op.
     /// Idempotent.
     async fn shutdown(&self) {}
@@ -242,6 +252,13 @@ impl Discoverer for MultiDiscoverer {
                 alias: params.alias,
             };
             child.announce(p).await?;
+        }
+        Ok(())
+    }
+
+    async fn unannounce(&self, agent_id: &str) -> Result<(), DiscoveryError> {
+        for child in &self.children {
+            child.unannounce(agent_id).await?;
         }
         Ok(())
     }

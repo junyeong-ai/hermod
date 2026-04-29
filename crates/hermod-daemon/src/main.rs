@@ -149,7 +149,6 @@ async fn main() -> anyhow::Result<()> {
     serve(
         effective_socket,
         db,
-        host_signer,
         host_keypair,
         registry,
         tls,

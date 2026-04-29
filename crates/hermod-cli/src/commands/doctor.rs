@@ -252,6 +252,38 @@ pub async fn run(home: &Path, target: &ClientTarget) -> Result<()> {
             }
             Err(e) => report.fail("capability.list RPC", format!("{e}")),
         }
+
+        // Per-agent block. The daemon-level `status` row above
+        // reports counts for the unix-socket caller (the bootstrap
+        // agent in single-tenant; unset in multi-tenant). For each
+        // additional locally-hosted agent, surface its alias +
+        // bearer-file path so operators have one place to find
+        // "which agent maps to which project". `local.list` enumerates
+        // them via the live registry — no disk re-walk.
+        match c.local_list().await {
+            Ok(r) if r.agents.is_empty() => {
+                report.fail(
+                    "local agents",
+                    "registry is empty after boot — run `hermod init` to provision a bootstrap"
+                        .into(),
+                );
+            }
+            Ok(r) => {
+                report.pass(&format!("local agents: {} hosted", r.agents.len()));
+                for a in &r.agents {
+                    let alias_str = a
+                        .alias
+                        .as_ref()
+                        .map(|al| format!(" alias=@{}", al.as_str()))
+                        .unwrap_or_default();
+                    report.note(&format!(
+                        "  {}{alias_str} bearer={}",
+                        a.agent_id, a.bearer_file
+                    ));
+                }
+            }
+            Err(e) => report.fail("local.list RPC", format!("{e}")),
+        }
     }
 
     // Claude Code channels integration probe. We can't directly observe

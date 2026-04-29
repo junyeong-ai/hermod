@@ -57,7 +57,12 @@ pub enum BeaconVerdict {
 #[derive(Clone)]
 pub struct MdnsDiscoverer {
     daemon: ServiceDaemon,
-    own_agent_id: String,
+    /// Agent IDs hosted by *this* daemon. Receivers' `peer_from_info`
+    /// drops any beacon whose `agent_id` is in this set so the
+    /// daemon never tries to dial itself. Multi-tenant: every
+    /// locally-hosted agent contributes one entry, so all of our
+    /// own beacons (one per agent) self-filter cleanly.
+    own_agent_ids: Arc<Mutex<std::collections::HashSet<String>>>,
     cache: Arc<Mutex<HashMap<String, DiscoveredPeer>>>,
     auditor: Arc<dyn crate::BeaconAuditor>,
 }
@@ -65,7 +70,10 @@ pub struct MdnsDiscoverer {
 impl std::fmt::Debug for MdnsDiscoverer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MdnsDiscoverer")
-            .field("own_agent_id", &self.own_agent_id)
+            .field(
+                "own_agent_ids",
+                &self.own_agent_ids.lock().map(|g| g.len()).unwrap_or(0),
+            )
             .field(
                 "cache_size",
                 &self.cache.lock().map(|g| g.len()).unwrap_or(0),
@@ -83,7 +91,7 @@ impl MdnsDiscoverer {
     /// daemon's hash-chained log; pass [`crate::NoopBeaconAuditor::shared`]
     /// when audit observability isn't wanted.
     pub fn start(
-        own_agent_id: String,
+        own_agent_ids: Vec<String>,
         auditor: Arc<dyn crate::BeaconAuditor>,
     ) -> Result<Self, DiscoveryError> {
         let daemon =
@@ -93,12 +101,14 @@ impl MdnsDiscoverer {
             .map_err(|e| DiscoveryError::Mdns(format!("browse: {e}")))?;
         let cache: Arc<Mutex<HashMap<String, DiscoveredPeer>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let own_set: std::collections::HashSet<String> = own_agent_ids.into_iter().collect();
+        let own_arc = Arc::new(Mutex::new(own_set));
 
         // Drive the browse channel until the daemon stops. Each Resolved
         // event refreshes our cache; Removed evicts. Self-resolutions are
         // skipped so we don't try to dial ourselves.
         let cache_for_task = cache.clone();
-        let own_for_task = own_agent_id.clone();
+        let own_for_task = own_arc.clone();
         let auditor_for_task = auditor.clone();
         tokio::spawn(async move {
             while let Ok(event) = receiver.recv_async().await {
@@ -125,15 +135,28 @@ impl MdnsDiscoverer {
 
         Ok(Self {
             daemon,
-            own_agent_id,
+            own_agent_ids: own_arc,
             cache,
             auditor,
         })
     }
 
-    /// Sign and register a beacon for `(self_agent_id, pubkey, optional
-    /// alias)` on the LAN. Internal helper — the public surface is
-    /// [`Discoverer::announce`].
+    /// Update the self-filter set. Called by the daemon when
+    /// `local.add` / `local.remove` mutates the registry so the
+    /// receiver promptly stops accepting our own freshly-published
+    /// beacon (or starts accepting a removed agent's beacon if it's
+    /// later re-discovered as a peer).
+    pub fn set_own_agent_ids(&self, ids: Vec<String>) {
+        if let Ok(mut g) = self.own_agent_ids.lock() {
+            *g = ids.into_iter().collect();
+        }
+    }
+
+    /// Sign and register a beacon for one locally-hosted agent. The
+    /// `agent_id` is derived from the signer's pubkey
+    /// (`blake3(pubkey)[:26]`), so a single mDNS daemon publishes
+    /// one beacon per local agent. Multi-tenant: the operator-side
+    /// caller invokes `announce` once per agent.
     async fn announce_inner(
         &self,
         hostname: &str,
@@ -144,9 +167,11 @@ impl MdnsDiscoverer {
     ) -> Result<(), DiscoveryError> {
         let pubkey_bytes = signer.pubkey_bytes();
         let pubkey_hex = hex::encode(pubkey_bytes.0);
+        let agent_id = hermod_crypto::agent_id_from_pubkey(&pubkey_bytes);
+        let agent_id_str = agent_id.to_string();
         let ts_ms = now_unix_ms();
         let canonical = canonical_mdns_beacon_bytes(
-            self.own_agent_id.as_str(),
+            agent_id_str.as_str(),
             &pubkey_bytes.0,
             port,
             ts_ms,
@@ -161,11 +186,19 @@ impl MdnsDiscoverer {
         let ts_string = ts_ms.to_string();
         let validity_string = validity_secs.to_string();
 
-        let instance = format!("hermod-{}", self.own_agent_id);
+        // Self-filter on receive: this beacon is for an agent we
+        // host, so its loop-back arrival should be dropped. Set
+        // before `daemon.register` to close the (small) window
+        // between publish and the first inbound resolve event.
+        if let Ok(mut g) = self.own_agent_ids.lock() {
+            g.insert(agent_id_str.clone());
+        }
+
+        let instance = format!("hermod-{agent_id_str}");
         // ServiceInfo properties as (key, value) pairs. An empty IP triggers
         // auto-detect across all interfaces.
         let mut props: Vec<(&str, &str)> = vec![
-            ("agent_id", self.own_agent_id.as_str()),
+            ("agent_id", agent_id_str.as_str()),
             ("pubkey", pubkey_hex.as_str()),
             ("ts_ms", ts_string.as_str()),
             ("validity_secs", validity_string.as_str()),
@@ -304,19 +337,44 @@ impl Discoverer for MdnsDiscoverer {
         .await
     }
 
-    /// Tear down the mDNS daemon. Sends an unannounce so peers immediately
-    /// drop us from their caches instead of waiting for the TTL to expire.
-    /// Idempotent — calling twice is safe.
+    async fn unannounce(&self, agent_id: &str) -> Result<(), DiscoveryError> {
+        let instance = format!("hermod-{agent_id}.{SERVICE_TYPE}");
+        // unregister is best-effort — peers fall off via TTL anyway —
+        // but we surface the error so a misconfigured mDNS stack
+        // doesn't fail silently.
+        self.daemon
+            .unregister(&instance)
+            .map_err(|e| DiscoveryError::Mdns(format!("unregister {instance}: {e}")))?;
+        // Drop the agent_id from the self-filter — if the same id is
+        // later re-discovered as a peer (e.g. operator removed it
+        // here, then re-added on another host), we should accept it.
+        if let Ok(mut g) = self.own_agent_ids.lock() {
+            g.remove(agent_id);
+        }
+        Ok(())
+    }
+
+    /// Tear down the mDNS daemon. Sends an unannounce per locally-
+    /// hosted agent so peers immediately drop each from their caches
+    /// instead of waiting for the TTL to expire. Idempotent —
+    /// calling twice is safe.
     async fn shutdown(&self) {
-        let instance = format!("hermod-{}.{}", self.own_agent_id, SERVICE_TYPE);
-        let _ = self.daemon.unregister(&instance);
+        let ids: Vec<String> = self
+            .own_agent_ids
+            .lock()
+            .map(|g| g.iter().cloned().collect())
+            .unwrap_or_default();
+        for id in ids {
+            let instance = format!("hermod-{id}.{SERVICE_TYPE}");
+            let _ = self.daemon.unregister(&instance);
+        }
         let _ = self.daemon.shutdown();
     }
 }
 
 fn peer_from_info(
     info: &ServiceInfo,
-    own_agent_id: &str,
+    own_agent_ids: &Mutex<std::collections::HashSet<String>>,
     auditor: &dyn crate::BeaconAuditor,
 ) -> Option<DiscoveredPeer> {
     let agent_id = match info.get_property_val_str("agent_id") {
@@ -326,7 +384,9 @@ fn peer_from_info(
             return None;
         }
     };
-    if agent_id == own_agent_id {
+    if let Ok(g) = own_agent_ids.lock()
+        && g.contains(agent_id)
+    {
         return None;
     }
     // Strict-mode beacon authentication: any signature failure, missing

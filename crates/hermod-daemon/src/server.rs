@@ -1,7 +1,7 @@
 //! Accept loop: bind Unix socket, dispatch each connection to the RPC dispatcher.
 
 use anyhow::{Context, Result};
-use hermod_crypto::{Keypair, Signer, TlsMaterial};
+use hermod_crypto::{Keypair, TlsMaterial};
 use hermod_protocol::ipc::IpcServer;
 use hermod_routing::{AccessController, RateLimiter, Router};
 use hermod_storage::Database;
@@ -32,7 +32,6 @@ use crate::services::{
 pub async fn serve(
     socket_path: PathBuf,
     db: Arc<dyn Database>,
-    host_signer: Arc<dyn Signer>,
     host_keypair: Arc<Keypair>,
     registry: LocalAgentRegistry,
     tls: TlsMaterial,
@@ -215,15 +214,23 @@ pub async fn serve(
         if config.federation.discover_mdns {
             // Inject an auditor so beacon emit/observe/reject events
             // land in the same hash-chained audit log as every other
-            // operator-meaningful action.
-            // mDNS speaks at the host level — beacons advertise the
-            // daemon's network endpoint, not any one local agent. Audit
-            // rows for beacon emit/observe/reject are attributed to the
-            // host actor.
+            // operator-meaningful action. Audit rows for beacon
+            // emit/observe/reject are attributed to the host actor —
+            // mDNS is a daemon-level signal, not per-agent.
             let beacon_auditor: Arc<dyn hermod_discovery::BeaconAuditor> = Arc::new(
                 crate::services::AuditSinkBeaconAuditor::new(audit_sink.clone(), host_id.clone()),
             );
-            match hermod_discovery::MdnsDiscoverer::start(host_id.to_string(), beacon_auditor) {
+            // Self-filter set: receiver drops any beacon whose
+            // `agent_id` is one of *our* hosted agents. We publish
+            // one beacon per local agent below; without this filter
+            // every published beacon would loop back into our own
+            // ingestion path.
+            let own_ids: Vec<String> = registry
+                .list()
+                .iter()
+                .map(|a| a.agent_id.to_string())
+                .collect();
+            match hermod_discovery::MdnsDiscoverer::start(own_ids, beacon_auditor) {
                 Ok(m) => {
                     info!(backend = "mdns", "mdns browser started");
                     backends.push(Arc::new(m));
@@ -250,28 +257,42 @@ pub async fn serve(
             };
 
             // Announce ourselves on every backend that supports it
-            // (mDNS publishes a signed beacon; static is a no-op).
+            // (mDNS publishes one signed beacon per locally-hosted
+            // agent; static is a no-op). Each beacon is signed by
+            // *that agent's* keypair so the receiver's
+            // `verify_inbound_beacon` self-cert check passes
+            // (`agent_id == blake3(pubkey)[:26]`).
             if let Some(listen_str) = &config.daemon.listen_ws
                 && let Ok(addr) = listen_str.parse::<std::net::SocketAddr>()
             {
                 let host = format!("{}.local.", &host_id.to_string()[..8]);
-                let params = hermod_discovery::AnnounceParams {
-                    hostname: &host,
-                    port: addr.port(),
-                    signer: host_signer.clone(),
-                    validity_secs: config.federation.mdns_beacon_validity_secs,
-                    alias: None,
-                };
-                if let Err(e) = composite.announce(params).await {
-                    tracing::warn!(error = %e, "discoverer announce failed");
-                } else {
-                    info!(
-                        backend = composite.name(),
-                        host = %host,
-                        port = addr.port(),
-                        validity_secs = config.federation.mdns_beacon_validity_secs,
-                        "discoverer announced"
-                    );
+                for agent in registry.list() {
+                    let alias_str = agent.local_alias.as_ref().map(|a| a.as_str().to_string());
+                    let signer: Arc<dyn hermod_crypto::Signer> =
+                        Arc::new(hermod_crypto::LocalKeySigner::new(agent.keypair.clone()));
+                    let params = hermod_discovery::AnnounceParams {
+                        hostname: &host,
+                        port: addr.port(),
+                        signer,
+                        validity_secs: config.federation.mdns_beacon_validity_secs,
+                        alias: alias_str.as_deref(),
+                    };
+                    if let Err(e) = composite.announce(params).await {
+                        tracing::warn!(
+                            agent = %agent.agent_id,
+                            error = %e,
+                            "discoverer announce failed",
+                        );
+                    } else {
+                        info!(
+                            backend = composite.name(),
+                            agent = %agent.agent_id,
+                            host = %host,
+                            port = addr.port(),
+                            validity_secs = config.federation.mdns_beacon_validity_secs,
+                            "discoverer announced",
+                        );
+                    }
                 }
             }
 
@@ -440,14 +461,14 @@ pub async fn serve(
         match addr_str.parse::<std::net::SocketAddr>() {
             Ok(addr) => {
                 let metrics_db = db.clone();
-                let metrics_local_agents = registry.len() as u64;
+                let metrics_registry = registry.clone();
                 tokio::spawn(async move {
                     if let Err(e) = crate::observability::serve(
                         addr,
                         metrics_db,
                         started,
                         env!("CARGO_PKG_VERSION"),
-                        metrics_local_agents,
+                        metrics_registry,
                     )
                     .await
                     {
@@ -554,14 +575,33 @@ pub async fn serve(
         permissions,
         audit: AuditService::new(db.clone(), config.policy.audit_retention_secs),
         capabilities,
-        local_agents: crate::services::LocalAgentService::new(
-            db.clone(),
-            audit_sink.clone(),
-            host_id.clone(),
-            host_keypair.to_pubkey_bytes(),
-            registry.clone(),
-            home.clone(),
-        ),
+        local_agents: {
+            let mut svc = crate::services::LocalAgentService::new(
+                db.clone(),
+                audit_sink.clone(),
+                host_id.clone(),
+                host_keypair.to_pubkey_bytes(),
+                registry.clone(),
+                home.clone(),
+            );
+            // Wire the live mDNS hook so `local.add`/`local.remove`
+            // republish the beacon set without requiring a daemon
+            // restart. Only when discovery is on and listen_ws is
+            // bound — otherwise there's no port to announce on.
+            if let (Some(disc), Some(listen_str)) =
+                (discoverer.clone(), config.daemon.listen_ws.as_ref())
+                && let Ok(addr) = listen_str.parse::<std::net::SocketAddr>()
+            {
+                let host = format!("{}.local.", &host_id.to_string()[..8]);
+                svc = svc.with_discover_hook(crate::services::LocalDiscoverHook {
+                    discoverer: disc,
+                    hostname: host,
+                    listen_port: addr.port(),
+                    validity_secs: config.federation.mdns_beacon_validity_secs,
+                });
+            }
+            svc
+        },
     };
 
     // Janitor: periodic cleanup of expired briefs / stale confirmations /
