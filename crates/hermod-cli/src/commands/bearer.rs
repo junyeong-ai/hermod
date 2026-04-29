@@ -1,17 +1,24 @@
-//! Operator commands for the Remote IPC bearer token.
+//! Operator commands for per-agent IPC bearer tokens.
 //!
-//! The token at `$HERMOD_HOME/identity/bearer_token` (mode 0600) is the
-//! credential thin clients present to the daemon's WSS+Bearer endpoint.
-//! These commands let an operator inspect or rotate it without manually
-//! editing the file. After `rotate`, restart the daemon (or wait for
-//! systemd to do so) so the new token takes effect — there is no
-//! in-process hot-reload yet.
+//! Each local agent has a bearer at
+//! `$HERMOD_HOME/agents/<agent_id>/bearer_token` (mode 0600). H2
+//! single-tenant: when the daemon hosts exactly one local agent,
+//! `hermod bearer show` / `hermod bearer rotate` operate on that
+//! agent's bearer without further qualification. Multi-agent
+//! dispatch (with explicit `--alias <name>`) lands in H5.
+//!
+//! After `rotate`, restart the daemon (or wait for systemd to do so)
+//! so the new token takes effect — there is no in-process hot-reload
+//! yet (Phase H3 will introduce per-agent bearer rotation that
+//! invalidates active sessions atomically).
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Args;
 use std::path::Path;
+use std::sync::Arc;
 
-use hermod_daemon::identity;
+use hermod_crypto::SecretString;
+use hermod_daemon::{host_identity, local_agent};
 
 #[derive(Args, Debug)]
 pub struct ShowArgs {
@@ -21,8 +28,11 @@ pub struct ShowArgs {
 }
 
 pub async fn show(args: ShowArgs, home: &Path) -> Result<()> {
-    let token = identity::ensure_bearer_token(home)?;
-    println!("path:  {}", identity::bearer_token_path(home).display());
+    let agent = primary_agent(home)?;
+    let path = local_agent::bearer_token_path(home, &agent.agent_id);
+    println!("agent: {}", agent.agent_id);
+    println!("path:  {}", path.display());
+    let token = agent.bearer_token.as_ref();
     if args.full {
         println!("token: {}", token.expose_secret());
     } else {
@@ -33,9 +43,77 @@ pub async fn show(args: ShowArgs, home: &Path) -> Result<()> {
 }
 
 pub async fn rotate(home: &Path) -> Result<()> {
-    let token = identity::rotate_bearer_token(home)?;
-    println!("rotated. new token: {}", token.expose_secret());
+    let agent = primary_agent(home)?;
+    let new_token = local_agent::generate_bearer_token();
+    let path = local_agent::bearer_token_path(home, &agent.agent_id);
+    write_bearer_token_file(&path, &new_token)?;
+    println!("agent: {}", agent.agent_id);
+    println!("rotated. new token: {}", new_token.expose_secret());
     println!("restart hermodd so the new token takes effect on the WSS+Bearer listener.");
+    Ok(())
+}
+
+fn primary_agent(home: &Path) -> Result<local_agent::LocalAgent> {
+    // The host keypair is needed to load the bootstrap agent (whose
+    // ed25519_secret lives under `host/`, not `agents/<id>/`). For
+    // additional agents (post-H5) the per-agent secret is on disk and
+    // the fallback is unused.
+    let host = host_identity::load(home).with_context(|| {
+        format!(
+            "load host identity from {} (run `hermod init` first)",
+            host_identity::host_dir(home).display()
+        )
+    })?;
+    let agents = local_agent::scan_disk(home, Some(Arc::new(host)))
+        .with_context(|| format!("scan {}", local_agent::agents_dir(home).display()))?;
+    match agents.len() {
+        0 => anyhow::bail!(
+            "no local agents at {} — run `hermod init` to provision the bootstrap",
+            local_agent::agents_dir(home).display()
+        ),
+        1 => Ok(agents.into_iter().next().expect("len == 1")),
+        n => anyhow::bail!(
+            "this daemon hosts {n} local agents — multi-agent bearer dispatch (with \
+             explicit --alias) lands in phase H5; for now, manage tokens via the \
+             on-disk file at $HERMOD_HOME/agents/<id>/bearer_token directly"
+        ),
+    }
+}
+
+/// Atomically replace the on-disk bearer file with `token`. Uses the
+/// same crash-safe rename + 0600 discipline as `local_agent::
+/// provision_new`'s initial write.
+fn write_bearer_token_file(path: &Path, token: &SecretString) -> Result<()> {
+    use std::io::Write;
+    #[cfg(unix)]
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = parent.join(format!(
+        ".{}.tmp.{}",
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("file"),
+        std::process::id()
+    ));
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    opts.mode(0o600);
+    let mut f = opts
+        .open(&tmp)
+        .with_context(|| format!("open {}", tmp.display()))?;
+    f.write_all(token.expose_secret().as_bytes())
+        .with_context(|| format!("write {}", tmp.display()))?;
+    f.sync_all()
+        .with_context(|| format!("fsync {}", tmp.display()))?;
+    drop(f);
+    #[cfg(unix)]
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("chmod {}", tmp.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("rename → {}", path.display()));
+    }
     Ok(())
 }
 

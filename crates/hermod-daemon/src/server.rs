@@ -1,7 +1,7 @@
 //! Accept loop: bind Unix socket, dispatch each connection to the RPC dispatcher.
 
 use anyhow::{Context, Result};
-use hermod_crypto::{Keypair, SecretString, Signer, TlsMaterial};
+use hermod_crypto::{Keypair, Signer, TlsMaterial};
 use hermod_protocol::ipc::IpcServer;
 use hermod_routing::{AccessController, RateLimiter, Router};
 use hermod_storage::Database;
@@ -14,6 +14,7 @@ use tokio::signal;
 use tracing::{error, info};
 
 use hermod_daemon::config::Config;
+use hermod_daemon::local_agent::LocalAgentRegistry;
 use hermod_routing::{AccessPolicy, RemoteDeliverer, spawn_sweeper};
 
 use crate::dispatcher::Dispatcher;
@@ -30,10 +31,10 @@ use crate::services::{
 pub async fn serve(
     socket_path: PathBuf,
     db: Arc<dyn Database>,
-    signer: Arc<dyn Signer>,
-    keypair: Arc<Keypair>,
+    host_signer: Arc<dyn Signer>,
+    host_keypair: Arc<Keypair>,
+    registry: LocalAgentRegistry,
     tls: TlsMaterial,
-    bearer_token: Arc<SecretString>,
     audit_file_path: Option<PathBuf>,
     home: PathBuf,
     config: Config,
@@ -47,8 +48,26 @@ pub async fn serve(
         .with_context(|| format!("bind {}", socket_path.display()))?;
     info!(socket = %socket_path.display(), "listening");
 
-    let self_id = keypair.agent_id();
-    let key_ref = KeyRef::from_keypair(&keypair, None);
+    // H2 single-tenant dispatch: every service site that needs an
+    // application-level identity uses the primary (single) local
+    // agent. H3 will replace this fan-out with per-call
+    // `caller_agent_id` resolved at the IPC handshake.
+    let primary = registry
+        .primary()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "multi-tenant dispatch requires phase H3 (host has {} local agents — \
+                 H2 single-tenant code path needs exactly one)",
+                registry.len()
+            )
+        })?
+        .clone();
+    let self_id = primary.agent_id.clone();
+    let host_id = host_keypair.agent_id();
+    let bearer_token = primary.bearer_token.clone();
+    let agent_signer: Arc<dyn Signer> =
+        Arc::new(hermod_crypto::LocalKeySigner::new(primary.keypair.clone()));
+    let key_ref = KeyRef::from_keypair(&primary.keypair, None);
 
     // Audit-sink stack. Built in two phases because `RemoteAuditSink`
     // depends on `MessageService` (to ship federation envelopes), and
@@ -93,7 +112,7 @@ pub async fn serve(
     let access = AccessController::new(
         db.clone(),
         self_id.clone(),
-        keypair.public_key(),
+        primary.keypair.public_key(),
         AccessPolicy {
             require_capability: config.policy.require_capability,
         },
@@ -110,10 +129,13 @@ pub async fn serve(
     // Federation transport — currently a single `WssNoiseTransport`.
     // Hold it as `Arc<dyn Transport>` so the daemon never references a
     // concrete backend; future `GrpcMtlsTransport` / `QuicTransport`
-    // slot in by changing this one constructor call.
+    // slot in by changing this one constructor call. The Noise XX
+    // static key is the *host* keypair: federation handshakes
+    // authenticate the daemon as a network entity, distinct from any
+    // local agent's envelope-signing identity.
     let transport: Arc<dyn hermod_routing::Transport> =
         Arc::new(hermod_routing::WssNoiseTransport::new(
-            keypair.clone(),
+            host_keypair.clone(),
             alias.clone(),
             tls.cert_pem.clone().into(),
             tls.key_pem.clone().into(),
@@ -127,8 +149,8 @@ pub async fn serve(
 
     // SIGHUP → re-read TLS material from disk and hot-rotate the
     // federation listener without restarting the daemon. Operators
-    // run `mv new.crt $HERMOD_HOME/identity/tls.crt && mv new.key
-    // $HERMOD_HOME/identity/tls.key && kill -HUP <pid>`. In-flight
+    // run `mv new.crt $HERMOD_HOME/host/tls.crt && mv new.key
+    // $HERMOD_HOME/host/tls.key && kill -HUP <pid>`. In-flight
     // connections finish on their pinned acceptor; new accepts use
     // the rotated cert. Lives outside `wait_shutdown` so a HUP never
     // shuts the daemon down by accident.
@@ -175,10 +197,14 @@ pub async fn serve(
             // Inject an auditor so beacon emit/observe/reject events
             // land in the same hash-chained audit log as every other
             // operator-meaningful action.
+            // mDNS speaks at the host level — beacons advertise the
+            // daemon's network endpoint, not any one local agent. Audit
+            // rows for beacon emit/observe/reject are attributed to the
+            // host actor.
             let beacon_auditor: Arc<dyn hermod_discovery::BeaconAuditor> = Arc::new(
-                crate::services::AuditSinkBeaconAuditor::new(audit_sink.clone(), self_id.clone()),
+                crate::services::AuditSinkBeaconAuditor::new(audit_sink.clone(), host_id.clone()),
             );
-            match hermod_discovery::MdnsDiscoverer::start(self_id.to_string(), beacon_auditor) {
+            match hermod_discovery::MdnsDiscoverer::start(host_id.to_string(), beacon_auditor) {
                 Ok(m) => {
                     info!(backend = "mdns", "mdns browser started");
                     backends.push(Arc::new(m));
@@ -209,12 +235,12 @@ pub async fn serve(
             if let Some(listen_str) = &config.daemon.listen_ws
                 && let Ok(addr) = listen_str.parse::<std::net::SocketAddr>()
             {
-                let host = format!("{}.local.", &self_id.to_string()[..8]);
+                let host = format!("{}.local.", &host_id.to_string()[..8]);
                 let alias_str = alias.as_ref().map(|a| a.as_str().to_string());
                 let params = hermod_discovery::AnnounceParams {
                     hostname: &host,
                     port: addr.port(),
-                    signer: signer.clone(),
+                    signer: host_signer.clone(),
                     validity_secs: config.federation.mdns_beacon_validity_secs,
                     alias: alias_str.as_deref(),
                 };
@@ -268,10 +294,12 @@ pub async fn serve(
         .with_workspace_observability(observability.clone());
         if config.broker.mode != hermod_daemon::config::BrokerMode::Disabled {
             info!(mode = ?config.broker.mode, "broker mode active");
+            // Broker forwards on behalf of the *host* — relay rows are
+            // attributed to host_id, not any one local agent.
             let broker_svc = crate::services::BrokerService::new(
                 db.clone(),
                 audit_sink.clone(),
-                self_id.clone(),
+                host_id.clone(),
                 remote.clone(),
                 config.broker.mode,
             );
@@ -412,7 +440,7 @@ pub async fn serve(
         router.clone(),
         access.clone(),
         rate_limit.clone(),
-        signer.clone(),
+        agent_signer.clone(),
         remote.clone(),
         outbox_notifier.clone(),
     );
@@ -449,7 +477,7 @@ pub async fn serve(
         self_id.clone(),
         messages.clone(),
     );
-    let capabilities = CapabilityService::new(db.clone(), audit_sink.clone(), signer.clone());
+    let capabilities = CapabilityService::new(db.clone(), audit_sink.clone(), agent_signer.clone());
     capabilities.set_message_service(messages.clone());
     let dispatcher = Dispatcher {
         status: StatusService::new(db.clone(), key_ref, started),
@@ -472,7 +500,7 @@ pub async fn serve(
             db.clone(),
             audit_sink.clone(),
             self_id.clone(),
-            keypair.to_pubkey_bytes(),
+            primary.keypair.to_pubkey_bytes(),
             messages.clone(),
         ),
         workspace_observability: observability,
@@ -524,10 +552,13 @@ pub async fn serve(
         audit_retention: (config.policy.audit_retention_secs > 0)
             .then(|| std::time::Duration::from_secs(config.policy.audit_retention_secs)),
     };
+    // Janitor sweeps daemon-internal state (outbox claim TTL, audit
+    // archive rotation, presence decay) — its `actor` belongs to the
+    // host, not any one local agent.
     let janitor = crate::janitor::JanitorWorker::new(
         db.clone(),
         audit_sink.clone(),
-        self_id.clone(),
+        host_id.clone(),
         janitor_config,
     )
     .with_presence(presence.clone());
@@ -736,7 +767,7 @@ impl UpstreamBroker {
     }
 }
 
-/// Spawn a long-lived task that re-reads `$HERMOD_HOME/identity/tls.{crt,key}`
+/// Spawn a long-lived task that re-reads `$HERMOD_HOME/host/tls.{crt,key}`
 /// on every SIGHUP and asks the federation transport to hot-rotate
 /// its acceptor. Failures (parse error, IO error, transport rejected
 /// the new material) log a `warn` and leave the previous cert in
@@ -817,8 +848,8 @@ fn spawn_tls_reload_task(transport: Arc<dyn hermod_routing::Transport>, home: Pa
                 return;
             }
         };
-        let cert_path = crate::identity::tls_cert_path(&home);
-        let key_path = crate::identity::tls_key_path(&home);
+        let cert_path = hermod_daemon::host_identity::tls_cert_path(&home);
+        let key_path = hermod_daemon::host_identity::tls_key_path(&home);
         info!(
             cert = %cert_path.display(),
             key  = %key_path.display(),

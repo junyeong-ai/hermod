@@ -340,7 +340,7 @@ pub async fn connect_remote_with_refresh(
                 anyhow::bail!(
                     "bearer rejected by remote daemon and the bearer source(s) declined \
                      to renew (cannot recover; check `hermod bearer show` against the \
-                     daemon's $HERMOD_HOME/identity/bearer_token, or rotate via \
+                     daemon's $HERMOD_HOME/agents/<bootstrap_id>/bearer_token, or rotate via \
                      `hermod bearer rotate`)"
                 );
             }

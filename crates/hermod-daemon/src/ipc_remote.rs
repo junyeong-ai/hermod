@@ -2,13 +2,14 @@
 //!
 //! Same JSON-RPC dispatch the Unix socket serves, exposed over a
 //! WebSocket channel. Auth: `Authorization: Bearer <bearer_token>` on
-//! the handshake. The token is `$HERMOD_HOME/identity/bearer_token`
-//! (mode 0600, generated on `hermod init`).
+//! the handshake. The token is
+//! `$HERMOD_HOME/agents/<bootstrap_id>/bearer_token` (mode 0600,
+//! generated on `hermod init`).
 //!
 //! Two listener flavours, picked by config:
 //!
 //! - [`serve_wss`] — TLS terminated *at the daemon*. Reuses the
-//!   daemon's TLS material (`identity/tls.crt|key`); clients TOFU-pin
+//!   daemon's TLS material (`host/tls.crt|key`); clients TOFU-pin
 //!   the cert fingerprint just like federation peers do.
 //!   `daemon.ipc_listen_wss = "0.0.0.0:7824"`.
 //! - [`serve_ws`] — plaintext WebSocket, expects an upstream reverse

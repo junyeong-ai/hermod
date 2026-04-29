@@ -96,7 +96,7 @@ impl WsListener {
     }
 
     /// Bind a TLS-wrapped listener. `cert_pem` / `key_pem` are typically
-    /// loaded from `$HERMOD_HOME/identity/tls.{crt,key}` via
+    /// loaded from `$HERMOD_HOME/host/tls.{crt,key}` via
     /// `hermod_crypto::TlsMaterial`. The acceptor is held behind a
     /// shared handle so callers (e.g. `WssNoiseTransport::reload_tls`)
     /// can hot-swap the cert chain without rebinding the socket.

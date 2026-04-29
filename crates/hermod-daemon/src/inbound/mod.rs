@@ -639,6 +639,7 @@ mod tests {
         let keypair = Arc::new(hermod_crypto::Keypair::generate());
         let self_id = keypair.agent_id();
         let self_public_key = keypair.public_key();
+        let self_pubkey_bytes = keypair.to_pubkey_bytes();
         let signer: Arc<dyn hermod_crypto::Signer> =
             Arc::new(hermod_crypto::LocalKeySigner::new(keypair));
         let dsn = format!("sqlite://{}", p.display());
@@ -649,7 +650,27 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::services::ensure_self_agent(&*db, &hermod_crypto::Keypair::generate(), None)
+        // Inbound tests need self_id present in the agents directory
+        // so FK-bearing inserts (messages, capabilities) succeed; the
+        // `local_agents` sub-relation is irrelevant here. Upsert
+        // directly rather than going through `ensure_local_agents`,
+        // which would require a disk-backed registry the test doesn't
+        // own.
+        let now = hermod_core::Timestamp::now();
+        db.agents()
+            .upsert(&hermod_storage::AgentRecord {
+                id: self_id.clone(),
+                pubkey: self_pubkey_bytes,
+                host_pubkey: Some(self_pubkey_bytes),
+                endpoint: None,
+                local_alias: None,
+                peer_asserted_alias: None,
+                trust_level: hermod_core::TrustLevel::Local,
+                tls_fingerprint: None,
+                reputation: 0,
+                first_seen: now,
+                last_seen: Some(now),
+            })
             .await
             .ok();
         let access = AccessController::new(

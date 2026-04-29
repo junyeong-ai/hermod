@@ -96,7 +96,19 @@ impl PlainWsDaemon {
             .expect("hermod init");
         assert!(init_status.success());
 
-        let bearer_path = home.path().join("identity").join("bearer_token");
+        // Post-H2: per-agent bearer at agents/<bootstrap_id>/bearer_token.
+        // The init above provisions exactly one bootstrap agent, so
+        // its directory is the lone entry under agents/.
+        let bearer_path = {
+            let agents_dir = home.path().join("agents");
+            let mut subdirs = std::fs::read_dir(&agents_dir)
+                .expect("read agents dir")
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .collect::<Vec<_>>();
+            assert_eq!(subdirs.len(), 1, "expected one bootstrap agent");
+            subdirs.pop().expect("len == 1").path().join("bearer_token")
+        };
 
         let ws_port = pick_free_port();
         let ws_addr: SocketAddr = format!("127.0.0.1:{ws_port}").parse().unwrap();

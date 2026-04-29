@@ -13,7 +13,7 @@ bearer/              BearerProvider trait + 3 implementations
   mod.rs             trait, BearerToken, TokenEpoch, BearerError, BearerArgs,
                      daemon_from_env_and_args (required) / proxy_from_env_and_args (optional) factories
   static_provider.rs HERMOD_BEARER_TOKEN / HERMOD_PROXY_BEARER_TOKEN-backed provider (no refresh)
-  file.rs            --bearer-file / --proxy-bearer-file / default $HERMOD_HOME/identity/bearer_token
+  file.rs            --bearer-file / --proxy-bearer-file / default $HERMOD_HOME/agents/<id>/bearer_token
                      (cold-path read; refresh() re-reads on auth failure)
   command.rs         --bearer-command / --proxy-bearer-command (sh -c, 30s timeout, kill_on_drop, single-flight refresh)
 main.rs              clap CLI dispatch
@@ -53,8 +53,9 @@ required, proxy-bearer is optional:
 - `bearer::daemon_from_env_and_args(args, env_token, default_path)`
   — exactly one of `--bearer-file`, `--bearer-command`,
   `HERMOD_BEARER_TOKEN` may be set. With none set, the implicit
-  fallback is `$HERMOD_HOME/identity/bearer_token` via
-  `FileBearerProvider` (the on-host "just works" path).
+  fallback is `$HERMOD_HOME/agents/<bootstrap_id>/bearer_token` via
+  `FileBearerProvider` (the on-host "just works" path; resolved by
+  `hermod_daemon::local_agent::implicit_bearer_default`).
 - `bearer::proxy_from_env_and_args(args, env_token)` — exactly one
   of `--proxy-bearer-file`, `--proxy-bearer-command`,
   `HERMOD_PROXY_BEARER_TOKEN` may be set. Returns `Ok(None)` when

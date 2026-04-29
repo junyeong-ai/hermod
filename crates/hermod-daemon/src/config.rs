@@ -220,7 +220,8 @@ pub struct DaemonConfig {
     pub listen_ws: Option<String>,
     /// Optional WSS+Bearer endpoint for remote IPC (`hermod --remote …`).
     /// When set, exposes the same JSON-RPC surface the Unix socket serves,
-    /// gated by the bearer token at `$HERMOD_HOME/identity/bearer_token`.
+    /// gated by the bearer token at
+    /// `$HERMOD_HOME/agents/<bootstrap_id>/bearer_token`.
     /// Reuses the daemon's TLS material — TLS termination at the daemon
     /// itself. None disables the listener. Mutually exclusive with
     /// [`Self::ipc_listen_ws`].

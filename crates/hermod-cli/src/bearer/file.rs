@@ -6,10 +6,12 @@
 //!     explicit operator-supplied path for the daemon and proxy
 //!     bearer families respectively.
 //!   * Implicit default (daemon family only) —
-//!     `$HERMOD_HOME/identity/bearer_token` when no explicit
-//!     daemon-bearer source is declared. The proxy family has no
-//!     implicit fallback (no canonical disk location for SSO proxy
-//!     credentials).
+//!     `$HERMOD_HOME/agents/<bootstrap_id>/bearer_token` when no
+//!     explicit daemon-bearer source is declared. Resolved via
+//!     `hermod_daemon::local_agent::implicit_bearer_default` which
+//!     picks the single hosted agent in the H2 single-tenant shape.
+//!     The proxy family has no implicit fallback (no canonical disk
+//!     location for SSO proxy credentials).
 //!
 //! The cold path reads the file once and caches the result for the rest
 //! of the process lifetime. Re-reads happen only via [`refresh`], which

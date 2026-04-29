@@ -25,10 +25,11 @@
 //!
 //! ## File kinds
 //!
-//! - **Directory** (`$HERMOD_HOME/`, `identity/`, `blob-store/`,
-//!   `archive/`): mode `0o700`. Boot fails loud on any other mode.
-//!   Exposing the file *names* underneath is information leakage even
-//!   if files themselves are `0o600`.
+//! - **Directory** (`$HERMOD_HOME/`, `host/`, `agents/`,
+//!   `agents/<id>/`, `blob-store/`, `archive/`): mode `0o700`. Boot
+//!   fails loud on any other mode. Exposing the file *names*
+//!   underneath is information leakage even if files themselves are
+//!   `0o600`.
 //! - **Secret** (`ed25519_secret`, `tls.key`, `bearer_token`,
 //!   `hermod.db*`): mode `0o600`. Boot fails loud on permissive mode.
 //!   Strict equality, not a `mode & 0o077 == 0` mask — uniform
@@ -51,11 +52,17 @@
 //! the audit trail is in shell history, not in silent daemon
 //! behavior. Mirrors sshd's `StrictModes`.
 
+use hermod_core::AgentId;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::identity::{bearer_token_path, identity_dir, secret_path, tls_cert_path, tls_key_path};
+use crate::host_identity::{
+    host_dir, secret_path as host_secret_path, tls_cert_path, tls_key_path,
+};
+use crate::local_agent::{
+    agent_dir, agents_dir, bearer_token_path as agent_bearer_path, secret_path as agent_secret_path,
+};
 
 /// Set the process umask to `0o077` so every subsequent file create
 /// defaults to mode `0o600` and every directory create to `0o700`.
@@ -82,8 +89,10 @@ pub fn set_secure_umask() {}
 #[derive(Clone, Debug)]
 pub struct HomeFile {
     /// Operator-facing name (e.g. `"hermod database"`). Shown in
-    /// boot-time error messages and `hermod doctor` output.
-    pub label: &'static str,
+    /// boot-time error messages and `hermod doctor` output. Owned to
+    /// accommodate per-agent labels (e.g. `"local agent <id> bearer
+    /// token"`) that can't be `&'static str`.
+    pub label: String,
     pub path: PathBuf,
     /// Required Unix mode bits. Strict equality.
     pub required_mode: u32,
@@ -119,12 +128,12 @@ pub enum Presence {
 #[derive(Debug, thiserror::Error)]
 pub enum LayoutError {
     #[error("{label} ({path}) is missing — run `hermod init`")]
-    Missing { label: &'static str, path: PathBuf },
+    Missing { label: String, path: PathBuf },
     #[error(
         "{label} ({path}) has insecure mode {observed:#o} — required {required:#o}. Run `chmod {required_octal} {path}` and retry."
     )]
     ModeMismatch {
-        label: &'static str,
+        label: String,
         path: PathBuf,
         observed: u32,
         required: u32,
@@ -132,7 +141,7 @@ pub enum LayoutError {
     },
     #[error("{label} ({path}): {source}")]
     Io {
-        label: &'static str,
+        label: String,
         path: PathBuf,
         #[source]
         source: io::Error,
@@ -140,54 +149,54 @@ pub enum LayoutError {
 }
 
 impl HomeFile {
-    fn dir_required(label: &'static str, path: PathBuf) -> Self {
+    fn dir_required(label: impl Into<String>, path: PathBuf) -> Self {
         Self {
-            label,
+            label: label.into(),
             path,
             required_mode: 0o700,
             kind: HomeFileKind::Directory,
             presence: Presence::Required,
         }
     }
-    fn dir_optional(label: &'static str, path: PathBuf) -> Self {
+    fn dir_optional(label: impl Into<String>, path: PathBuf) -> Self {
         Self {
-            label,
+            label: label.into(),
             path,
             required_mode: 0o700,
             kind: HomeFileKind::Directory,
             presence: Presence::Optional,
         }
     }
-    fn secret(label: &'static str, path: PathBuf) -> Self {
+    fn secret(label: impl Into<String>, path: PathBuf) -> Self {
         Self {
-            label,
+            label: label.into(),
             path,
             required_mode: 0o600,
             kind: HomeFileKind::Secret,
             presence: Presence::Required,
         }
     }
-    fn secret_optional(label: &'static str, path: PathBuf) -> Self {
+    fn secret_optional(label: impl Into<String>, path: PathBuf) -> Self {
         Self {
-            label,
+            label: label.into(),
             path,
             required_mode: 0o600,
             kind: HomeFileKind::Secret,
             presence: Presence::Optional,
         }
     }
-    fn public(label: &'static str, path: PathBuf, mode: u32) -> Self {
+    fn public(label: impl Into<String>, path: PathBuf, mode: u32) -> Self {
         Self {
-            label,
+            label: label.into(),
             path,
             required_mode: mode,
             kind: HomeFileKind::Public,
             presence: Presence::Required,
         }
     }
-    fn operator_managed(label: &'static str, path: PathBuf, mode: u32) -> Self {
+    fn operator_managed(label: impl Into<String>, path: PathBuf, mode: u32) -> Self {
         Self {
-            label,
+            label: label.into(),
             path,
             required_mode: mode,
             kind: HomeFileKind::OperatorManaged,
@@ -204,25 +213,64 @@ impl HomeFile {
 /// and folded in below; adding a new backend or backend-local file
 /// is one new entry in the storage layer, no change here.
 ///
+/// `local_agents` is the list of agent IDs the daemon hosts (resolved
+/// from `local_agent::scan_disk` at boot, or from the same scan at
+/// `hermod doctor` time). For each agent, the spec emits a per-agent
+/// directory entry plus its keypair + bearer token. Empty list ⇒ no
+/// per-agent entries; the parent `agents/` directory is then Optional.
+///
 /// Both DSNs should already have `$HERMOD_HOME` expanded
 /// (via [`crate::paths::expand_dsn`]) so they describe the canonical
 /// on-disk paths the daemon will actually write. DSN errors are
 /// deferred to `hermod_storage::open_database` /
 /// `hermod_storage::open_blob_store`, which run a moment later at
 /// boot and report the same error with full backend context.
-pub fn spec(home: &Path, storage_dsn: &str, blob_dsn: &str) -> Vec<HomeFile> {
+pub fn spec(
+    home: &Path,
+    storage_dsn: &str,
+    blob_dsn: &str,
+    local_agents: &[AgentId],
+) -> Vec<HomeFile> {
     let mut files = vec![
         // $HERMOD_HOME itself.
         HomeFile::dir_required("home directory", home.to_path_buf()),
         // Operator-managed config.
         HomeFile::operator_managed("config.toml", home.join("config.toml"), 0o600),
-        // identity/ — secrets backing this agent's identity.
-        HomeFile::dir_required("identity directory", identity_dir(home)),
-        HomeFile::secret("identity secret", secret_path(home)),
+        // host/ — daemon's network-level identity (Noise XX static + TLS).
+        HomeFile::dir_required("host directory", host_dir(home)),
+        HomeFile::secret("host secret", host_secret_path(home)),
         HomeFile::secret("TLS private key", tls_key_path(home)),
-        HomeFile::secret("bearer token", bearer_token_path(home)),
         HomeFile::public("TLS certificate", tls_cert_path(home), 0o644),
     ];
+    // agents/ — per-tenant identity material. Required when the
+    // daemon hosts at least one local agent; Optional in the
+    // pre-bootstrap window between `hermod init` running prepare_dirs
+    // and the daemon actually generating its first agent.
+    if local_agents.is_empty() {
+        files.push(HomeFile::dir_optional("agents directory", agents_dir(home)));
+    } else {
+        files.push(HomeFile::dir_required("agents directory", agents_dir(home)));
+        for id in local_agents {
+            files.push(HomeFile::dir_required(
+                format!("local agent {id} directory"),
+                agent_dir(home, id),
+            ));
+            // Per-agent ed25519_secret is *Optional* in H2: the
+            // bootstrap agent shares the host_keypair (file lives at
+            // `host/ed25519_secret`, not under `agents/<id>/`), and
+            // `local_agent::load` recovers via the host fallback. H5+
+            // non-bootstrap agents will materialise their own per-agent
+            // secret file; we'll tighten this entry then.
+            files.push(HomeFile::secret_optional(
+                format!("local agent {id} secret"),
+                agent_secret_path(home, id),
+            ));
+            files.push(HomeFile::secret(
+                format!("local agent {id} bearer token"),
+                agent_bearer_path(home, id),
+            ));
+        }
+    }
     files.extend(
         hermod_storage::database_local_files(storage_dsn)
             .unwrap_or_default()
@@ -263,9 +311,12 @@ impl From<hermod_storage::LocalFile> for HomeFile {
     }
 }
 
-/// Create `$HERMOD_HOME` and `identity/` with their required modes if
+/// Create `$HERMOD_HOME` and `host/` with their required modes if
 /// missing; verify if existing. Called early at daemon boot, before
-/// any storage / identity work runs.
+/// any storage / identity work runs. The agents/ parent and per-agent
+/// subdirectories are managed lazily by [`crate::local_agent`] —
+/// they're created when the bootstrap agent is provisioned, not at
+/// generic layout-prep time.
 ///
 /// **Boot semantics — fail-loud.** If the directories already exist
 /// with a permissive mode, returns `LayoutError::ModeMismatch` rather
@@ -277,18 +328,18 @@ pub fn ensure_dirs(home: &Path) -> Result<(), LayoutError> {
     use std::os::unix::fs::PermissionsExt;
     for label_path in [
         ("home directory", home.to_path_buf()),
-        ("identity directory", identity_dir(home)),
+        ("host directory", host_dir(home)),
     ] {
         let (label, path) = label_path;
         if !path.exists() {
             fs::create_dir_all(&path).map_err(|source| LayoutError::Io {
-                label,
+                label: label.to_string(),
                 path: path.clone(),
                 source,
             })?;
             fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).map_err(|source| {
                 LayoutError::Io {
-                    label,
+                    label: label.to_string(),
                     path: path.clone(),
                     source,
                 }
@@ -301,7 +352,7 @@ pub fn ensure_dirs(home: &Path) -> Result<(), LayoutError> {
 }
 
 /// `hermod init` — explicit operator bootstrap. Creates
-/// `$HERMOD_HOME` and `identity/` at mode `0o700`, **chmod'ing them
+/// `$HERMOD_HOME` and `host/` at mode `0o700`, **chmod'ing them
 /// down if they already exist with a wider mode**. This is the
 /// init-time mirror of [`ensure_dirs`]: the operator is actively
 /// asking Hermod to bring the layout to a canonical state, so silent
@@ -312,16 +363,16 @@ pub fn prepare_dirs(home: &Path) -> Result<(), LayoutError> {
     use std::os::unix::fs::PermissionsExt;
     for (label, path) in [
         ("home directory", home.to_path_buf()),
-        ("identity directory", identity_dir(home)),
+        ("host directory", host_dir(home)),
     ] {
         fs::create_dir_all(&path).map_err(|source| LayoutError::Io {
-            label,
+            label: label.to_string(),
             path: path.clone(),
             source,
         })?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).map_err(|source| {
             LayoutError::Io {
-                label,
+                label: label.to_string(),
                 path: path.clone(),
                 source,
             }
@@ -332,14 +383,20 @@ pub fn prepare_dirs(home: &Path) -> Result<(), LayoutError> {
 
 /// Verify every fail-loud entry in [`spec`] conforms.
 ///
-/// Called from `daemon/main.rs` after `ensure_tls` / `ensure_bearer_token`
-/// / `open_database` / `open_blob_store` have run, so every required
-/// secret file exists and was written with the canonical mode.
-/// `OperatorManaged` and `Public` entries are not enforced — see
-/// [`audit`] for the doctor-visible report that includes them.
+/// Called from `daemon/main.rs` after `ensure_tls` /
+/// `ensure_local_agents` / `open_database` / `open_blob_store` have
+/// run, so every required secret file exists and was written with
+/// the canonical mode. `OperatorManaged` and `Public` entries are
+/// not enforced — see [`audit`] for the doctor-visible report that
+/// includes them.
 #[cfg(unix)]
-pub fn enforce(home: &Path, storage_dsn: &str, blob_dsn: &str) -> Result<(), LayoutError> {
-    for file in spec(home, storage_dsn, blob_dsn) {
+pub fn enforce(
+    home: &Path,
+    storage_dsn: &str,
+    blob_dsn: &str,
+    local_agents: &[AgentId],
+) -> Result<(), LayoutError> {
+    for file in spec(home, storage_dsn, blob_dsn, local_agents) {
         match file.kind {
             HomeFileKind::Directory | HomeFileKind::Secret => {}
             HomeFileKind::Public | HomeFileKind::OperatorManaged => continue,
@@ -362,8 +419,9 @@ pub fn audit(
     home: &Path,
     storage_dsn: &str,
     blob_dsn: &str,
+    local_agents: &[AgentId],
 ) -> Vec<(HomeFile, Result<(), LayoutError>)> {
-    spec(home, storage_dsn, blob_dsn)
+    spec(home, storage_dsn, blob_dsn, local_agents)
         .into_iter()
         .map(|file| {
             let result = check_one(&file);
@@ -379,13 +437,13 @@ fn check_one(file: &HomeFile) -> Result<(), LayoutError> {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return Err(LayoutError::Missing {
-                label: file.label,
+                label: file.label.clone(),
                 path: file.path.clone(),
             });
         }
         Err(source) => {
             return Err(LayoutError::Io {
-                label: file.label,
+                label: file.label.clone(),
                 path: file.path.clone(),
                 source,
             });
@@ -394,7 +452,7 @@ fn check_one(file: &HomeFile) -> Result<(), LayoutError> {
     let observed = meta.permissions().mode() & 0o777;
     if observed != file.required_mode {
         return Err(LayoutError::ModeMismatch {
-            label: file.label,
+            label: file.label.clone(),
             path: file.path.clone(),
             observed,
             required: file.required_mode,
@@ -408,10 +466,10 @@ fn check_one(file: &HomeFile) -> Result<(), LayoutError> {
 // enforce the equivalent invariant from `metadata`.
 #[cfg(not(unix))]
 pub fn ensure_dirs(home: &Path) -> Result<(), LayoutError> {
-    for path in [home.to_path_buf(), identity_dir(home)] {
+    for path in [home.to_path_buf(), host_dir(home)] {
         if !path.exists() {
             fs::create_dir_all(&path).map_err(|source| LayoutError::Io {
-                label: "directory",
+                label: "directory".to_string(),
                 path,
                 source,
             })?;
@@ -426,7 +484,12 @@ pub fn prepare_dirs(home: &Path) -> Result<(), LayoutError> {
 }
 
 #[cfg(not(unix))]
-pub fn enforce(_home: &Path, _storage_dsn: &str, _blob_dsn: &str) -> Result<(), LayoutError> {
+pub fn enforce(
+    _home: &Path,
+    _storage_dsn: &str,
+    _blob_dsn: &str,
+    _local_agents: &[AgentId],
+) -> Result<(), LayoutError> {
     Ok(())
 }
 
@@ -435,8 +498,9 @@ pub fn audit(
     home: &Path,
     storage_dsn: &str,
     blob_dsn: &str,
+    local_agents: &[AgentId],
 ) -> Vec<(HomeFile, Result<(), LayoutError>)> {
-    spec(home, storage_dsn, blob_dsn)
+    spec(home, storage_dsn, blob_dsn, local_agents)
         .into_iter()
         .map(|f| (f, Ok(())))
         .collect()
@@ -445,6 +509,7 @@ pub fn audit(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::local_agent;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
@@ -461,10 +526,6 @@ mod tests {
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
     }
 
-    /// Default sqlite + local-fs blob DSN forms used by every test
-    /// that doesn't care about the backend axis. Mirrors
-    /// `defaults::storage_dsn` / `defaults::blob_dsn` after
-    /// `paths::expand_dsn` substitutes `$HERMOD_HOME`.
     fn sqlite_dsn(home: &Path) -> String {
         format!("sqlite://{}/hermod.db", home.display())
     }
@@ -474,23 +535,51 @@ mod tests {
 
     /// Bootstrap a tempdir as a fully-conformant Hermod home — every
     /// `Required` spec'd file present with its required mode and every
-    /// `Optional` directory created.
-    fn populate_conformant(home: &Path) {
-        for file in spec(home, &sqlite_dsn(home), &local_blob_dsn(home)) {
+    /// `Optional` directory created. Provisions one local agent so
+    /// the agents/ block is part of the spec.
+    fn populate_conformant(home: &Path) -> Vec<AgentId> {
+        let host = std::sync::Arc::new(hermod_crypto::Keypair::generate());
+        let agent = local_agent::provision_bootstrap(home, host.clone(), None).unwrap();
+        let ids = vec![agent.agent_id.clone()];
+        for file in spec(home, &sqlite_dsn(home), &local_blob_dsn(home), &ids) {
             match (file.kind, file.presence) {
-                (HomeFileKind::Directory, _) => make_dir(&file.path, file.required_mode),
-                (_, Presence::Required) => write_file(&file.path, file.required_mode),
+                (HomeFileKind::Directory, _) => {
+                    if !file.path.exists() {
+                        make_dir(&file.path, file.required_mode);
+                    } else {
+                        // local_agent::provision_bootstrap already
+                        // created the per-agent directory; ensure
+                        // mode matches.
+                        fs::set_permissions(
+                            &file.path,
+                            fs::Permissions::from_mode(file.required_mode),
+                        )
+                        .unwrap();
+                    }
+                }
+                (_, Presence::Required) => {
+                    if !file.path.exists() {
+                        write_file(&file.path, file.required_mode);
+                    } else {
+                        fs::set_permissions(
+                            &file.path,
+                            fs::Permissions::from_mode(file.required_mode),
+                        )
+                        .unwrap();
+                    }
+                }
                 (_, Presence::Optional) => {} // skip optional non-dirs
             }
         }
+        ids
     }
 
     #[test]
-    fn ensure_dirs_creates_home_and_identity_with_correct_modes() {
+    fn ensure_dirs_creates_home_and_host_with_correct_modes() {
         let parent = TempDir::new().unwrap();
         let home = parent.path().join("hermod");
         ensure_dirs(&home).unwrap();
-        for d in [&home, &identity_dir(&home)] {
+        for d in [&home, &host_dir(&home)] {
             let mode = fs::metadata(d).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o700, "{d:?} should be 0o700, got {mode:o}");
         }
@@ -513,22 +602,17 @@ mod tests {
         }
     }
 
-    /// `prepare_dirs` is the init-time mirror of `ensure_dirs` —
-    /// it chmods existing permissive dirs *down* rather than failing.
-    /// This is the operator-driven bootstrap path and silent repair
-    /// is the right thing here.
     #[test]
     fn prepare_dirs_chmods_existing_permissive_dirs_down() {
         let tmp = TempDir::new().unwrap();
-        // Force home + identity dirs to be permissive.
         fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o755)).unwrap();
-        let id_dir = identity_dir(tmp.path());
-        fs::create_dir_all(&id_dir).unwrap();
-        fs::set_permissions(&id_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let host = host_dir(tmp.path());
+        fs::create_dir_all(&host).unwrap();
+        fs::set_permissions(&host, fs::Permissions::from_mode(0o755)).unwrap();
 
         prepare_dirs(tmp.path()).unwrap();
 
-        for d in [tmp.path().to_path_buf(), id_dir] {
+        for d in [tmp.path().to_path_buf(), host] {
             let mode = fs::metadata(&d).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o700, "{d:?} should be 0o700, got {mode:o}");
         }
@@ -544,11 +628,7 @@ mod tests {
             0o700
         );
         assert_eq!(
-            fs::metadata(identity_dir(&home))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
+            fs::metadata(host_dir(&home)).unwrap().permissions().mode() & 0o777,
             0o700
         );
     }
@@ -556,11 +636,12 @@ mod tests {
     #[test]
     fn enforce_passes_on_conformant_layout() {
         let tmp = TempDir::new().unwrap();
-        populate_conformant(tmp.path());
+        let ids = populate_conformant(tmp.path());
         enforce(
             tmp.path(),
             &sqlite_dsn(tmp.path()),
             &local_blob_dsn(tmp.path()),
+            &ids,
         )
         .unwrap();
     }
@@ -568,13 +649,14 @@ mod tests {
     #[test]
     fn enforce_rejects_secret_mode_breach() {
         let tmp = TempDir::new().unwrap();
-        populate_conformant(tmp.path());
+        let ids = populate_conformant(tmp.path());
         let db = tmp.path().join("hermod.db");
         fs::set_permissions(&db, fs::Permissions::from_mode(0o644)).unwrap();
         match enforce(
             tmp.path(),
             &sqlite_dsn(tmp.path()),
             &local_blob_dsn(tmp.path()),
+            &ids,
         ) {
             Err(LayoutError::ModeMismatch {
                 label,
@@ -593,13 +675,14 @@ mod tests {
     #[test]
     fn enforce_rejects_dir_mode_breach() {
         let tmp = TempDir::new().unwrap();
-        populate_conformant(tmp.path());
+        let ids = populate_conformant(tmp.path());
         let bs = tmp.path().join("blob-store");
         fs::set_permissions(&bs, fs::Permissions::from_mode(0o755)).unwrap();
         match enforce(
             tmp.path(),
             &sqlite_dsn(tmp.path()),
             &local_blob_dsn(tmp.path()),
+            &ids,
         ) {
             Err(LayoutError::ModeMismatch {
                 label,
@@ -615,16 +698,75 @@ mod tests {
         }
     }
 
+    /// Per-agent `ed25519_secret` is Optional in the H2 spec (the
+    /// bootstrap agent shares the host_keypair), but if the file *is*
+    /// present (a post-H5 non-bootstrap agent) and carries a
+    /// permissive mode, enforce must still flag it. Optional
+    /// suppresses Missing, not ModeMismatch.
+    #[test]
+    fn enforce_rejects_per_agent_secret_breach_when_present() {
+        let tmp = TempDir::new().unwrap();
+        let ids = populate_conformant(tmp.path());
+        let id = &ids[0];
+        // Materialise the per-agent secret file (the bootstrap path
+        // doesn't write one) so we can exercise the mode-mismatch branch.
+        let secret = local_agent::secret_path(tmp.path(), id);
+        write_file(&secret, 0o644);
+        match enforce(
+            tmp.path(),
+            &sqlite_dsn(tmp.path()),
+            &local_blob_dsn(tmp.path()),
+            &ids,
+        ) {
+            Err(LayoutError::ModeMismatch {
+                label,
+                observed,
+                required,
+                ..
+            }) => {
+                assert!(
+                    label.contains(id.as_str()) && label.contains("secret"),
+                    "label was {label}"
+                );
+                assert_eq!(observed, 0o644);
+                assert_eq!(required, 0o600);
+            }
+            other => panic!("expected ModeMismatch, got {other:?}"),
+        }
+    }
+
+    /// The bootstrap agent has no per-agent ed25519_secret on disk;
+    /// the spec entry is Optional, so enforce must succeed without
+    /// the file present.
+    #[test]
+    fn enforce_passes_when_bootstrap_secret_missing() {
+        let tmp = TempDir::new().unwrap();
+        let ids = populate_conformant(tmp.path());
+        let secret = local_agent::secret_path(tmp.path(), &ids[0]);
+        assert!(
+            !secret.exists(),
+            "bootstrap shouldn't have a per-agent secret file"
+        );
+        enforce(
+            tmp.path(),
+            &sqlite_dsn(tmp.path()),
+            &local_blob_dsn(tmp.path()),
+            &ids,
+        )
+        .unwrap();
+    }
+
     #[test]
     fn enforce_skips_missing_optional_secret() {
         let tmp = TempDir::new().unwrap();
-        populate_conformant(tmp.path());
+        let ids = populate_conformant(tmp.path());
         // hermod.db-wal is Optional — its absence should not fail.
         assert!(!tmp.path().join("hermod.db-wal").exists());
         enforce(
             tmp.path(),
             &sqlite_dsn(tmp.path()),
             &local_blob_dsn(tmp.path()),
+            &ids,
         )
         .unwrap();
     }
@@ -632,12 +774,13 @@ mod tests {
     #[test]
     fn enforce_rejects_missing_required_secret() {
         let tmp = TempDir::new().unwrap();
-        populate_conformant(tmp.path());
+        let ids = populate_conformant(tmp.path());
         fs::remove_file(tmp.path().join("hermod.db")).unwrap();
         match enforce(
             tmp.path(),
             &sqlite_dsn(tmp.path()),
             &local_blob_dsn(tmp.path()),
+            &ids,
         ) {
             Err(LayoutError::Missing { label, .. }) => {
                 assert_eq!(label, "hermod database");
@@ -649,7 +792,7 @@ mod tests {
     #[test]
     fn enforce_ignores_public_and_operator_managed() {
         let tmp = TempDir::new().unwrap();
-        populate_conformant(tmp.path());
+        let ids = populate_conformant(tmp.path());
         // tls.crt: Public — wrong mode is OK at boot.
         let cert = tls_cert_path(tmp.path());
         fs::set_permissions(&cert, fs::Permissions::from_mode(0o600)).unwrap();
@@ -659,6 +802,7 @@ mod tests {
             tmp.path(),
             &sqlite_dsn(tmp.path()),
             &local_blob_dsn(tmp.path()),
+            &ids,
         )
         .unwrap();
         // …but audit() still reports the discrepancies.
@@ -666,6 +810,7 @@ mod tests {
             tmp.path(),
             &sqlite_dsn(tmp.path()),
             &local_blob_dsn(tmp.path()),
+            &ids,
         );
         let cert_finding = findings
             .iter()
@@ -688,67 +833,127 @@ mod tests {
     #[test]
     fn audit_returns_one_entry_per_spec() {
         let tmp = TempDir::new().unwrap();
-        populate_conformant(tmp.path());
+        let ids = populate_conformant(tmp.path());
         let storage = sqlite_dsn(tmp.path());
         let blob = local_blob_dsn(tmp.path());
-        let findings = audit(tmp.path(), &storage, &blob);
-        assert_eq!(findings.len(), spec(tmp.path(), &storage, &blob).len());
+        let findings = audit(tmp.path(), &storage, &blob, &ids);
+        assert_eq!(
+            findings.len(),
+            spec(tmp.path(), &storage, &blob, &ids).len()
+        );
     }
 
     #[test]
     fn spec_includes_sqlite_triplet_for_sqlite_dsn() {
         let tmp = TempDir::new().unwrap();
-        let labels: Vec<&str> = spec(
+        let labels: Vec<String> = spec(
             tmp.path(),
             &sqlite_dsn(tmp.path()),
             &local_blob_dsn(tmp.path()),
+            &[],
         )
-        .iter()
+        .into_iter()
         .map(|f| f.label)
         .collect();
-        assert!(labels.contains(&"hermod database"));
-        assert!(labels.contains(&"hermod database WAL"));
-        assert!(labels.contains(&"hermod database SHM"));
+        assert!(labels.iter().any(|l| l == "hermod database"));
+        assert!(labels.iter().any(|l| l == "hermod database WAL"));
+        assert!(labels.iter().any(|l| l == "hermod database SHM"));
     }
 
     #[test]
     fn spec_omits_sqlite_triplet_for_postgres_dsn() {
         let tmp = TempDir::new().unwrap();
-        let labels: Vec<&str> = spec(
+        let labels: Vec<String> = spec(
             tmp.path(),
             "postgres://hermod@db/hermod",
             &local_blob_dsn(tmp.path()),
+            &[],
         )
-        .iter()
+        .into_iter()
         .map(|f| f.label)
         .collect();
-        assert!(!labels.contains(&"hermod database"));
-        assert!(!labels.contains(&"hermod database WAL"));
-        assert!(!labels.contains(&"hermod database SHM"));
+        assert!(!labels.iter().any(|l| l == "hermod database"));
+        assert!(!labels.iter().any(|l| l == "hermod database WAL"));
+        assert!(!labels.iter().any(|l| l == "hermod database SHM"));
     }
 
     #[test]
     fn spec_includes_blob_dir_for_local_blob_dsn() {
         let tmp = TempDir::new().unwrap();
-        let labels: Vec<&str> = spec(
+        let labels: Vec<String> = spec(
             tmp.path(),
             &sqlite_dsn(tmp.path()),
             &local_blob_dsn(tmp.path()),
+            &[],
         )
-        .iter()
+        .into_iter()
         .map(|f| f.label)
         .collect();
-        assert!(labels.contains(&"blob store directory"));
+        assert!(labels.iter().any(|l| l == "blob store directory"));
     }
 
     #[test]
     fn spec_omits_blob_dir_for_memory_blob_dsn() {
         let tmp = TempDir::new().unwrap();
-        let labels: Vec<&str> = spec(tmp.path(), &sqlite_dsn(tmp.path()), "memory://")
-            .iter()
+        let labels: Vec<String> = spec(tmp.path(), &sqlite_dsn(tmp.path()), "memory://", &[])
+            .into_iter()
             .map(|f| f.label)
             .collect();
-        assert!(!labels.contains(&"blob store directory"));
+        assert!(!labels.iter().any(|l| l == "blob store directory"));
+    }
+
+    #[test]
+    fn spec_emits_one_block_per_local_agent() {
+        let tmp = TempDir::new().unwrap();
+        // No on-disk material needed — spec works off the agent_id
+        // list alone. Two fresh keypairs give two distinct ids.
+        let a = hermod_crypto::Keypair::generate().agent_id();
+        let b = hermod_crypto::Keypair::generate().agent_id();
+        let ids = vec![a, b];
+        let labels: Vec<String> = spec(
+            tmp.path(),
+            &sqlite_dsn(tmp.path()),
+            &local_blob_dsn(tmp.path()),
+            &ids,
+        )
+        .into_iter()
+        .map(|f| f.label)
+        .collect();
+        for id in &ids {
+            assert!(
+                labels
+                    .iter()
+                    .any(|l| l.contains(id.as_str()) && l.ends_with("directory")),
+                "missing directory entry for {id}"
+            );
+            assert!(
+                labels
+                    .iter()
+                    .any(|l| l.contains(id.as_str()) && l.ends_with("secret")),
+                "missing secret entry for {id}"
+            );
+            assert!(
+                labels
+                    .iter()
+                    .any(|l| l.contains(id.as_str()) && l.ends_with("bearer token")),
+                "missing bearer token entry for {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn spec_marks_agents_dir_optional_when_no_local_agents() {
+        let tmp = TempDir::new().unwrap();
+        let entry = spec(
+            tmp.path(),
+            &sqlite_dsn(tmp.path()),
+            &local_blob_dsn(tmp.path()),
+            &[],
+        )
+        .into_iter()
+        .find(|f| f.label == "agents directory")
+        .unwrap();
+        assert_eq!(entry.presence, Presence::Optional);
     }
 
     /// A Postgres-backed daemon with cloud-blob backend must boot
@@ -758,22 +963,45 @@ mod tests {
     #[test]
     fn enforce_passes_postgres_with_memory_blob_layout() {
         let tmp = TempDir::new().unwrap();
-        for file in spec(tmp.path(), "postgres://hermod@db/hermod", "memory://") {
+        let host = std::sync::Arc::new(hermod_crypto::Keypair::generate());
+        let agent = local_agent::provision_bootstrap(tmp.path(), host.clone(), None).unwrap();
+        let ids = vec![agent.agent_id.clone()];
+        for file in spec(tmp.path(), "postgres://hermod@db/hermod", "memory://", &ids) {
             match (file.kind, file.presence) {
-                (HomeFileKind::Directory, _) => make_dir(&file.path, file.required_mode),
-                (_, Presence::Required) => write_file(&file.path, file.required_mode),
+                (HomeFileKind::Directory, _) => {
+                    if !file.path.exists() {
+                        make_dir(&file.path, file.required_mode);
+                    } else {
+                        fs::set_permissions(
+                            &file.path,
+                            fs::Permissions::from_mode(file.required_mode),
+                        )
+                        .unwrap();
+                    }
+                }
+                (_, Presence::Required) => {
+                    if !file.path.exists() {
+                        write_file(&file.path, file.required_mode);
+                    } else {
+                        fs::set_permissions(
+                            &file.path,
+                            fs::Permissions::from_mode(file.required_mode),
+                        )
+                        .unwrap();
+                    }
+                }
                 (_, Presence::Optional) => {}
             }
         }
         assert!(!tmp.path().join("hermod.db").exists());
         assert!(!tmp.path().join("blob-store").exists());
-        enforce(tmp.path(), "postgres://hermod@db/hermod", "memory://").unwrap();
+        enforce(tmp.path(), "postgres://hermod@db/hermod", "memory://", &ids).unwrap();
     }
 
     #[test]
     fn error_message_includes_chmod_hint() {
         let err = LayoutError::ModeMismatch {
-            label: "hermod database",
+            label: "hermod database".to_string(),
             path: PathBuf::from("/tmp/x"),
             observed: 0o644,
             required: 0o600,

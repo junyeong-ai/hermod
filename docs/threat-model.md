@@ -8,7 +8,8 @@ changes to mitigations belong here first.
 ```
 ┌────────────────────────────────────────────────────────────────┐
 │  Trust boundary A: same-machine UNIX user (UID).               │
-│  Inside: everything that can read $HERMOD_HOME/identity/.      │
+│  Inside: everything that can read $HERMOD_HOME/host/ and      │
+│  $HERMOD_HOME/agents/.                                         │
 │  Crossing: any other UNIX user / process without that access.  │
 └────────────────────────────────────────────────────────────────┘
         ▲ CLI / MCP server reach the daemon over a UNIX socket
@@ -34,7 +35,7 @@ changes to mitigations belong here first.
 | T3  | Replay attack | ULID id + signed `ts` in every envelope; recv side rejects ts more than `policy.replay_window_secs` off wall clock; unique-id constraint dedupes at storage. |
 | T4  | Spam / DoS from authenticated peer | Per-`(from, to)` token bucket persisted in `rate_buckets`; capacity = `policy.rate_limit_per_sender` per minute. |
 | T5  | Privilege escalation via forged message | Federation listener enforces `envelope.from.id == authenticated peer's agent_id`; sig verify mandatory. |
-| T6  | Local malware reading identity / messages | Two-layer file mode policy enforced by `hermod_daemon::home_layout`: (1) process `umask 0o077` set at the top of `main()` (systemd `UMask=0077` model) so every new file under `$HERMOD_HOME` defaults to mode 0600 and every directory to 0700 — covers SQLite-managed `hermod.db*`, blob payloads, archived state. (2) Boot-time `enforce` re-checks every spec'd file (identity, hermod.db + WAL/SHM, blob-store/, archive/) against its required mode and refuses to start on a breach (sshd `StrictModes` model — no silent repair, so an attacker who chmod-relaxed a file can't have the daemon "fix" it back). `SecretString` (in-memory bearer + audit-webhook token) and `Keypair`/`WorkspaceSecret`/`ChannelMacKey` derive `ZeroizeOnDrop`. |
+| T6  | Local malware reading identity / messages | Two-layer file mode policy enforced by `hermod_daemon::home_layout`: (1) process `umask 0o077` set at the top of `main()` (systemd `UMask=0077` model) so every new file under `$HERMOD_HOME` defaults to mode 0600 and every directory to 0700 — covers SQLite-managed `hermod.db*`, blob payloads, archived state. (2) Boot-time `enforce` re-checks every spec'd file (host/, agents/<id>/, hermod.db + WAL/SHM, blob-store/, archive/) against its required mode and refuses to start on a breach (sshd `StrictModes` model — no silent repair, so an attacker who chmod-relaxed a file can't have the daemon "fix" it back). `SecretString` (in-memory bearer + audit-webhook token) and `Keypair`/`WorkspaceSecret`/`ChannelMacKey` derive `ZeroizeOnDrop`. |
 | T7  | Sensitive inbound from low-trust peer auto-applied | Confirmation gate (`hermod-routing::confirmation`) holds review/sensitive actions in `pending_confirmations` until the operator decides; untrusted+sensitive auto-rejects. See `docs/confirmation.md`. |
 | T8  | Session hijacking | Forward secrecy via Noise ephemeral keys per session — leaking the static key does not let an attacker decrypt past sessions. |
 | T9  | Compromised peer | Trust levels (`self` / `verified` / `tofu` / `untrusted`); fingerprint pinning at both Noise and TLS layers; reputation counter; manual re-trust required when a fingerprint changes. |
@@ -76,7 +77,8 @@ changes to mitigations belong here first.
 
 1. **Identity secret stays at-rest only.** It is read once at daemon
    start; never sent over a socket; never logged. The daemon refuses
-   to start if `$HERMOD_HOME/identity/ed25519_secret` is group- or
+   to start if `$HERMOD_HOME/host/ed25519_secret` (or any
+   `$HERMOD_HOME/agents/<id>/ed25519_secret`) is group- or
    world-readable (mode > `0600`) — `chmod 0600` is enforced, not
    advisory. The in-memory `Keypair` zeroes its secret bytes on
    `Drop`.
@@ -92,13 +94,13 @@ changes to mitigations belong here first.
    id and HMAC key under it; treat it as a password.
 5. **Identity-secret recovery.** `agent_id` is a deterministic
    function of the 32-byte ed25519 seed at
-   `$HERMOD_HOME/identity/ed25519_secret`. Loss of that file is
-   loss of the identity — the daemon will generate a *new* keypair
-   on next `hermod init`, with a new `agent_id`, and every peer's
-   directory entry for the old id becomes a dangling reference
-   (federation auth fails, no key rotation path bridges it). Backup
-   procedure:
-     * Copy `$HERMOD_HOME/identity/ed25519_secret` (32 raw bytes)
+   `$HERMOD_HOME/host/ed25519_secret`. Loss of that file is
+   loss of the host identity — the daemon will generate a *new*
+   keypair on next `hermod init`, with a new `agent_id`, and every
+   peer's directory entry for the old id becomes a dangling
+   reference (federation auth fails, no key rotation path bridges
+   it). Backup procedure:
+     * Copy `$HERMOD_HOME/host/ed25519_secret` (32 raw bytes)
        to durable offline storage encrypted with an operator
        passphrase (e.g. `age -p`, `gpg -c`, hardware token).
      * `tls.crt` / `tls.key` are regenerable from the seed —

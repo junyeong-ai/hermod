@@ -25,7 +25,7 @@ struct Cli {
     /// One of `--bearer-file`, `--bearer-command`, or
     /// `HERMOD_BEARER_TOKEN` supplies the daemon-layer bearer; with
     /// none of those set the CLI falls back to
-    /// `$HERMOD_HOME/identity/bearer_token`. When the daemon sits
+    /// `$HERMOD_HOME/agents/<bootstrap_id>/bearer_token`. When the daemon sits
     /// behind an SSO reverse proxy (Google Cloud IAP, oauth2-proxy,
     /// Cloudflare Access, ALB+Cognito, …), additionally configure
     /// `--proxy-bearer-*` to populate the `Proxy-Authorization` header
@@ -496,7 +496,7 @@ fn build_target(
             command: cli.bearer_command.clone(),
         };
         let daemon_env = hermod_crypto::secret::secret_from_env("HERMOD_BEARER_TOKEN");
-        let daemon_default = hermod_daemon::identity::bearer_token_path(home);
+        let daemon_default = hermod_daemon::local_agent::implicit_bearer_default(home);
         let daemon = bearer::daemon_from_env_and_args(&daemon_args, daemon_env, daemon_default)?;
 
         let proxy_args = bearer::BearerArgs {

@@ -20,7 +20,7 @@ mod outbox;
 mod server;
 mod services;
 
-use hermod_daemon::{config::Config, home_layout, identity, paths};
+use hermod_daemon::{config::Config, home_layout, host_identity, local_agent, paths};
 
 use crate::server::serve;
 
@@ -63,35 +63,39 @@ async fn main() -> anyhow::Result<()> {
     let storage_dsn = paths::expand_dsn(&config.storage.dsn, &home);
     let blob_dsn = paths::expand_dsn(&config.blob.dsn, &home);
 
-    // Layout: ensure $HERMOD_HOME and identity/ exist with the
-    // required mode (creates if missing, fail-loud if existing
-    // permissive). The matching post-init `home_layout::enforce`
-    // below covers every secret file once they've been populated.
+    // Layout: ensure $HERMOD_HOME and host/ exist with the required
+    // mode (creates if missing, fail-loud if existing permissive).
+    // The matching post-init `home_layout::enforce` below covers
+    // every secret file once they've been populated, including the
+    // per-agent `agents/<id>/` blocks the registry resolves a moment
+    // later.
     home_layout::ensure_dirs(&home).context("home layout")?;
 
-    let identity = identity::load(&home)
-        .context("load identity (run `hermod init` first to generate an identity)")?;
+    let host_keypair = host_identity::load(&home)
+        .context("load host identity (run `hermod init` first to generate one)")?;
 
     // TLS material — generate if missing so federation listener can bind WSS.
-    let tls = identity::ensure_tls(&home, &identity).context("load TLS material")?;
+    let tls = host_identity::ensure_tls(&home, &host_keypair).context("load TLS material")?;
     info!(
         tls_fingerprint = %&tls.fingerprint[..23],
         "loaded TLS material"
     );
 
-    let identity = std::sync::Arc::new(identity);
-    // Application-level signer — wraps the loaded keypair behind the
-    // `Signer` trait so the daemon's signing dependencies don't bind to
-    // the file-backed Keypair concretely. Future KMS backends slot in
-    // by constructing a different `Arc<dyn Signer>` here.
-    let signer: std::sync::Arc<dyn hermod_crypto::Signer> =
-        std::sync::Arc::new(hermod_crypto::LocalKeySigner::new(identity.clone()));
+    let host_keypair = std::sync::Arc::new(host_keypair);
+    let host_pubkey = host_keypair.to_pubkey_bytes();
+    // Application-level signer for the *host* (Noise XX static + audit
+    // actor for daemon-internal events). Per-agent envelope signing
+    // uses each agent's own keypair from the registry — wired up in
+    // `serve` once the registry is built.
+    let host_signer: std::sync::Arc<dyn hermod_crypto::Signer> =
+        std::sync::Arc::new(hermod_crypto::LocalKeySigner::new(host_keypair.clone()));
+
     let blobs = hermod_storage::open_blob_store(&blob_dsn)
         .await
         .with_context(|| format!("open blob store at {blob_dsn}"))?;
     info!(blob_dsn = %blob_dsn, "BlobStore ready");
     let db: std::sync::Arc<dyn hermod_storage::Database> =
-        match hermod_storage::open_database(&storage_dsn, signer.clone(), blobs).await {
+        match hermod_storage::open_database(&storage_dsn, host_signer.clone(), blobs).await {
             Ok(db) => db,
             Err(hermod_storage::StorageError::SchemaMismatch { details }) => {
                 // The on-disk DB has an applied migration whose checksum
@@ -111,22 +115,35 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
-    // Ensure self-agent is registered. Safe to repeat on every start.
-    let self_alias = config
+    // Build the local-agent registry from disk. Empty registry ⇒
+    // refuse to boot (operator hasn't run `hermod init` yet, OR
+    // accidentally deleted `$HERMOD_HOME/agents/`). Auto-provisioning
+    // here would silently mint a new agent_id and break every peer's
+    // pin — fail-loud is the safer default. The bootstrap agent's
+    // keypair is shared with the host (see `local_agent` module
+    // docs), so `host_keypair` is needed for the load fallback.
+    let registry = local_agent::build_registry(&home, host_keypair.clone())
+        .context("build local agent registry")?;
+    if registry.is_empty() {
+        anyhow::bail!("no local agents found at $HERMOD_HOME/agents/ — run `hermod init` first");
+    }
+
+    let primary_alias = config
         .identity
         .alias
         .as_deref()
         .and_then(|a| a.parse::<hermod_core::AgentAlias>().ok());
-    services::ensure_self_agent(&*db, &identity, self_alias).await?;
-
-    let bearer_token = std::sync::Arc::new(hermod_daemon::identity::ensure_bearer_token(&home)?);
+    let registry =
+        services::ensure_local_agents(&*db, host_pubkey, registry, primary_alias).await?;
 
     // Post-init enforcement: every spec'd secret file across
-    // $HERMOD_HOME (identity, hermod.db*, blob-store/, archive/)
-    // now exists with its canonical mode — umask 0o077 governed all
-    // create()s, atomic writers chmodded explicitly. Fail loud if
-    // anything was tampered between creation and now.
-    home_layout::enforce(&home, &storage_dsn, &blob_dsn).context("home layout")?;
+    // $HERMOD_HOME (host/, agents/<id>/, hermod.db*, blob-store/,
+    // archive/) now exists with its canonical mode — umask 0o077
+    // governed all create()s, atomic writers chmodded explicitly.
+    // Fail loud if anything was tampered between creation and now.
+    let agent_ids: Vec<hermod_core::AgentId> =
+        registry.list().iter().map(|a| a.agent_id.clone()).collect();
+    home_layout::enforce(&home, &storage_dsn, &blob_dsn, &agent_ids).context("home layout")?;
 
     let audit_file_path = config
         .audit
@@ -136,10 +153,10 @@ async fn main() -> anyhow::Result<()> {
     serve(
         effective_socket,
         db,
-        signer,
-        identity,
+        host_signer,
+        host_keypair,
+        registry,
         tls,
-        bearer_token,
         audit_file_path,
         home,
         config,

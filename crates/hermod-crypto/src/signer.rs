@@ -88,9 +88,10 @@ pub trait Signer: Send + Sync + std::fmt::Debug + 'static {
 }
 
 /// Local file-backed signer — wraps a `Keypair` loaded from
-/// `$HERMOD_HOME/identity/ed25519_secret`. The default implementation;
-/// a future `KmsSigner` slots into the same `Arc<dyn Signer>` consumer
-/// surface without daemon changes.
+/// `$HERMOD_HOME/host/ed25519_secret` (or, for non-bootstrap local
+/// agents, `$HERMOD_HOME/agents/<id>/ed25519_secret`). The default
+/// implementation; a future `KmsSigner` slots into the same
+/// `Arc<dyn Signer>` consumer surface without daemon changes.
 #[derive(Debug)]
 pub struct LocalKeySigner {
     keypair: Arc<Keypair>,

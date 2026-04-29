@@ -80,10 +80,30 @@ impl Daemon {
             .expect("hermod init");
         assert!(init_status.success());
 
-        let real_token = std::fs::read_to_string(home.path().join("identity").join("bearer_token"))
-            .expect("bearer_token file")
-            .trim()
-            .to_string();
+        // Post-H2: per-agent bearer at agents/<bootstrap_id>/bearer_token.
+        // Single bootstrap agent ⇒ exactly one entry under agents/.
+        let agents_dir = home.path().join("agents");
+        let mut agent_subdirs = std::fs::read_dir(&agents_dir)
+            .expect("read agents dir")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            agent_subdirs.len(),
+            1,
+            "expected exactly one bootstrap agent under agents/, got {}",
+            agent_subdirs.len()
+        );
+        let real_token = std::fs::read_to_string(
+            agent_subdirs
+                .pop()
+                .expect("len == 1")
+                .path()
+                .join("bearer_token"),
+        )
+        .expect("bearer_token file")
+        .trim()
+        .to_string();
 
         let wss_port = pick_free_port();
         let wss_addr: SocketAddr = format!("127.0.0.1:{wss_port}").parse().unwrap();
@@ -111,8 +131,9 @@ impl Daemon {
 
     fn tls_fingerprint(&self) -> String {
         // Compute SHA-256 of the cert DER, lowercase colon-separated.
+        // Post-H2: TLS material lives at host/, not identity/.
         let cert_pem =
-            std::fs::read_to_string(self.home.path().join("identity").join("tls.crt")).unwrap();
+            std::fs::read_to_string(self.home.path().join("host").join("tls.crt")).unwrap();
         let cert: Vec<rustls_pki_types::CertificateDer> =
             rustls_pki_types::pem::PemObject::pem_slice_iter(cert_pem.as_bytes())
                 .collect::<Result<_, _>>()

@@ -140,13 +140,15 @@ HERMOD_DAEMON_IPC_LISTEN_WSS=0.0.0.0:7824 hermodd
 ```
 
 The bearer token is auto-generated on first `hermod init` at
-`$HERMOD_HOME/identity/bearer_token` (mode 0600). Copy it to your
-client machine over a secure channel (SSH, password manager, Signal):
+`$HERMOD_HOME/agents/<bootstrap_id>/bearer_token` (mode 0600). The
+bootstrap agent_id is the host's own — `hermod identity` prints it.
+Copy the token to your client machine over a secure channel (SSH,
+password manager, Signal):
 
 ```sh
 # on the daemon host:
 hermod bearer show          # prints the token (masked by default)
-cat $HERMOD_HOME/identity/bearer_token   # raw token (for scripted copy)
+hermod bearer show --full   # raw token (for scripted copy)
 ```
 
 ### Connect from a client
@@ -334,8 +336,9 @@ most one of `--proxy-bearer-file` / `--proxy-bearer-command` /
 
 If only the daemon family is set the CLI sends only `Authorization`
 (non-SSO deployments). If neither family is set, the CLI falls back
-to `$HERMOD_HOME/identity/bearer_token` for `Authorization` and
-sends no `Proxy-Authorization` — the on-host "just works" shape.
+to `$HERMOD_HOME/agents/<bootstrap_id>/bearer_token` for
+`Authorization` and sends no `Proxy-Authorization` — the on-host
+"just works" shape.
 
 ## 4. Docker / Compose
 
@@ -497,8 +500,8 @@ Operator runbook:
 
 ```sh
 # 1. Stage the new cert + key alongside the old ones
-mv new.crt $HERMOD_HOME/identity/tls.crt
-mv new.key $HERMOD_HOME/identity/tls.key
+mv new.crt $HERMOD_HOME/host/tls.crt
+mv new.key $HERMOD_HOME/host/tls.key
 
 # 2. Tell the daemon to pick them up
 kill -HUP $(pgrep -f hermodd)
@@ -627,10 +630,10 @@ Expose the federation port via a `Service` (typically `LoadBalancer` or
 `NodePort` for a cluster reachable from peers). Keep the metrics port
 internal — scrape via Prometheus `ServiceMonitor` / pod annotations.
 
-The identity key is on the `PersistentVolume`. For HSM / KMS storage,
-generate the key out-of-band and write it to a `Secret` mounted at
-`/var/lib/hermod/identity/ed25519_secret` with `defaultMode: 0o600`;
-`hermodd` will pick it up.
+The host identity key is on the `PersistentVolume`. For HSM / KMS
+storage, generate the key out-of-band and write it to a `Secret`
+mounted at `/var/lib/hermod/host/ed25519_secret` with
+`defaultMode: 0o600`; `hermodd` will pick it up.
 
 ### Multiple agents per cluster
 
@@ -781,7 +784,7 @@ The seed is 32 raw bytes. Encrypt and store offline:
 
 ```sh
 # On the daemon host:
-age -p < $HERMOD_HOME/identity/ed25519_secret > /secure/offline/hermod-seed.age
+age -p < $HERMOD_HOME/host/ed25519_secret > /secure/offline/hermod-seed.age
 # (or: gpg -c --output hermod-seed.gpg)
 
 # Verify the encrypted blob actually decrypts before walking away:
@@ -791,9 +794,9 @@ age -d /secure/offline/hermod-seed.age | wc -c  # → expect 32
 Restore:
 
 ```sh
-mkdir -p $HERMOD_HOME/identity
-age -d /secure/offline/hermod-seed.age > $HERMOD_HOME/identity/ed25519_secret
-chmod 0600 $HERMOD_HOME/identity/ed25519_secret
+mkdir -p $HERMOD_HOME/host
+age -d /secure/offline/hermod-seed.age > $HERMOD_HOME/host/ed25519_secret
+chmod 0600 $HERMOD_HOME/host/ed25519_secret
 # Daemon refuses to start on world-readable mode — the chmod is mandatory.
 hermodd  # tls.crt + tls.key regenerate on first start.
 ```
@@ -802,9 +805,9 @@ hermodd  # tls.crt + tls.key regenerate on first start.
 
 ```sh
 # 1. Restore identity (the load-bearing artifact).
-mkdir -p $HERMOD_HOME/identity
-age -d /secure/offline/hermod-seed.age > $HERMOD_HOME/identity/ed25519_secret
-chmod 0600 $HERMOD_HOME/identity/ed25519_secret
+mkdir -p $HERMOD_HOME/host
+age -d /secure/offline/hermod-seed.age > $HERMOD_HOME/host/ed25519_secret
+chmod 0600 $HERMOD_HOME/host/ed25519_secret
 
 # 2. Restore the database snapshot.
 cp /backup/hermod-2026-04-27.db $HERMOD_HOME/hermod.db   # SQLite

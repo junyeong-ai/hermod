@@ -39,7 +39,20 @@ pub async fn run(home: &Path, target: &ClientTarget) -> Result<()> {
     let config = Config::load(None, home).context("load config")?;
     let storage_dsn = paths::expand_dsn(&config.storage.dsn, home);
     let blob_dsn = paths::expand_dsn(&config.blob.dsn, home);
-    for (file, finding) in hermod_daemon::home_layout::audit(home, &storage_dsn, &blob_dsn) {
+    let local_agent_ids: Vec<hermod_core::AgentId> =
+        match hermod_daemon::local_agent::scan_disk_ids(home) {
+            Ok(ids) => ids,
+            Err(e) => {
+                report.note(&format!(
+                    "could not enumerate $HERMOD_HOME/agents/: {e:#} — \
+                     per-agent layout audit skipped"
+                ));
+                Vec::new()
+            }
+        };
+    for (file, finding) in
+        hermod_daemon::home_layout::audit(home, &storage_dsn, &blob_dsn, &local_agent_ids)
+    {
         match finding {
             Ok(()) => report.pass(&format!("{} ({:o})", file.label, file.required_mode)),
             Err(LayoutError::Missing { .. }) if file.presence == Presence::Optional => {
@@ -50,7 +63,7 @@ pub async fn run(home: &Path, target: &ClientTarget) -> Result<()> {
             }
             Err(LayoutError::Missing { .. }) => match file.kind {
                 HomeFileKind::Secret | HomeFileKind::Directory => {
-                    report.fail(file.label, "run `hermod init` to generate it".into())
+                    report.fail(&file.label, "run `hermod init` to generate it".into())
                 }
                 HomeFileKind::Public | HomeFileKind::OperatorManaged => {
                     // Public + operator-managed missing is non-fatal;
@@ -63,25 +76,32 @@ pub async fn run(home: &Path, target: &ClientTarget) -> Result<()> {
                     report.note(&format!("{} ({})", file.label, e))
                 }
                 HomeFileKind::Secret | HomeFileKind::Directory => {
-                    report.fail(file.label, e.to_string())
+                    report.fail(&file.label, e.to_string())
                 }
             },
         }
     }
 
-    let identity_loaded = hermod_daemon::identity::load(home).is_ok();
-    report.check("identity loadable", identity_loaded, || {
+    let host_loaded = hermod_daemon::host_identity::load(home).is_ok();
+    report.check("host identity loadable", host_loaded, || {
         "regenerate via `hermod init` (move existing $HERMOD_HOME first)".into()
     });
 
-    if identity_loaded {
-        let kp = hermod_daemon::identity::load(home)?;
-        let tls = hermod_daemon::identity::ensure_tls(home, &kp);
+    let local_agent_count = local_agent_ids.len();
+    report.check(
+        "at least one local agent provisioned",
+        local_agent_count > 0,
+        || "run `hermod init` to provision the bootstrap local agent".into(),
+    );
+
+    if host_loaded {
+        let kp = hermod_daemon::host_identity::load(home)?;
+        let tls = hermod_daemon::host_identity::ensure_tls(home, &kp);
         report.check(
             "TLS certificate readable / generatable",
             tls.is_ok(),
             || format!(
-                "remove $HERMOD_HOME/identity/tls_*.pem and restart so they regenerate (was: {})",
+                "remove $HERMOD_HOME/host/tls.crt + tls.key and restart so they regenerate (was: {})",
                 tls.as_ref().err().map(|e| e.to_string()).unwrap_or_default()
             ),
         );
