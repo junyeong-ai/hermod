@@ -169,12 +169,34 @@ enum Command {
     #[command(subcommand)]
     Bearer(BearerCmd),
 
+    /// Manage the daemon's hosted local agents (per-project tenants).
+    #[command(subcommand)]
+    Local(LocalCmd),
+
     /// Query and verify the audit log.
     #[command(subcommand)]
     Audit(AuditCmd),
 
     /// Run the MCP server over stdio (called by Claude Code).
     Mcp,
+}
+
+#[derive(Subcommand, Debug)]
+enum LocalCmd {
+    /// List every agent this daemon hosts.
+    List,
+    /// Show one agent's identity, alias, and bearer paths.
+    Show(commands::local::ShowArgs),
+    /// Provision a fresh local agent (keypair + bearer + alias).
+    Add(commands::local::AddArgs),
+    /// Archive a local agent's on-disk material.
+    Rm(commands::local::RemoveArgs),
+    /// Generate a new bearer token for a local agent.
+    Rotate(commands::local::RotateArgs),
+    /// Write `.mcp.json` next to a project root so Claude Code
+    /// connects as the named agent when launched from that project.
+    #[command(name = "setup-mcp")]
+    SetupMcp(commands::local::SetupMcpArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -428,6 +450,14 @@ async fn main() -> anyhow::Result<()> {
         Command::Bearer(sub) => match sub {
             BearerCmd::Show(a) => commands::bearer::show(a, &home).await,
             BearerCmd::Rotate => commands::bearer::rotate(&home).await,
+        },
+        Command::Local(sub) => match sub {
+            LocalCmd::List => commands::local::list(&home).await,
+            LocalCmd::Show(a) => commands::local::show(a, &home).await,
+            LocalCmd::Add(a) => commands::local::add(a, &home).await,
+            LocalCmd::Rm(a) => commands::local::remove(a, &home).await,
+            LocalCmd::Rotate(a) => commands::local::rotate(a, &home).await,
+            LocalCmd::SetupMcp(a) => commands::local::setup_mcp(a, &home).await,
         },
         Command::Audit(sub) => match sub {
             AuditCmd::Query(a) => commands::audit::query(a, &target).await,

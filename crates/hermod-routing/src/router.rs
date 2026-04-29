@@ -1,12 +1,15 @@
 use hermod_core::{AgentAddress, AgentId, Endpoint};
 use hermod_storage::Database;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::error::{Result, RoutingError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RouteDecision {
-    /// Target is this daemon's own identity.
+    /// Target is one of this daemon's hosted local agents — the
+    /// envelope short-circuits the federation transport and applies
+    /// to that agent's inbox directly.
     Loopback,
     /// Target is registered in the local `agents` table but has no
     /// remote endpoint, and no upstream broker is configured.
@@ -24,7 +27,10 @@ pub enum RouteDecision {
 
 #[derive(Clone)]
 pub struct Router {
-    self_id: AgentId,
+    /// Agents this daemon hosts. `Loopback` fires when an envelope's
+    /// `to.id` matches any of them; in single-tenant deployments
+    /// there's exactly one entry, in multi-tenant there are N.
+    local_ids: Arc<HashSet<AgentId>>,
     db: Arc<dyn Database>,
     upstream_broker: Option<Endpoint>,
 }
@@ -32,16 +38,16 @@ pub struct Router {
 impl std::fmt::Debug for Router {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Router")
-            .field("self_id", &self.self_id)
+            .field("local_id_count", &self.local_ids.len())
             .field("upstream_broker", &self.upstream_broker)
             .finish_non_exhaustive()
     }
 }
 
 impl Router {
-    pub fn new(self_id: AgentId, db: Arc<dyn Database>) -> Self {
+    pub fn new<I: IntoIterator<Item = AgentId>>(local_ids: I, db: Arc<dyn Database>) -> Self {
         Self {
-            self_id,
+            local_ids: Arc::new(local_ids.into_iter().collect()),
             db,
             upstream_broker: None,
         }
@@ -56,8 +62,9 @@ impl Router {
         self
     }
 
-    pub fn self_id(&self) -> &AgentId {
-        &self.self_id
+    /// True iff `id` is one of this daemon's hosted local agents.
+    pub fn is_local(&self, id: &AgentId) -> bool {
+        self.local_ids.contains(id)
     }
 
     /// Classify where a message to `target` should go.
@@ -67,16 +74,14 @@ impl Router {
     /// pubkey, which must be ingested first (`agent register` or the
     /// workspace invite flow).
     pub async fn resolve(&self, target: &AgentAddress) -> Result<RouteDecision> {
-        if target.id.as_str() == self.self_id.as_str() {
+        if self.is_local(&target.id) {
             return Ok(RouteDecision::Loopback);
         }
-        // Prefer explicit endpoint on the address.
         if let Some(ep) = &target.endpoint
             && !ep.is_local()
         {
             return Ok(RouteDecision::Remote(ep.clone()));
         }
-        // Otherwise consult the directory.
         match self.db.agents().get(&target.id).await? {
             Some(record) => match record.endpoint {
                 Some(ep) if !ep.is_local() => Ok(RouteDecision::Remote(ep)),
@@ -106,7 +111,7 @@ mod tests {
             .await
             .unwrap();
         let db: Arc<dyn Database> = Arc::new(db);
-        let router = Router::new(self_id, db.clone());
+        let router = Router::new([self_id], db.clone());
         (router, db)
     }
 

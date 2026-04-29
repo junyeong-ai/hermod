@@ -240,6 +240,36 @@ pub fn create_bootstrap(home: &Path, alias: Option<AgentAlias>) -> Result<LocalA
             agents_dir(home).display()
         );
     }
+    write_new_agent(home, alias)
+}
+
+/// Materialise an *additional* local agent (sibling to an existing
+/// bootstrap). Used by `hermod local add`. Identical on-disk shape
+/// to [`create_bootstrap`]; differs only in that pre-existing
+/// agents are tolerated and the new agent's alias must not collide
+/// with one already on disk.
+pub fn create_additional(home: &Path, alias: Option<AgentAlias>) -> Result<LocalAgent> {
+    if let Some(a) = &alias {
+        for id in scan_disk_ids(home)? {
+            if let Some(existing) = read_alias(home, &id)?
+                && existing == *a
+            {
+                anyhow::bail!(
+                    "alias `{}` is already bound to local agent {} — pick another or `hermod local rm` first",
+                    a.as_str(),
+                    id
+                );
+            }
+        }
+    }
+    write_new_agent(home, alias)
+}
+
+/// Shared write path for [`create_bootstrap`] and
+/// [`create_additional`]. Generates a fresh keypair + bearer and
+/// writes them (plus the optional alias) under
+/// `agents/<agent_id>/`.
+fn write_new_agent(home: &Path, alias: Option<AgentAlias>) -> Result<LocalAgent> {
     let keypair = Arc::new(Keypair::generate());
     let agent_id = keypair.agent_id();
     ensure_agent_dir(home, &agent_id)?;
@@ -267,6 +297,66 @@ pub fn create_bootstrap(home: &Path, alias: Option<AgentAlias>) -> Result<LocalA
         workspace_root: None,
         created_at: Timestamp::now(),
     })
+}
+
+/// Generate and atomically install a fresh bearer token for an
+/// existing local agent. Returns the new token so the operator can
+/// pipe it into a remote-IPC client without re-reading the file.
+/// The DB row's `bearer_hash` lags until the next daemon boot, when
+/// `merge_with_db` detects the drift and reconciles via the
+/// `local_agent.bearer_rotated_on_drift` audit row.
+pub fn rotate_bearer_on_disk(home: &Path, id: &AgentId) -> Result<SecretString> {
+    if !secret_path(home, id).exists() {
+        anyhow::bail!(
+            "no local agent {id} on disk at {}",
+            agent_dir(home, id).display()
+        );
+    }
+    let new_token = generate_bearer_token();
+    let bearer_p = bearer_token_path(home, id);
+    write_secret_atomic(&bearer_p, new_token.expose_secret().as_bytes())
+        .with_context(|| format!("write {}", bearer_p.display()))?;
+    Ok(new_token)
+}
+
+/// Move `agents/<id>/` into the timestamped archive subtree. The
+/// directory's keypair, bearer, and any alias file all move together;
+/// the matching `agents` and `local_agents` DB rows linger until the
+/// next daemon boot, when `load_registry` no longer sees the agent
+/// and the operator can clean them up via `hermod doctor` or by
+/// archiving the DB itself.
+pub fn archive_agent(home: &Path, id: &AgentId) -> Result<PathBuf> {
+    let src = agent_dir(home, id);
+    if !src.exists() {
+        anyhow::bail!(
+            "no local agent {id} on disk at {} — nothing to archive",
+            src.display()
+        );
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_else(|_| "0".to_string());
+    let archive_root = home.join("archive").join(stamp).join("agents");
+    fs::create_dir_all(&archive_root)
+        .with_context(|| format!("create {}", archive_root.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = archive_root
+            .parent()
+            .expect("archive_root has parent by construction");
+        if parent.exists() {
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+                .with_context(|| format!("chmod {}", parent.display()))?;
+        }
+        fs::set_permissions(&archive_root, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("chmod {}", archive_root.display()))?;
+    }
+    let dst = archive_root.join(id.as_str());
+    fs::rename(&src, &dst)
+        .with_context(|| format!("move {} → {}", src.display(), dst.display()))?;
+    Ok(dst)
 }
 
 /// Load one local agent's on-disk material. The directory name is

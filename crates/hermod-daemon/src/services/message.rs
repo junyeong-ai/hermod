@@ -255,7 +255,8 @@ impl MessageService {
             }
             return Err(e.into());
         }
-        self.audit_send(&envelope, status, &decision).await;
+        self.audit_send(caller.clone(), &envelope, status, &decision)
+            .await;
 
         // Nudge the outbox worker so the retry runs as soon as the backoff
         // timer expires, not on the next backstop tick.
@@ -272,13 +273,15 @@ impl MessageService {
         })
     }
 
-    /// Best-effort liveness lookup for the recipient. For loopback (rare:
-    /// sending to self) consults `mcp_sessions`; for federated peers
-    /// consults the cached `peer_live` populated by inbound Presence
-    /// envelopes. On error, degrades to `false` — never blocks the send.
+    /// Best-effort liveness lookup for the recipient. For loopback —
+    /// the recipient is one of our hosted agents — we consult
+    /// `mcp_sessions` (any active local Claude Code session counts).
+    /// For federated peers we consult the cached `peer_live`
+    /// populated by inbound Presence envelopes. On error, degrades
+    /// to `false` — never blocks the send.
     async fn is_recipient_live(&self, recipient: &hermod_core::AgentId) -> bool {
         let now = Timestamp::now();
-        if recipient == self.router.self_id() {
+        if self.router.is_local(recipient) {
             return self
                 .db
                 .mcp_sessions()
@@ -294,6 +297,11 @@ impl MessageService {
     }
 
     pub async fn list(&self, params: MessageListParams) -> Result<MessageListResult, ServiceError> {
+        let caller = current_caller_agent().ok_or_else(|| {
+            ServiceError::InvalidParam(
+                "message.list requires an IPC caller scope (no caller_agent in context)".into(),
+            )
+        })?;
         let limit = params
             .limit
             .unwrap_or(DEFAULT_LIST_LIMIT)
@@ -304,16 +312,8 @@ impl MessageService {
             limit: Some(limit),
             after_id: params.after_id,
         };
-        let records = self
-            .db
-            .messages()
-            .list_inbox(self.router.self_id(), &filter)
-            .await?;
-        let total = self
-            .db
-            .messages()
-            .count_pending_to(self.router.self_id())
-            .await?;
+        let records = self.db.messages().list_inbox(&caller, &filter).await?;
+        let total = self.db.messages().count_pending_to(&caller).await?;
         // Per-batch alias cache. Multiple messages from the same sender
         // share one directory lookup; the directory is small + indexed so
         // this is O(distinct senders) sqlite SELECTs.
@@ -356,21 +356,26 @@ impl MessageService {
                 params.message_ids.len()
             )));
         }
-        let self_id = self.router.self_id();
+        let caller = current_caller_agent().ok_or_else(|| {
+            ServiceError::InvalidParam(
+                "message.ack requires an IPC caller scope (no caller_agent in context)".into(),
+            )
+        })?;
         let now = Timestamp::now();
         let mut acked = Vec::with_capacity(params.message_ids.len());
         for id in params.message_ids {
-            let ok = self.db.messages().ack(&id, self_id, now).await?;
+            let ok = self.db.messages().ack(&id, &caller, now).await?;
             if ok {
                 acked.push(id);
             }
         }
-        self.audit_ack(&acked).await;
+        self.audit_ack(caller, &acked).await;
         Ok(MessageAckResult { acked })
     }
 
     async fn audit_send(
         &self,
+        actor: AgentId,
         envelope: &Envelope,
         status: MessageStatus,
         decision: &RouteDecision,
@@ -386,7 +391,7 @@ impl MessageService {
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),
-                actor: self.router.self_id().clone(),
+                actor,
                 action: "message.sent".into(),
                 target: Some(envelope.to.id.to_string()),
                 details: Some(serde_json::json!({
@@ -407,7 +412,7 @@ impl MessageService {
         .await;
     }
 
-    async fn audit_ack(&self, ids: &[hermod_core::MessageId]) {
+    async fn audit_ack(&self, actor: AgentId, ids: &[hermod_core::MessageId]) {
         if ids.is_empty() {
             return;
         }
@@ -416,7 +421,7 @@ impl MessageService {
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),
-                actor: self.router.self_id().clone(),
+                actor,
                 action: "message.read".into(),
                 target: None,
                 details: Some(serde_json::json!({

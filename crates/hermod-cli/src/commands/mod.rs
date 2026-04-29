@@ -9,6 +9,7 @@ pub mod confirmation;
 pub mod doctor;
 pub mod identity;
 pub mod init;
+pub mod local;
 pub mod message;
 pub mod peer;
 pub mod permission;

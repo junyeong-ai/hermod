@@ -8,6 +8,7 @@ use hermod_protocol::ipc::methods::{
     ChannelListParams, ChannelListResult, ChannelMessageView, ChannelMuteParams, ChannelMuteResult,
     ChannelView, DiscoveredChannelView, MessageSendParams,
 };
+use hermod_routing::Router;
 use hermod_storage::{AuditEntry, AuditSink, ChannelRecord, Database, WorkspaceRecord};
 use serde_bytes::ByteBuf;
 use std::sync::Arc;
@@ -23,7 +24,17 @@ const MAX_HISTORY_LIMIT: u32 = 500;
 pub struct ChannelService {
     db: Arc<dyn Database>,
     audit_sink: Arc<dyn AuditSink>,
+    /// Default-actor fallback used by audit literals; the
+    /// `audit_or_warn` overlay replaces it with the actual caller in
+    /// any IPC scope. Carrying a host-derived id keeps daemon-internal
+    /// emissions (none today, but symmetric with peer services)
+    /// attributed correctly when no IPC frame is on the stack.
     self_id: AgentId,
+    /// Membership oracle: skips fan-out to any of *our* hosted agents
+    /// when iterating workspace members. Multi-tenant deploys host
+    /// more than one local agent, so a static `self_id == member`
+    /// check would miss the others.
+    router: Router,
     messages: MessageService,
 }
 
@@ -32,12 +43,14 @@ impl ChannelService {
         db: Arc<dyn Database>,
         audit_sink: Arc<dyn AuditSink>,
         self_id: AgentId,
+        router: Router,
         messages: MessageService,
     ) -> Self {
         Self {
             db,
             audit_sink,
             self_id,
+            router,
             messages,
         }
     }
@@ -177,7 +190,7 @@ impl ChannelService {
             .await?;
         let mut fanout = 0u32;
         for member in members {
-            if member.as_str() == self.self_id.as_str() {
+            if self.router.is_local(&member) {
                 continue;
             }
             let recipient = match self.db.agents().get(&member).await? {

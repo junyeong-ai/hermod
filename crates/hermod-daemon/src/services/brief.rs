@@ -19,7 +19,6 @@ const MAX_TOPIC_BYTES: usize = 64;
 pub struct BriefService {
     db: Arc<dyn Database>,
     audit_sink: Arc<dyn AuditSink>,
-    self_id: AgentId,
     messages: MessageService,
 }
 
@@ -27,13 +26,11 @@ impl BriefService {
     pub fn new(
         db: Arc<dyn Database>,
         audit_sink: Arc<dyn AuditSink>,
-        self_id: AgentId,
         messages: MessageService,
     ) -> Self {
         Self {
             db,
             audit_sink,
-            self_id,
             messages,
         }
     }
@@ -42,6 +39,11 @@ impl BriefService {
         &self,
         params: BriefPublishParams,
     ) -> Result<BriefPublishResult, ServiceError> {
+        let caller = crate::audit_context::current_caller_agent().ok_or_else(|| {
+            ServiceError::InvalidParam(
+                "brief.publish requires an IPC caller scope (no caller_agent in context)".into(),
+            )
+        })?;
         if params.summary.is_empty() {
             return Err(ServiceError::InvalidParam("summary is empty".into()));
         }
@@ -76,7 +78,7 @@ impl BriefService {
         self.db
             .briefs()
             .upsert(&BriefRecord {
-                agent_id: self.self_id.clone(),
+                agent_id: caller.clone(),
                 topic: params.topic.clone(),
                 summary: params.summary.clone(),
                 published_at: now,
@@ -94,7 +96,7 @@ impl BriefService {
         let outcome = fanout::fanout_to_workspace_members(
             &*self.db,
             &self.messages,
-            &self.self_id,
+            &caller,
             body,
             MessagePriority::Low,
             ttl,
@@ -106,7 +108,7 @@ impl BriefService {
             AuditEntry {
                 id: None,
                 ts: now,
-                actor: self.self_id.clone(),
+                actor: caller,
                 action: "brief.publish".into(),
                 target: None,
                 details: Some(serde_json::json!({

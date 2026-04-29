@@ -108,15 +108,21 @@ pub async fn serve(
         );
     }
 
+    let local_ids: Vec<hermod_core::AgentId> =
+        registry.list().iter().map(|a| a.agent_id.clone()).collect();
+    let local_pubkeys: Vec<(hermod_core::AgentId, hermod_crypto::PublicKey)> = registry
+        .list()
+        .iter()
+        .map(|a| (a.agent_id.clone(), a.keypair.public_key()))
+        .collect();
     let router = match &upstream_broker {
-        Some(ub) => Router::new(self_id.clone(), db.clone())
+        Some(ub) => Router::new(local_ids.clone(), db.clone())
             .with_upstream_broker(hermod_core::Endpoint::Wss(ub.endpoint.clone())),
-        None => Router::new(self_id.clone(), db.clone()),
+        None => Router::new(local_ids.clone(), db.clone()),
     };
     let access = AccessController::new(
         db.clone(),
-        self_id.clone(),
-        solo.keypair.public_key(),
+        local_pubkeys,
         AccessPolicy {
             require_capability: config.policy.require_capability,
         },
@@ -486,12 +492,7 @@ pub async fn serve(
         status: StatusService::new(db.clone(), key_ref, started),
         messages: messages.clone(),
         agents: AgentService::new(db.clone(), audit_sink.clone(), presence.clone()),
-        briefs: BriefService::new(
-            db.clone(),
-            audit_sink.clone(),
-            self_id.clone(),
-            messages.clone(),
-        ),
+        briefs: BriefService::new(db.clone(), audit_sink.clone(), messages.clone()),
         presence: presence.clone(),
         mcp: McpService::new(
             db.clone(),
@@ -511,14 +512,10 @@ pub async fn serve(
             db.clone(),
             audit_sink.clone(),
             self_id.clone(),
+            router.clone(),
             messages.clone(),
         ),
-        broadcasts: BroadcastService::new(
-            db.clone(),
-            audit_sink.clone(),
-            self_id.clone(),
-            messages,
-        ),
+        broadcasts: BroadcastService::new(db.clone(), audit_sink.clone(), router.clone(), messages),
         confirmations: ConfirmationService::new(
             db.clone(),
             audit_sink.clone(),

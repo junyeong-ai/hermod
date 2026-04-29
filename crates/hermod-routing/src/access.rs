@@ -1,6 +1,7 @@
 use hermod_core::{AgentId, CapabilityToken, Timestamp};
 use hermod_crypto::{CapabilityClaim, PublicKey, verify_capability};
 use hermod_storage::Database;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::trace;
 
@@ -59,33 +60,47 @@ pub struct AccessPolicy {
 #[derive(Clone)]
 pub struct AccessController {
     db: Arc<dyn Database>,
-    self_id: AgentId,
-    self_pubkey: Arc<PublicKey>,
+    /// Map from each local agent_id to its public key. Capability
+    /// tokens issued by *any* of our hosted agents pass the strict
+    /// inbound check; outbound `check_send` short-circuits when the
+    /// sender is any of our agents. Single-tenant deployments have
+    /// one entry; multi-tenant has N.
+    local_pubkeys: Arc<HashMap<AgentId, Arc<PublicKey>>>,
     policy: AccessPolicy,
 }
 
 impl std::fmt::Debug for AccessController {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AccessController")
-            .field("self_id", &self.self_id)
+            .field("local_id_count", &self.local_pubkeys.len())
             .field("policy", &self.policy)
             .finish_non_exhaustive()
     }
 }
 
 impl AccessController {
-    pub fn new(
+    pub fn new<I: IntoIterator<Item = (AgentId, PublicKey)>>(
         db: Arc<dyn Database>,
-        self_id: AgentId,
-        self_pubkey: PublicKey,
+        local_agents: I,
         policy: AccessPolicy,
     ) -> Self {
+        let local_pubkeys: HashMap<AgentId, Arc<PublicKey>> = local_agents
+            .into_iter()
+            .map(|(id, pk)| (id, Arc::new(pk)))
+            .collect();
         Self {
             db,
-            self_id,
-            self_pubkey: Arc::new(self_pubkey),
+            local_pubkeys: Arc::new(local_pubkeys),
             policy,
         }
+    }
+
+    fn is_local(&self, id: &AgentId) -> bool {
+        self.local_pubkeys.contains_key(id)
+    }
+
+    fn local_pubkey(&self, id: &AgentId) -> Option<&PublicKey> {
+        self.local_pubkeys.get(id).map(|p| p.as_ref())
     }
 
     /// Decide whether `sender` may invoke `scope` against `target` (which is
@@ -127,8 +142,8 @@ impl AccessController {
         target: Option<&AgentId>,
         caps: &[CapabilityToken],
     ) -> Result<AccessVerdict> {
-        // Sender == self is always allowed (own daemon).
-        if sender.as_str() == self.self_id.as_str() {
+        // Sender is one of our own hosted agents — always allowed.
+        if self.is_local(sender) {
             return Ok(AccessVerdict::Accept);
         }
         let now_ms = Timestamp::now().unix_ms();
@@ -152,14 +167,30 @@ impl AccessController {
         target: Option<&AgentId>,
         now_ms: i64,
     ) -> CapVerdict {
-        let claim: CapabilityClaim = match verify_capability(&self.self_pubkey, cap.as_bytes()) {
+        // Capability tokens are issued by one of our hosted agents.
+        // Look up the issuer's pubkey from the local roster, then
+        // verify; a missing issuer means the cap is from someone we
+        // don't host (federation-issued caps for inbound use are
+        // verified by the issuing peer's directory entry, not here).
+        let preview = match hermod_crypto::parse_claim_unverified(cap.as_bytes()) {
+            Ok(c) => c,
+            Err(e) => {
+                trace!(error = %e, "skipping cap that fails parse");
+                return CapVerdict::Skip;
+            }
+        };
+        let issuer_pk = match self.local_pubkey(&preview.iss) {
+            Some(pk) => pk,
+            None => return CapVerdict::Skip,
+        };
+        let claim: CapabilityClaim = match verify_capability(issuer_pk, cap.as_bytes()) {
             Ok(c) => c,
             Err(e) => {
                 trace!(error = %e, "skipping cap that fails signature");
                 return CapVerdict::Skip;
             }
         };
-        if claim.iss.as_str() != self.self_id.as_str() {
+        if !self.is_local(&claim.iss) {
             return CapVerdict::Skip;
         }
         if claim.scope != required_scope {

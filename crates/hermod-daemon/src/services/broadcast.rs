@@ -2,11 +2,13 @@ use futures::stream::{self, StreamExt};
 use hermod_core::{AgentAddress, AgentId, MessageBody, MessageId, MessagePriority, Timestamp};
 use hermod_crypto::ChannelId;
 use hermod_protocol::ipc::methods::{BroadcastSendParams, BroadcastSendResult, MessageSendParams};
+use hermod_routing::Router;
 use hermod_storage::{AuditEntry, AuditSink, ChannelMessage, Database};
 use serde_bytes::ByteBuf;
 use std::sync::Arc;
 use tracing::warn;
 
+use crate::audit_context::current_caller_agent;
 use crate::services::{
     ServiceError, audit_or_warn, fanout::FANOUT_CONCURRENCY, message::MessageService,
 };
@@ -23,7 +25,7 @@ const MAX_BROADCAST_FANOUT: usize = 256;
 pub struct BroadcastService {
     db: Arc<dyn Database>,
     audit_sink: Arc<dyn AuditSink>,
-    self_id: AgentId,
+    router: Router,
     messages: MessageService,
 }
 
@@ -31,13 +33,13 @@ impl BroadcastService {
     pub fn new(
         db: Arc<dyn Database>,
         audit_sink: Arc<dyn AuditSink>,
-        self_id: AgentId,
+        router: Router,
         messages: MessageService,
     ) -> Self {
         Self {
             db,
             audit_sink,
-            self_id,
+            router,
             messages,
         }
     }
@@ -46,6 +48,11 @@ impl BroadcastService {
         &self,
         params: BroadcastSendParams,
     ) -> Result<BroadcastSendResult, ServiceError> {
+        let caller = current_caller_agent().ok_or_else(|| {
+            ServiceError::InvalidParam(
+                "broadcast.send requires an IPC caller scope (no caller_agent in context)".into(),
+            )
+        })?;
         if params.text.is_empty() {
             return Err(ServiceError::InvalidParam("text is empty".into()));
         }
@@ -102,7 +109,7 @@ impl BroadcastService {
             .record_message(&ChannelMessage {
                 id: local_id,
                 channel_id,
-                from_agent: self.self_id.clone(),
+                from_agent: caller.clone(),
                 body_text: params.text.clone(),
                 received_at: now,
             })
@@ -131,21 +138,18 @@ impl BroadcastService {
             members.truncate(MAX_BROADCAST_FANOUT);
         }
 
-        let self_id = self.self_id.clone();
-        let outcomes: Vec<bool> = stream::iter(
-            members
-                .into_iter()
-                .filter(move |m| m.as_str() != self_id.as_str()),
-        )
-        .map(|member| {
-            let body = body.clone();
-            let messages = self.messages.clone();
-            let db = self.db.clone();
-            async move { dispatch_one(&*db, &messages, member, body).await }
-        })
-        .buffer_unordered(FANOUT_CONCURRENCY)
-        .collect()
-        .await;
+        let router = self.router.clone();
+        let outcomes: Vec<bool> =
+            stream::iter(members.into_iter().filter(move |m| !router.is_local(m)))
+                .map(|member| {
+                    let body = body.clone();
+                    let messages = self.messages.clone();
+                    let db = self.db.clone();
+                    async move { dispatch_one(&*db, &messages, member, body).await }
+                })
+                .buffer_unordered(FANOUT_CONCURRENCY)
+                .collect()
+                .await;
         let fanout: u32 = outcomes.into_iter().filter(|ok| *ok).count() as u32;
 
         audit_or_warn(
@@ -153,7 +157,7 @@ impl BroadcastService {
             AuditEntry {
                 id: None,
                 ts: now,
-                actor: self.self_id.clone(),
+                actor: caller,
                 action: "broadcast.send".into(),
                 target: Some(channel_id.to_hex()),
                 details: Some(serde_json::json!({

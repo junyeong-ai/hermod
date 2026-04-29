@@ -678,8 +678,7 @@ mod tests {
             .ok();
         let access = AccessController::new(
             db.clone(),
-            self_id.clone(),
-            self_public_key,
+            [(self_id.clone(), self_public_key)],
             hermod_routing::access::AccessPolicy::default(),
         );
         let rate_limit = RateLimiter::new(db.clone(), 60);
