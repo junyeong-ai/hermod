@@ -26,7 +26,9 @@ use crate::client_ip::resolve_client_ip;
 use crate::dispatcher::Dispatcher;
 use anyhow::{Context, Result, anyhow};
 use futures::{SinkExt, StreamExt};
-use hermod_crypto::{SecretString, TlsMaterial};
+use hermod_core::AgentId;
+use hermod_crypto::TlsMaterial;
+use hermod_daemon::local_agent::BearerAuthenticator;
 use hermod_protocol::ipc::{Request, Response, message::Id};
 use ipnet::IpNet;
 use rustls::ServerConfig;
@@ -78,17 +80,17 @@ impl AcceptStrategy {
         &self,
         sock: tokio::net::TcpStream,
         peer: SocketAddr,
-        bearer: Arc<SecretString>,
+        authenticator: BearerAuthenticator,
         trusted_proxies: Arc<Vec<IpNet>>,
         dispatcher: Dispatcher,
     ) -> Result<()> {
         match self {
             AcceptStrategy::Plain => {
-                handshake_and_serve(sock, peer, bearer, trusted_proxies, dispatcher).await
+                handshake_and_serve(sock, peer, authenticator, trusted_proxies, dispatcher).await
             }
             AcceptStrategy::Tls(acceptor) => {
                 let stream = acceptor.accept(sock).await.context("TLS handshake")?;
-                handshake_and_serve(stream, peer, bearer, trusted_proxies, dispatcher).await
+                handshake_and_serve(stream, peer, authenticator, trusted_proxies, dispatcher).await
             }
         }
     }
@@ -100,7 +102,7 @@ impl AcceptStrategy {
 pub async fn serve_wss(
     addr: SocketAddr,
     tls: TlsMaterial,
-    bearer_token: Arc<SecretString>,
+    authenticator: BearerAuthenticator,
     trusted_proxies: Arc<Vec<IpNet>>,
     dispatcher: Dispatcher,
 ) -> Result<()> {
@@ -111,7 +113,7 @@ pub async fn serve_wss(
     accept_loop(
         listener,
         AcceptStrategy::Tls(acceptor),
-        bearer_token,
+        authenticator,
         trusted_proxies,
         dispatcher,
     )
@@ -126,7 +128,7 @@ pub async fn serve_wss(
 /// the proxy guarantees confidentiality.
 pub async fn serve_ws(
     addr: SocketAddr,
-    bearer_token: Arc<SecretString>,
+    authenticator: BearerAuthenticator,
     trusted_proxies: Arc<Vec<IpNet>>,
     dispatcher: Dispatcher,
 ) -> Result<()> {
@@ -136,7 +138,7 @@ pub async fn serve_ws(
     accept_loop(
         listener,
         AcceptStrategy::Plain,
-        bearer_token,
+        authenticator,
         trusted_proxies,
         dispatcher,
     )
@@ -149,7 +151,7 @@ pub async fn serve_ws(
 async fn accept_loop(
     listener: TcpListener,
     strategy: AcceptStrategy,
-    bearer_token: Arc<SecretString>,
+    authenticator: BearerAuthenticator,
     trusted_proxies: Arc<Vec<IpNet>>,
     dispatcher: Dispatcher,
 ) -> Result<()> {
@@ -164,11 +166,11 @@ async fn accept_loop(
             }
         };
         let strategy = strategy.clone();
-        let bearer = bearer_token.clone();
+        let auth = authenticator.clone();
         let trusted = trusted_proxies.clone();
         let dispatcher = dispatcher.clone();
         tokio::spawn(async move {
-            if let Err(e) = strategy.wrap(sock, peer, bearer, trusted, dispatcher).await {
+            if let Err(e) = strategy.wrap(sock, peer, auth, trusted, dispatcher).await {
                 debug!(peer = %peer, error = %e, "remote IPC connection ended");
             }
         });
@@ -201,29 +203,32 @@ fn build_tls_acceptor(tls: &TlsMaterial) -> Result<TlsAcceptor> {
 async fn handshake_and_serve<S>(
     stream: S,
     peer: SocketAddr,
-    expected_token: Arc<SecretString>,
+    authenticator: BearerAuthenticator,
     trusted_proxies: Arc<Vec<IpNet>>,
     dispatcher: Dispatcher,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    // Capture the auth header AND the X-Forwarded-For header during
-    // the WS handshake. accept_hdr_async lets us inspect the upgrade
-    // request before completing the handshake; the auth check decides
-    // whether to admit, and the XFF capture feeds the client-IP
-    // resolution that audit logging needs to recover the originating
-    // IP from behind a chain of trusted reverse proxies.
+    // Capture the resolved caller agent + the X-Forwarded-For header
+    // during the WS handshake. accept_hdr_async lets us inspect the
+    // upgrade request before completing the handshake; the auth
+    // callback hashes the presented bearer, looks it up against the
+    // hosted-agent roster, and stores the matching `agent_id` (or
+    // returns 401). The XFF capture feeds the client-IP resolution
+    // that audit logging needs to recover the originating IP from
+    // behind a chain of trusted reverse proxies.
     //
-    // OnceLock matches the write-once-then-read semantics — the
+    // `OnceLock` matches the write-once-then-read semantics — the
     // tungstenite callback fires at most once per handshake, and the
     // post-handshake reader runs after the callback has returned.
-    let auth_ok = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let auth_ok_for_callback = auth_ok.clone();
+    let caller: std::sync::Arc<std::sync::OnceLock<AgentId>> =
+        std::sync::Arc::new(std::sync::OnceLock::new());
+    let caller_for_callback = caller.clone();
     let xff_value: std::sync::Arc<std::sync::OnceLock<String>> =
         std::sync::Arc::new(std::sync::OnceLock::new());
     let xff_for_callback = xff_value.clone();
-    let token = expected_token.clone();
+    let auth = authenticator.clone();
 
     let ws_config = WebSocketConfig::default()
         .max_message_size(Some(MAX_REMOTE_IPC_BYTES))
@@ -232,19 +237,11 @@ where
     let ws = tokio_tungstenite::accept_hdr_async_with_config(
         stream,
         move |req: &HsRequest, resp: HsResponse| -> Result<HsResponse, ErrorResponse> {
-            // X-Forwarded-For is captured unconditionally; the
-            // resolver decides whether to trust it based on the TCP
-            // peer's CIDR membership. An untrusted peer's XFF is
-            // ignored (forgery defence), so capturing it here is
-            // safe — the trust check happens at the use site.
             if let Some(value) = req
                 .headers()
                 .get("X-Forwarded-For")
                 .and_then(|v| v.to_str().ok())
             {
-                // `set` errors only if already-set, which can't happen
-                // here — tungstenite invokes the handshake callback at
-                // most once per upgrade. Discard the Result.
                 let _ = xff_for_callback.set(value.to_string());
             }
             let header = req
@@ -252,10 +249,10 @@ where
                 .get("Authorization")
                 .and_then(|v| v.to_str().ok());
             let presented = header.and_then(|h| h.strip_prefix(EXPECTED_BEARER_PREFIX));
-            if let Some(t) = presented
-                && constant_time_eq(t.as_bytes(), token.expose_secret().as_bytes())
+            if let Some(token) = presented
+                && let Some(agent_id) = auth.resolve(token)
             {
-                auth_ok_for_callback.store(true, std::sync::atomic::Ordering::SeqCst);
+                let _ = caller_for_callback.set(agent_id);
                 return Ok(resp);
             }
             let mut deny = ErrorResponse::new(Some("invalid or missing bearer token".into()));
@@ -266,30 +263,28 @@ where
     )
     .await?;
 
-    if !auth_ok.load(std::sync::atomic::Ordering::SeqCst) {
-        // The handshake error path above should have already returned 401;
-        // this guard catches any logic regression.
-        return Err(anyhow!("bearer auth failed for {peer}"));
-    }
-
+    let caller_agent = caller
+        .get()
+        .cloned()
+        .ok_or_else(|| anyhow!("bearer auth failed for {peer}"))?;
     let xff_seen = xff_value.get().cloned();
     let client = resolve_client_ip(peer.ip(), xff_seen.as_deref(), &trusted_proxies);
 
-    // Per-connection tracing span — every event the dispatcher /
-    // services / audit pipeline emits inside the message loop carries
-    // `peer` + `client` automatically, so a single connection's full
-    // story is greppable in aggregated logs without manual field
-    // threading.
-    let span = tracing::info_span!("ipc_conn", peer = %peer, client = %client);
+    let span = tracing::info_span!(
+        "ipc_conn",
+        peer = %peer,
+        client = %client,
+        caller = %caller_agent,
+    );
     let _enter = span.enter();
     debug!("remote IPC client authenticated");
 
-    // Bind `client` as the ambient audit context for every task-local
-    // read inside the message loop. `audit_or_warn` overlays this on
-    // every `AuditEntry { client_ip: None, ... }` literal, so audit
-    // rows record the resolved client without each service method
-    // having to receive it explicitly.
-    crate::audit_context::with_client_ip(Some(client), async move {
+    // Bind both ambient context values for every task-local read
+    // inside the message loop. `audit_or_warn` overlays them onto
+    // each emitted `AuditEntry`: client_ip onto the `client_ip`
+    // field, caller_agent onto the `actor` field. Services don't
+    // receive either as parameters.
+    let inner = crate::audit_context::with_client_ip(Some(client), async move {
         let (mut tx, mut rx) = ws.split();
         while let Some(frame) = rx.next().await {
             let frame = frame?;
@@ -299,7 +294,6 @@ where
                     tx.send(Message::Text(resp.into())).await?;
                 }
                 Message::Binary(body) => {
-                    // Tolerate clients that send JSON as binary frames.
                     let s = std::str::from_utf8(&body)
                         .map_err(|_| anyhow!("binary frame not utf-8"))?;
                     let resp = handle_rpc(&dispatcher, s).await;
@@ -310,9 +304,9 @@ where
                 _ => {}
             }
         }
-        Ok(())
-    })
-    .await
+        Ok::<_, anyhow::Error>(())
+    });
+    crate::audit_context::with_caller_agent(Some(caller_agent), inner).await
 }
 
 async fn handle_rpc(dispatcher: &Dispatcher, body: &str) -> String {
@@ -333,15 +327,4 @@ async fn handle_rpc(dispatcher: &Dispatcher, body: &str) -> String {
     };
     let resp = dispatcher.handle(req).await;
     serde_json::to_string(&resp).expect("dispatcher Response always serialises")
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut acc = 0u8;
-    for i in 0..a.len() {
-        acc |= a[i] ^ b[i];
-    }
-    acc == 0
 }

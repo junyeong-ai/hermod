@@ -47,19 +47,27 @@ pub enum ServiceError {
     NotFound,
 }
 
-/// Append an audit entry, overlaying the ambient client IP from
-/// [`crate::audit_context`] when the call site left the field as
-/// `None`. Every emission goes through this helper so the client-IP
-/// resolution at the IPC entry point reaches every audit row inside
-/// the connection's task tree without threading a parameter through
-/// every service method.
+/// Append an audit entry, overlaying ambient context from
+/// [`crate::audit_context`] onto fields the call site couldn't fill.
+/// Every emission goes through this helper so context resolution at
+/// the IPC entry point reaches every audit row inside the connection's
+/// task tree without threading parameters through every service
+/// method.
 ///
-/// Sites that already have a more specific IP (e.g. federation
-/// inbound that records the cryptographically-verified peer) set
-/// `client_ip: Some(_)` directly and the enrichment is a no-op.
-/// Daemon-internal sites (outbox, janitor) leave `client_ip: None`;
-/// running outside any connection scope, the lookup also returns
-/// `None`, and the row records "no remote client".
+/// Two overlays apply:
+///
+/// 1. **Client IP** — sites set `client_ip: None` and the helper
+///    overlays the ambient IP from the remote-IPC handshake's
+///    XFF-resolved value. Sites that already have a more specific IP
+///    (e.g. federation inbound that records the cryptographically-
+///    verified peer) set `client_ip: Some(_)` directly and the
+///    enrichment is a no-op.
+/// 2. **Actor** — when an IPC scope's [`current_caller_agent`] is
+///    `Some(agent)`, the helper overrides whatever `actor` the literal
+///    carried (the host id, by convention) with the calling agent.
+///    Daemon-internal sites (outbox, janitor, federation accept) run
+///    outside any IPC scope, so `current_caller_agent` returns `None`
+///    and the literal's `actor` (host_id) stays put.
 ///
 /// Failure handling lives inside the sink impl (`StorageAuditSink`
 /// converts append errors to a `tracing::warn`); this helper just
@@ -67,6 +75,9 @@ pub enum ServiceError {
 pub async fn audit_or_warn(sink: &dyn AuditSink, mut entry: AuditEntry) {
     if entry.client_ip.is_none() {
         entry.client_ip = crate::audit_context::current_client_ip();
+    }
+    if let Some(caller) = crate::audit_context::current_caller_agent() {
+        entry.actor = caller;
     }
     sink.record(entry).await;
 }

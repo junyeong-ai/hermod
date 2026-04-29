@@ -34,6 +34,12 @@ pub struct InboundProcessor {
     pub(super) db: Arc<dyn Database>,
     pub(super) audit_sink: Arc<dyn AuditSink>,
     pub(super) self_id: AgentId,
+    /// Snapshot of agents this daemon hosts at boot. Recipient
+    /// resolution checks `to.id ∈ local_agents` — an envelope is
+    /// accepted locally if its `to.id` is any of our hosted agents,
+    /// otherwise the broker (when wired) gets a chance to relay,
+    /// else `NotForUs`.
+    pub(super) local_agents: hermod_daemon::local_agent::LocalAgentRegistry,
     access: AccessController,
     rate_limit: RateLimiter,
     replay_window_secs: u32,
@@ -88,6 +94,7 @@ impl InboundProcessor {
         db: Arc<dyn Database>,
         audit_sink: Arc<dyn AuditSink>,
         self_id: AgentId,
+        local_agents: hermod_daemon::local_agent::LocalAgentRegistry,
         access: AccessController,
         rate_limit: RateLimiter,
         replay_window_secs: u32,
@@ -95,14 +102,13 @@ impl InboundProcessor {
         max_file_payload_bytes: usize,
         accept_audit_federation: bool,
     ) -> Self {
-        // Cap the runtime knob at the compile-time ceiling so a
-        // misconfigured operator can't relax the wire-level invariant.
         let max_file_payload_bytes =
             max_file_payload_bytes.min(hermod_core::MAX_FILE_PAYLOAD_BYTES);
         Self {
             db,
             audit_sink,
             self_id,
+            local_agents,
             access,
             rate_limit,
             replay_window_secs,
@@ -177,7 +183,8 @@ impl InboundProcessor {
                 hermod_protocol::wire::MAX_RELAY_HOPS
             )));
         }
-        if envelope.to.id.as_str() != self.self_id.as_str() {
+        if self.local_agents.lookup(&envelope.to.id).is_none() {
+            // The envelope is not addressed to any agent we host.
             // Broker mode: hand off to relay before rejecting. The
             // broker forwards verbatim — recipient's daemon does the
             // signature check from the envelope's self-introducing
@@ -678,10 +685,31 @@ mod tests {
         let rate_limit = RateLimiter::new(db.clone(), 60);
         let audit_sink: Arc<dyn AuditSink> =
             Arc::new(hermod_storage::StorageAuditSink::new(db.clone()));
+        // Empty registry — the test fixture's `self_id` already
+        // sits in the agents table from the upsert above; the
+        // registry is consulted only for `to.id ∈ local_agents`
+        // membership during `accept_envelope`. Tests pass a
+        // hand-constructed registry containing just `self_id` so
+        // the fake envelopes (`fake_envelope`) addressed to
+        // `self_id` are recognised as local.
+        let local_kp = hermod_crypto::Keypair::generate();
+        let local_id = self_id.clone();
+        let bearer = hermod_daemon::local_agent::generate_bearer_token();
+        let local_agent = hermod_daemon::local_agent::LocalAgent {
+            agent_id: local_id,
+            keypair: Arc::new(local_kp),
+            bearer_token: Arc::new(bearer),
+            local_alias: None,
+            workspace_root: None,
+            created_at: hermod_core::Timestamp::now(),
+        };
+        let registry =
+            hermod_daemon::local_agent::LocalAgentRegistry::from_agents(vec![local_agent]);
         InboundProcessor::new(
             db,
             audit_sink,
             self_id,
+            registry,
             access,
             rate_limit,
             300,

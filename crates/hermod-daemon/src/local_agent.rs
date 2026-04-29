@@ -25,10 +25,11 @@ use anyhow::{Context, Result};
 use hermod_core::{AgentAlias, AgentId, Timestamp};
 use hermod_crypto::{Keypair, SecretString};
 use hermod_storage::{AuditEntry, AuditSink, Database, LocalAgentRecord};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use zeroize::Zeroizing;
 
 use crate::fs_atomic::{write_public_atomic, write_secret_atomic};
@@ -142,6 +143,51 @@ impl LocalAgentRegistry {
         } else {
             None
         }
+    }
+}
+
+/// Runtime bearer-token lookup against the daemon's local-agent
+/// roster. Built at boot from a [`LocalAgentRegistry`] snapshot —
+/// every hosted agent's blake3 bearer-hash is keyed to its
+/// `agent_id`. The lookup is sync (a `RwLock` over an in-memory
+/// `HashMap`) so it can run inside the WebSocket handshake callback,
+/// which tungstenite invokes on a non-async stack.
+///
+/// Phase H3.5 will add `rotate_bearer` here, which swaps the hash
+/// in-place and closes any active IPC session pinned to the
+/// previous bearer (oneshot shutdown channels per session). Until
+/// then, the map is set once at boot and read-only at runtime.
+#[derive(Clone, Debug)]
+pub struct BearerAuthenticator {
+    inner: Arc<RwLock<HashMap<[u8; 32], AgentId>>>,
+}
+
+impl BearerAuthenticator {
+    pub fn from_registry(registry: &LocalAgentRegistry) -> Self {
+        let map: HashMap<[u8; 32], AgentId> = registry
+            .list()
+            .iter()
+            .map(|a| (a.bearer_hash(), a.agent_id.clone()))
+            .collect();
+        Self {
+            inner: Arc::new(RwLock::new(map)),
+        }
+    }
+
+    /// Hash `token` with blake3 and return the matching agent_id, or
+    /// `None` if no hosted agent owns this bearer.
+    pub fn resolve(&self, token: &str) -> Option<AgentId> {
+        let hash: [u8; 32] = *blake3::hash(token.as_bytes()).as_bytes();
+        self.inner.read().ok()?.get(&hash).cloned()
+    }
+
+    /// Number of accepted bearers — for diagnostics only.
+    pub fn len(&self) -> usize {
+        self.inner.read().map(|g| g.len()).unwrap_or(0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 

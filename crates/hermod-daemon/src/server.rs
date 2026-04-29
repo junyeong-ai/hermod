@@ -66,10 +66,17 @@ pub async fn serve(
         .clone();
     let self_id = solo.agent_id.clone();
     let host_id = host_keypair.agent_id();
-    let bearer_token = solo.bearer_token.clone();
     let agent_signer: Arc<dyn Signer> =
         Arc::new(hermod_crypto::LocalKeySigner::new(solo.keypair.clone()));
     let key_ref = KeyRef::from_keypair(&solo.keypair, None);
+
+    // Bearer authentication map for the remote-IPC listeners. Built
+    // once from the registry snapshot — a presented bearer's blake3
+    // hash resolves to the matching local agent_id (or 401 if no
+    // hosted agent owns it). The handshake binds that agent_id as
+    // the connection's `CALLER_AGENT` task_local, which audit_or_warn
+    // overlays onto every emitted row's `actor` field.
+    let bearer_auth = hermod_daemon::local_agent::BearerAuthenticator::from_registry(&registry);
 
     // Parse `[federation] upstream_broker` once. A malformed value
     // is fatal — the operator should know immediately rather than
@@ -274,6 +281,7 @@ pub async fn serve(
             db.clone(),
             audit_sink.clone(),
             self_id.clone(),
+            registry.clone(),
             access.clone(),
             rate_limit.clone(),
             config.policy.replay_window_secs,
@@ -582,11 +590,11 @@ pub async fn serve(
     if let Some(addr) = parse_listen_addr(&config.daemon.ipc_listen_wss, "ipc_listen_wss") {
         let dispatcher_for_ipc = dispatcher.clone();
         let tls_for_ipc = tls.clone();
-        let token = bearer_token.clone();
+        let auth = bearer_auth.clone();
         let trusted = trusted_proxies.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                crate::ipc_remote::serve_wss(addr, tls_for_ipc, token, trusted, dispatcher_for_ipc)
+                crate::ipc_remote::serve_wss(addr, tls_for_ipc, auth, trusted, dispatcher_for_ipc)
                     .await
             {
                 tracing::error!(error = %e, "remote IPC (WSS) listener exited");
@@ -596,11 +604,11 @@ pub async fn serve(
     if let Some(addr) = parse_listen_addr(&config.daemon.ipc_listen_ws, "ipc_listen_ws") {
         warn_if_plaintext_exposed(addr);
         let dispatcher_for_ipc = dispatcher.clone();
-        let token = bearer_token.clone();
+        let auth = bearer_auth.clone();
         let trusted = trusted_proxies.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                crate::ipc_remote::serve_ws(addr, token, trusted, dispatcher_for_ipc).await
+                crate::ipc_remote::serve_ws(addr, auth, trusted, dispatcher_for_ipc).await
             {
                 tracing::error!(error = %e, "remote IPC (WS) listener exited");
             }
@@ -619,8 +627,9 @@ pub async fn serve(
                 match accept {
                     Ok(stream) => {
                         let dispatcher = dispatcher.clone();
+                        let caller = self_id.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_connection(stream, dispatcher).await {
+                            if let Err(e) = handle_connection(stream, dispatcher, caller).await {
                                 error!(error = %e, "connection terminated with error");
                             }
                         });
@@ -692,13 +701,25 @@ async fn shutdown_sequence(
 async fn handle_connection(
     stream: hermod_transport::UnixIpcStream,
     dispatcher: Dispatcher,
+    caller_agent: hermod_core::AgentId,
 ) -> Result<()> {
-    let mut server = IpcServer::new(stream);
-    while let Some(req) = server.next_request().await? {
-        let resp = dispatcher.handle(req).await;
-        server.send_response(resp).await?;
-    }
-    Ok(())
+    // Unix-socket IPC inherits filesystem-permission auth — anyone
+    // who can open the socket is already running as the daemon's
+    // owning user, so there's no per-connection bearer challenge.
+    // We still bind the lone hosted agent as the connection's
+    // `CALLER_AGENT` so audit rows attribute to the agent rather
+    // than to the host. Multi-tenant on the local socket lands in a
+    // future phase (the CLI will need an `--alias` flag to pick one
+    // of N agents).
+    let inner = async {
+        let mut server = IpcServer::new(stream);
+        while let Some(req) = server.next_request().await? {
+            let resp = dispatcher.handle(req).await;
+            server.send_response(resp).await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    };
+    crate::audit_context::with_caller_agent(Some(caller_agent), inner).await
 }
 
 /// Resolve when either SIGINT or SIGTERM arrives, returning a static label
