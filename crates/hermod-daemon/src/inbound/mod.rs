@@ -261,9 +261,14 @@ impl InboundProcessor {
         // through a broker. Bucket consumption sits after signature
         // verification so an unauthenticated source can't burn down
         // a real peer's allowance by spoofing their `from`.
+        // Rate-limit bucket is keyed by (sender, recipient_local_agent)
+        // so per-sender fairness scales with the number of locally-hosted
+        // agents — alice's bucket against agent-A is independent from
+        // her bucket against agent-B even though both terminate on this
+        // daemon.
         if let Err(e) = self
             .rate_limit
-            .consume_one(&envelope.from.id, &self.self_id)
+            .consume_one(&envelope.from.id, &envelope.to.id)
             .await
         {
             return Err(FederationRejection::RateLimited(e.to_string()));
@@ -273,12 +278,15 @@ impl InboundProcessor {
         let decision = if always_requires_capability(envelope.kind) {
             // Forces the cap check even when
             // `policy.require_capability = false` — these kinds carry
-            // delegated authority and must be explicitly granted.
+            // delegated authority and must be explicitly granted. Cap
+            // audience is the recipient local agent (`envelope.to.id`),
+            // not the daemon's host — operators issue caps to specific
+            // agents.
             self.access
                 .check_caps_strict(
                     &envelope.from.id,
                     scope_for_kind,
-                    Some(&self.self_id),
+                    Some(&envelope.to.id),
                     &envelope.caps,
                 )
                 .await
@@ -288,7 +296,7 @@ impl InboundProcessor {
                 .check_caps(
                     &envelope.from.id,
                     scope_for_kind,
-                    Some(&self.self_id),
+                    Some(&envelope.to.id),
                     &envelope.caps,
                 )
                 .await
@@ -377,7 +385,11 @@ impl InboundProcessor {
         sender: &AgentId,
         pubkey: &PubkeyBytes,
     ) -> Result<(), FederationRejection> {
-        if sender.as_str() == self.self_id.as_str() {
+        // Senders that are themselves locally-hosted agents are
+        // already in the directory (registered at boot) — skip the
+        // observed-row upsert which would clobber operator-set
+        // fields with stale values.
+        if self.local_agents.lookup(sender).is_some() {
             return Ok(());
         }
         let now = Timestamp::now();

@@ -98,7 +98,7 @@ pub use peer::PeerService;
 pub use permission::PermissionService;
 pub use permission_relay::{CapabilityPromptForwarder, MessageRelayResponder};
 pub use presence::PresenceService;
-pub use status::{KeyRef, StatusService};
+pub use status::StatusService;
 pub use workspace::WorkspaceService;
 pub use workspace_observability::WorkspaceObservabilityService;
 

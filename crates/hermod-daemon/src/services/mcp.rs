@@ -26,13 +26,15 @@ use hermod_storage::{
 use std::sync::Arc;
 use ulid::Ulid;
 
+use crate::audit_context::current_caller_agent;
 use crate::services::{ServiceError, audit_or_warn, presence::PresenceService};
 
 #[derive(Debug, Clone)]
 pub struct McpService {
     db: Arc<dyn Database>,
     audit_sink: Arc<dyn AuditSink>,
-    self_id: AgentId,
+    /// Audit fallback actor for emissions outside an IPC scope.
+    host_actor: AgentId,
     presence: PresenceService,
 }
 
@@ -40,15 +42,23 @@ impl McpService {
     pub fn new(
         db: Arc<dyn Database>,
         audit_sink: Arc<dyn AuditSink>,
-        self_id: AgentId,
+        host_actor: AgentId,
         presence: PresenceService,
     ) -> Self {
         Self {
             db,
             audit_sink,
-            self_id,
+            host_actor,
             presence,
         }
+    }
+
+    fn caller(&self) -> Result<AgentId, ServiceError> {
+        current_caller_agent().ok_or_else(|| {
+            ServiceError::InvalidParam(
+                "mcp.* requires an IPC caller scope (no caller_agent in context)".into(),
+            )
+        })
     }
 
     /// Register a fresh MCP stdio session. The first attach flips
@@ -62,6 +72,7 @@ impl McpService {
         fields(client = ?params.client_name)
     )]
     pub async fn attach(&self, params: McpAttachParams) -> Result<McpAttachResult, ServiceError> {
+        let caller = self.caller()?;
         let now = Timestamp::now();
         let session_id = Ulid::new().to_string();
         let ttl_ms = (SESSION_TTL_SECS * 1_000) as i64;
@@ -85,7 +96,7 @@ impl McpService {
             AuditEntry {
                 id: None,
                 ts: now,
-                actor: self.self_id.clone(),
+                actor: self.host_actor.clone(),
                 action: "mcp.attach".into(),
                 target: Some(session_id.clone()),
                 details: Some(serde_json::json!({
@@ -99,9 +110,12 @@ impl McpService {
         .await;
 
         // Offline → online transition only — subsequent attaches are
-        // visibility no-ops to peers.
+        // visibility no-ops to peers. The transition is host-wide
+        // until `mcp_sessions` carries an `agent_id`; the broadcast
+        // goes out on behalf of the caller agent (the one Claude
+        // Code is binding this stdio for).
         if !was_live {
-            let _ = self.presence.broadcast_self().await;
+            let _ = self.presence.broadcast_for(&caller).await;
         }
 
         Ok(McpAttachResult {
@@ -127,6 +141,7 @@ impl McpService {
     }
 
     pub async fn detach(&self, params: McpDetachParams) -> Result<McpDetachResult, ServiceError> {
+        let caller = self.caller()?;
         let now = Timestamp::now();
         let ttl_ms = (SESSION_TTL_SECS * 1_000) as i64;
         let outcome = self
@@ -140,7 +155,7 @@ impl McpService {
             AuditEntry {
                 id: None,
                 ts: now,
-                actor: self.self_id.clone(),
+                actor: self.host_actor.clone(),
                 action: "mcp.detach".into(),
                 target: Some(params.session_id.clone()),
                 details: None,
@@ -152,9 +167,9 @@ impl McpService {
 
         // Online → offline transition only — broadcast Presence(live=false)
         // so peers age out our liveness immediately instead of waiting for
-        // their cache TTL.
+        // their cache TTL. Broadcasts on behalf of the caller agent.
         if outcome.was_live && !outcome.is_live {
-            let _ = self.presence.broadcast_self().await;
+            let _ = self.presence.broadcast_for(&caller).await;
         }
 
         Ok(McpDetachResult {

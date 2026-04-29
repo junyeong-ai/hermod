@@ -14,24 +14,27 @@
 //!    declare because every Hermod sender is ed25519-authenticated, so
 //!    there is no untrusted-input path that could forge a verdict.
 //!
-//! The [`INSTRUCTIONS`] string is byte-for-byte stable: tests pin it so
-//! Claude's behaviour can't drift just because someone tweaked the prose.
-//! Bump it intentionally when the wire schema changes — never as a
-//! drive-by.
+//! The instructions prelude (event kinds + reply vocabulary) is
+//! byte-for-byte stable; tests pin it so Claude's behaviour can't drift
+//! just because someone tweaked the prose. The leading identity stanza
+//! (agent_id / alias / host) is per-session — it lets Claude know
+//! which Hermod agent it is speaking *for* on this stdio.
 
+use hermod_protocol::ipc::methods::IdentityGetResult;
 use serde_json::{Value, json};
 
 /// Protocol version negotiated with Claude Code on `initialize`.
 pub const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 
-/// System prompt added to Claude's context. Describes the `<channel>` tag
-/// shape, the meaning of every `kind`, and how to reply.
+/// Static prelude — event kinds, attribute reference, and reply
+/// vocabulary. Identical across sessions so Claude's behaviour stays
+/// stable; the per-session identity stanza is prepended at runtime.
 ///
 /// Authoring rules (so this stays useful as the surface grows):
 ///   * One line per `kind` value — keep it scannable.
 ///   * Reply tools named exactly as registered in [`super::tools::schemas`].
 ///   * No examples that quote real data; the schema description is enough.
-pub const INSTRUCTIONS: &str = "\
+pub const INSTRUCTIONS_PRELUDE: &str = "\
 Hermod surfaces inbound agent activity through Claude Code Channels. Each \
 event arrives as a `<channel source=\"hermod\" kind=\"...\" ...>` block.
 
@@ -51,14 +54,46 @@ Attributes you can rely on across every event:
   - `from_local_alias`   Operator's nickname for `from`, if any.
   - `from_peer_alias`    `from`'s self-asserted display name (advisory).
   - `from_alias`         Effective display — local override wins.
+  - `from_host`          8-char prefix of the sender's host pubkey, for \
+cross-host disambiguation when local aliases collide.
   - `from_live`          `true` iff `from` has a Claude Code session attached.
   - `priority`           For `direct` events only.
 
 When in doubt, prefer reading state with `agent_list` / `presence_get` / \
 `message_list` over guessing.";
 
+/// Build the per-session instructions string. Prepends an identity
+/// stanza so Claude knows which agent it speaks for on this stdio,
+/// then concatenates [`INSTRUCTIONS_PRELUDE`] verbatim.
+///
+/// `identity = None` (daemon unreachable at startup) falls back to
+/// the static prelude alone — the supervisor will retry attach and
+/// the bridge will keep working; the identity stanza simply doesn't
+/// appear that session.
+pub fn build_instructions(identity: Option<&IdentityGetResult>) -> String {
+    let Some(id) = identity else {
+        return INSTRUCTIONS_PRELUDE.to_string();
+    };
+    let alias_line = match id.alias.as_ref() {
+        Some(a) => format!("  - alias:        {}\n", a.as_str()),
+        None => String::new(),
+    };
+    let host_short: String = id.host_pubkey_hex.chars().take(8).collect();
+    format!(
+        "You are speaking for the Hermod agent on this stdio:\n  \
+         - agent_id:     {agent}\n\
+         {alias_line}  - fingerprint:  {fp}\n  \
+         - host:         {host}\n\n\
+         {prelude}",
+        agent = id.agent_id,
+        fp = id.fingerprint,
+        host = host_short,
+        prelude = INSTRUCTIONS_PRELUDE,
+    )
+}
+
 /// Build the `initialize` JSON-RPC response.
-pub fn response(id: Value, version: &str) -> Value {
+pub fn response(id: Value, version: &str, identity: Option<&IdentityGetResult>) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -75,7 +110,7 @@ pub fn response(id: Value, version: &str) -> Value {
                 "name": "hermod",
                 "version": version,
             },
-            "instructions": INSTRUCTIONS,
+            "instructions": build_instructions(identity),
         }
     })
 }
@@ -83,10 +118,23 @@ pub fn response(id: Value, version: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hermod_core::{AgentAlias, AgentId};
+    use std::str::FromStr;
+
+    fn sample_identity() -> IdentityGetResult {
+        IdentityGetResult {
+            agent_id: AgentId::from_str("bc57yc7fmoidqeomcxvyszkalo").unwrap(),
+            alias: Some(AgentAlias::from_str("projA").unwrap()),
+            fingerprint: "ab:cd:ef:01:23:45:67:89".into(),
+            host_pubkey_hex: "deadbeefcafebabe1122334455667788\
+                              99aabbccddeeff0011223344556677"
+                .into(),
+        }
+    }
 
     #[test]
     fn response_advertises_both_channel_capabilities() {
-        let v = response(serde_json::json!(1), "0.1.0");
+        let v = response(serde_json::json!(1), "0.1.0", None);
         let exp = &v["result"]["capabilities"]["experimental"];
         assert!(exp.get("claude/channel").is_some());
         assert!(exp.get("claude/channel/permission").is_some());
@@ -94,16 +142,30 @@ mod tests {
     }
 
     #[test]
-    fn response_includes_instructions_string() {
-        let v = response(serde_json::json!(1), "0.1.0");
+    fn instructions_without_identity_match_prelude_verbatim() {
+        let v = response(serde_json::json!(1), "0.1.0", None);
         let s = v["result"]["instructions"]
             .as_str()
             .expect("instructions must be present");
-        assert_eq!(s, INSTRUCTIONS);
+        assert_eq!(s, INSTRUCTIONS_PRELUDE);
     }
 
     #[test]
-    fn instructions_documents_every_event_kind_and_reply_tool() {
+    fn instructions_with_identity_carry_agent_alias_and_host() {
+        let id = sample_identity();
+        let s = build_instructions(Some(&id));
+        assert!(s.contains("bc57yc7fmoidqeomcxvyszkalo"));
+        assert!(s.contains("projA"));
+        // 8-char host prefix.
+        assert!(s.contains("deadbeef"));
+        assert!(!s.contains("ddeeff00"));
+        // Prelude still embedded.
+        assert!(s.contains("Event kinds:"));
+        assert!(s.contains("message_send"));
+    }
+
+    #[test]
+    fn prelude_documents_every_event_kind_and_reply_tool() {
         // If a new kind is added or a tool renamed, this test forces the
         // doc string to be updated in the same commit.
         for needle in [
@@ -120,10 +182,12 @@ mod tests {
             "request_id",
             "yes <id>",
             "no <id>",
+            // Cross-host disambiguation surface.
+            "from_host",
         ] {
             assert!(
-                INSTRUCTIONS.contains(needle),
-                "instructions must mention `{needle}`"
+                INSTRUCTIONS_PRELUDE.contains(needle),
+                "instructions prelude must mention `{needle}`"
             );
         }
     }

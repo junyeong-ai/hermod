@@ -17,6 +17,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
+use crate::local_agent::LocalAgentRegistry;
 use crate::services::presence::PresenceService;
 
 #[derive(Clone, Debug)]
@@ -77,8 +78,14 @@ pub struct JanitorWorker {
     self_id: hermod_core::AgentId,
     /// When set, a transition from ≥1 live session to 0 live sessions
     /// triggers a federation broadcast so peers stop showing us as live
-    /// before their own cache TTL ages out.
+    /// before their own cache TTL ages out — once per locally-hosted
+    /// agent (the schema treats sessions as host-wide, so every hosted
+    /// agent flips offline together).
     presence: Option<PresenceService>,
+    /// Locally-hosted agents the janitor broadcasts a presence flip
+    /// for when the last MCP session decays. Set alongside
+    /// `presence` via [`Self::with_presence`].
+    local_agents: Option<LocalAgentRegistry>,
 }
 
 impl std::fmt::Debug for JanitorWorker {
@@ -102,15 +109,22 @@ impl JanitorWorker {
             config,
             self_id,
             presence: None,
+            local_agents: None,
         }
     }
 
-    /// Wire the PresenceService so a session-decay transition fires a
-    /// federation broadcast. Without this, the daemon still prunes stale
-    /// session rows but peers learn about it only when their own cached TTL
-    /// expires.
-    pub fn with_presence(mut self, presence: PresenceService) -> Self {
+    /// Wire the PresenceService and the local-agent registry so a
+    /// session-decay transition fires a federation broadcast for every
+    /// locally-hosted agent. Without this, the daemon still prunes stale
+    /// session rows but peers learn about it only when their own cached
+    /// TTL expires.
+    pub fn with_presence(
+        mut self,
+        presence: PresenceService,
+        local_agents: LocalAgentRegistry,
+    ) -> Self {
         self.presence = Some(presence);
+        self.local_agents = Some(local_agents);
         self
     }
 
@@ -210,10 +224,17 @@ impl JanitorWorker {
             .await?;
         if outcome.was_live
             && !outcome.is_live
-            && let Some(presence) = &self.presence
-            && let Err(e) = presence.broadcast_self().await
+            && let (Some(presence), Some(registry)) = (&self.presence, &self.local_agents)
         {
-            warn!(error = %e, "broadcast offline after janitor prune");
+            for agent in registry.list() {
+                if let Err(e) = presence.broadcast_for(&agent.agent_id).await {
+                    warn!(
+                        agent = %agent.agent_id,
+                        error = %e,
+                        "broadcast offline after janitor prune",
+                    );
+                }
+            }
         }
 
         // Audit archival: when retention is configured, walk every

@@ -142,11 +142,21 @@ pub struct StatusGetResult {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IdentityGetResult {
+    /// Caller's own agent_id — derived from the IPC bearer (remote)
+    /// or the Unix-socket peer (local). One daemon can host multiple
+    /// agents; this field reflects the bearer that authenticated
+    /// the call, not a daemon-wide identity.
     pub agent_id: AgentId,
-    /// This daemon's own alias (same singular semantics as
-    /// [`StatusGetResult::alias`] — self has no peer-asserted facet).
+    /// Caller's operator-assigned local alias (singular — self has no
+    /// peer-asserted facet).
     pub alias: Option<AgentAlias>,
+    /// 8-char prefix of the caller's pubkey fingerprint, for human
+    /// confirmation against an out-of-band shared value.
     pub fingerprint: String,
+    /// Hex-encoded ed25519 host pubkey (Noise/TLS layer). Multiple
+    /// agents share one host; cross-host disambiguation uses this
+    /// prefix when local aliases collide.
+    pub host_pubkey_hex: String,
 }
 
 // ---------- message.send ----------
@@ -210,6 +220,11 @@ pub struct MessageView {
     /// UIs/LLMs that just want "the sender's name" should read this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_alias: Option<AgentAlias>,
+    /// Hex-encoded ed25519 host pubkey of the daemon hosting `from`.
+    /// `None` for local-only senders that have never been federated.
+    /// UIs render the leading 8 chars when local aliases collide.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_host_pubkey: Option<String>,
     pub to: AgentId,
     pub kind: MessageKind,
     pub priority: MessagePriority,
@@ -1034,6 +1049,11 @@ pub struct PendingConfirmationView {
     pub from_peer_alias: Option<AgentAlias>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_alias: Option<AgentAlias>,
+    /// Hex-encoded ed25519 host pubkey of the daemon hosting `from`.
+    /// Mirrors [`MessageView::from_host_pubkey`] — surfaced for
+    /// cross-host disambiguation when local aliases collide.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_host_pubkey: Option<String>,
     /// What the operator would authorise by accepting (e.g.
     /// `"message.deliver"`, `"workspace.invite"`). Mirrors the
     /// `HoldedIntent` enum's `as_str()`. Distinct from

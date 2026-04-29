@@ -24,7 +24,7 @@ use crate::inbound::InboundProcessor;
 use crate::outbox::OutboxWorker;
 use crate::services::{
     AgentService, AuditService, BriefService, BroadcastService, CapabilityService, ChannelService,
-    ConfirmationService, KeyRef, McpService, MessageService, PeerService, PermissionService,
+    ConfirmationService, McpService, MessageService, PeerService, PermissionService,
     PresenceService, RemoteAuditSink, StatusService, WorkspaceService,
 };
 
@@ -50,23 +50,12 @@ pub async fn serve(
         .with_context(|| format!("bind {}", socket_path.display()))?;
     info!(socket = %socket_path.display(), "listening");
 
-    // H2 single-tenant dispatch: every service site that needs an
-    // application-level identity uses the lone local agent. H3 will
-    // replace this fan-out with per-call `caller_agent_id` resolved
-    // at the IPC handshake.
-    let solo = registry
-        .solo()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "multi-tenant dispatch requires phase H3 (host has {} local agents — \
-                 H2 single-tenant code path needs exactly one)",
-                registry.len()
-            )
-        })?
-        .clone();
-    let self_id = solo.agent_id.clone();
+    // Host-level identity used wherever an audit row would otherwise
+    // have no caller (background workers, federation accept) — the
+    // `audit_or_warn` overlay replaces this with the IPC caller's
+    // agent_id when a `CALLER_AGENT` task_local is in scope.
     let host_id = host_keypair.agent_id();
-    let key_ref = KeyRef::from_keypair(&solo.keypair, None);
+    let host_public_key = host_keypair.public_key();
 
     // Bearer authentication map for the remote-IPC listeners. Built
     // once from the registry snapshot — a presented bearer's blake3
@@ -129,6 +118,14 @@ pub async fn serve(
     );
     let rate_limit = RateLimiter::new(db.clone(), config.policy.rate_limit_per_sender);
     let started = Instant::now();
+
+    // Local Unix-socket IPC binds the lone hosted agent as the
+    // connection's caller when there's exactly one (single-tenant
+    // convenience for `hermod` operator commands). With N>1 the
+    // local socket leaves caller_agent unset and operators reach
+    // per-agent methods over remote IPC + bearer instead.
+    let local_socket_caller: Option<hermod_core::AgentId> =
+        registry.solo().map(|a| a.agent_id.clone());
 
     // Federation transport — currently a single `WssNoiseTransport`.
     // Hold it as `Arc<dyn Transport>` so the daemon never references a
@@ -265,11 +262,11 @@ pub async fn serve(
         None
     };
 
-    let permissions = PermissionService::new(audit_sink.clone(), self_id.clone());
+    let permissions = PermissionService::new(audit_sink.clone(), host_id.clone());
     let observability = crate::services::WorkspaceObservabilityService::new(
         db.clone(),
         audit_sink.clone(),
-        self_id.clone(),
+        host_id.clone(),
     );
 
     // Build the InboundProcessor in one consume-on-wire chain so
@@ -284,7 +281,7 @@ pub async fn serve(
         let base = InboundProcessor::new(
             db.clone(),
             audit_sink.clone(),
-            self_id.clone(),
+            host_id.clone(),
             registry.clone(),
             access.clone(),
             rate_limit.clone(),
@@ -473,23 +470,19 @@ pub async fn serve(
         crate::services::MessageRelayResponder::new(db.clone(), messages.clone()),
     ));
     permissions.set_prompt_forwarder(std::sync::Arc::new(
-        crate::services::CapabilityPromptForwarder::new(
-            db.clone(),
-            messages.clone(),
-            self_id.clone(),
-        ),
+        crate::services::CapabilityPromptForwarder::new(db.clone(), messages.clone()),
     ));
 
     let presence = PresenceService::new(
         db.clone(),
         audit_sink.clone(),
-        self_id.clone(),
+        host_id.clone(),
         messages.clone(),
     );
     let capabilities = CapabilityService::new(db.clone(), audit_sink.clone(), registry.clone());
     capabilities.set_message_service(messages.clone());
     let dispatcher = Dispatcher {
-        status: StatusService::new(db.clone(), key_ref, started),
+        status: StatusService::new(db.clone(), registry.clone(), &host_public_key, started),
         messages: messages.clone(),
         agents: AgentService::new(db.clone(), audit_sink.clone(), presence.clone()),
         briefs: BriefService::new(db.clone(), audit_sink.clone(), messages.clone()),
@@ -497,21 +490,21 @@ pub async fn serve(
         mcp: McpService::new(
             db.clone(),
             audit_sink.clone(),
-            self_id.clone(),
+            host_id.clone(),
             presence.clone(),
         ),
         workspaces: WorkspaceService::new(
             db.clone(),
             audit_sink.clone(),
-            self_id.clone(),
-            solo.keypair.to_pubkey_bytes(),
+            host_id.clone(),
+            registry.clone(),
             messages.clone(),
         ),
         workspace_observability: observability,
         channels: ChannelService::new(
             db.clone(),
             audit_sink.clone(),
-            self_id.clone(),
+            host_id.clone(),
             router.clone(),
             messages.clone(),
         ),
@@ -519,13 +512,13 @@ pub async fn serve(
         confirmations: ConfirmationService::new(
             db.clone(),
             audit_sink.clone(),
-            self_id.clone(),
+            host_id.clone(),
             inbound.clone(),
         ),
         peers: PeerService::new(
             db.clone(),
             audit_sink.clone(),
-            self_id.clone(),
+            host_id.clone(),
             presence.clone(),
             remote.pool(),
         ),
@@ -561,7 +554,7 @@ pub async fn serve(
         host_id.clone(),
         janitor_config,
     )
-    .with_presence(presence.clone());
+    .with_presence(presence.clone(), registry.clone());
     tokio::spawn(async move {
         janitor.run(janitor_shutdown_rx).await;
     });
@@ -622,9 +615,9 @@ pub async fn serve(
                 match accept {
                     Ok(stream) => {
                         let dispatcher = dispatcher.clone();
-                        let caller = self_id.clone();
+                        let local_caller = local_socket_caller.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_connection(stream, dispatcher, caller).await {
+                            if let Err(e) = handle_connection(stream, dispatcher, local_caller).await {
                                 error!(error = %e, "connection terminated with error");
                             }
                         });
@@ -696,16 +689,17 @@ async fn shutdown_sequence(
 async fn handle_connection(
     stream: hermod_transport::UnixIpcStream,
     dispatcher: Dispatcher,
-    caller_agent: hermod_core::AgentId,
+    local_caller: Option<hermod_core::AgentId>,
 ) -> Result<()> {
     // Unix-socket IPC inherits filesystem-permission auth — anyone
     // who can open the socket is already running as the daemon's
     // owning user, so there's no per-connection bearer challenge.
-    // We still bind the lone hosted agent as the connection's
-    // `CALLER_AGENT` so audit rows attribute to the agent rather
-    // than to the host. Multi-tenant on the local socket lands in a
-    // future phase (the CLI will need an `--alias` flag to pick one
-    // of N agents).
+    // When the daemon hosts exactly one local agent we bind it as
+    // the connection's `CALLER_AGENT` (single-tenant convenience).
+    // With N>1 hosted agents the local socket leaves caller_agent
+    // unset — operator IPC methods that don't need a caller still
+    // work; per-agent methods (message.send, identity.get, …) must
+    // come in over remote IPC where the bearer disambiguates.
     let inner = async {
         let mut server = IpcServer::new(stream);
         while let Some(req) = server.next_request().await? {
@@ -714,7 +708,7 @@ async fn handle_connection(
         }
         Ok::<_, anyhow::Error>(())
     };
-    crate::audit_context::with_caller_agent(Some(caller_agent), inner).await
+    crate::audit_context::with_caller_agent(local_caller, inner).await
 }
 
 /// Resolve when either SIGINT or SIGTERM arrives, returning a static label

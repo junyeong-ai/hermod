@@ -150,7 +150,18 @@ pub(crate) struct Request {
 
 async fn handle(req: Request, target: &ClientTarget) -> Value {
     match req.method.as_str() {
-        "initialize" => initialize::response(req.id, env!("CARGO_PKG_VERSION")),
+        "initialize" => {
+            // Best-effort identity fetch so the per-session
+            // `instructions` string can name the agent Claude is
+            // speaking for. If the daemon isn't reachable yet
+            // (cold-start race), the prelude alone is returned and
+            // the supervisor's reattach loop keeps the bridge live.
+            let identity = match target.connect().await {
+                Ok(mut c) => c.identity_get().await.ok(),
+                Err(_) => None,
+            };
+            initialize::response(req.id, env!("CARGO_PKG_VERSION"), identity.as_ref())
+        }
         "tools/list" => json!({
             "jsonrpc":"2.0",
             "id": req.id,

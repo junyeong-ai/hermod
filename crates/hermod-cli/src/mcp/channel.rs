@@ -47,6 +47,9 @@ const BATCH_LIMIT: u32 = 100;
 ///     routing-resolvable).
 ///   * `from_peer_alias`: `from`'s self-asserted display name (advisory).
 ///   * `from_alias`: effective display — local wins, falls back to peer.
+///   * `from_host_pubkey`: hex ed25519 host pubkey of the daemon
+///     hosting `from`. UIs surface the leading 8 chars when local
+///     aliases collide across hosts.
 ///   * `from_live`: whether a synchronous reply is realistic right now.
 #[derive(Debug, Clone)]
 pub enum ChannelEvent {
@@ -57,6 +60,7 @@ pub enum ChannelEvent {
         from_local_alias: Option<AgentAlias>,
         from_peer_alias: Option<AgentAlias>,
         from_alias: Option<AgentAlias>,
+        from_host_pubkey: Option<String>,
         from_live: bool,
         priority: MessagePriority,
         body: String,
@@ -71,6 +75,7 @@ pub enum ChannelEvent {
         from_local_alias: Option<AgentAlias>,
         from_peer_alias: Option<AgentAlias>,
         from_alias: Option<AgentAlias>,
+        from_host_pubkey: Option<String>,
         from_live: bool,
         priority: MessagePriority,
         name: String,
@@ -88,6 +93,7 @@ pub enum ChannelEvent {
         from_local_alias: Option<AgentAlias>,
         from_peer_alias: Option<AgentAlias>,
         from_alias: Option<AgentAlias>,
+        from_host_pubkey: Option<String>,
         from_live: bool,
         /// Operator-facing intent label (e.g. `"message.deliver"`,
         /// `"workspace.invite"`). Mirrors `HoldedIntent::as_str()`.
@@ -202,6 +208,7 @@ impl PollingChannelSource {
                         from_local_alias: m.from_local_alias,
                         from_peer_alias: m.from_peer_alias,
                         from_alias: m.from_alias,
+                        from_host_pubkey: m.from_host_pubkey,
                         from_live,
                         priority: m.priority,
                         body: text.clone(),
@@ -216,6 +223,7 @@ impl PollingChannelSource {
                         from_local_alias: m.from_local_alias,
                         from_peer_alias: m.from_peer_alias,
                         from_alias: m.from_alias,
+                        from_host_pubkey: m.from_host_pubkey,
                         from_live,
                         priority: m.priority,
                         name: name.clone(),
@@ -251,6 +259,7 @@ impl PollingChannelSource {
                 from_local_alias: c.from_local_alias,
                 from_peer_alias: c.from_peer_alias,
                 from_alias: c.from_alias,
+                from_host_pubkey: c.from_host_pubkey,
                 from_live,
                 intent: c.intent,
                 sensitivity: c.sensitivity,

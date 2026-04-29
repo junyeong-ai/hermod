@@ -317,24 +317,25 @@ impl MessageService {
         // Per-batch alias cache. Multiple messages from the same sender
         // share one directory lookup; the directory is small + indexed so
         // this is O(distinct senders) sqlite SELECTs.
-        let mut alias_cache: std::collections::HashMap<hermod_core::AgentId, AliasTriple> =
+        let mut sender_cache: std::collections::HashMap<hermod_core::AgentId, SenderProjection> =
             std::collections::HashMap::new();
         let mut messages = Vec::with_capacity(records.len());
         for r in records {
-            let triple = match alias_cache.get(&r.from_agent) {
+            let proj = match sender_cache.get(&r.from_agent) {
                 Some(v) => v.clone(),
                 None => {
-                    let t = AliasTriple::lookup(&self.db, &r.from_agent).await;
-                    alias_cache.insert(r.from_agent.clone(), t.clone());
+                    let t = SenderProjection::lookup(&self.db, &r.from_agent).await;
+                    sender_cache.insert(r.from_agent.clone(), t.clone());
                     t
                 }
             };
             messages.push(MessageView {
                 id: r.id,
                 from: r.from_agent,
-                from_local_alias: triple.local,
-                from_peer_alias: triple.peer,
-                from_alias: triple.effective,
+                from_local_alias: proj.local,
+                from_peer_alias: proj.peer,
+                from_alias: proj.effective,
+                from_host_pubkey: proj.host_pubkey_hex,
                 to: r.to_agent,
                 kind: r.kind,
                 priority: r.priority,
@@ -437,22 +438,27 @@ impl MessageService {
 
 /// Three-tier alias snapshot used by views that surface a sender's display
 /// name. `local` is the operator-set nickname, `peer` is the sender's own
-/// self-claim, `effective` is what UIs render. Looked up once per distinct
-/// sender per batch (see callers in `message::list` / `confirmation::list`).
+/// self-claim, `effective` is what UIs render. `host_pubkey_hex` is the
+/// hex-encoded ed25519 host pubkey of the daemon hosting the sender —
+/// surfaced for cross-host disambiguation when local aliases collide.
+/// Looked up once per distinct sender per batch (see callers in
+/// `message::list` / `confirmation::list`).
 #[derive(Debug, Clone, Default)]
-pub(crate) struct AliasTriple {
+pub(crate) struct SenderProjection {
     pub local: Option<hermod_core::AgentAlias>,
     pub peer: Option<hermod_core::AgentAlias>,
     pub effective: Option<hermod_core::AgentAlias>,
+    pub host_pubkey_hex: Option<String>,
 }
 
-impl AliasTriple {
+impl SenderProjection {
     pub async fn lookup(db: &Arc<dyn Database>, id: &hermod_core::AgentId) -> Self {
         match db.agents().get(id).await.ok().flatten() {
             Some(rec) => Self {
                 effective: rec.effective_alias().cloned(),
                 local: rec.local_alias,
                 peer: rec.peer_asserted_alias,
+                host_pubkey_hex: rec.host_pubkey.map(|h| hex::encode(h.as_slice())),
             },
             None => Self::default(),
         }

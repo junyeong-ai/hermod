@@ -107,44 +107,35 @@ impl RelayResponder for MessageRelayResponder {
 }
 
 /// Fans a freshly-opened local prompt out to every active
-/// `permission:respond` delegate.
-#[derive(Clone)]
+/// `permission:respond` delegate. Issuer for the audience lookup
+/// is the IPC caller's agent_id (resolved from the
+/// `CALLER_AGENT` task_local) — caps are granted *by* a local
+/// agent, not by the host.
+#[derive(Clone, Debug)]
 pub struct CapabilityPromptForwarder {
     db: Arc<dyn Database>,
     messages: MessageService,
-    self_id: AgentId,
-}
-
-impl std::fmt::Debug for CapabilityPromptForwarder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CapabilityPromptForwarder")
-            .field("self_id", &self.self_id)
-            .finish_non_exhaustive()
-    }
 }
 
 impl CapabilityPromptForwarder {
-    pub fn new(db: Arc<dyn Database>, messages: MessageService, self_id: AgentId) -> Self {
-        Self {
-            db,
-            messages,
-            self_id,
-        }
+    pub fn new(db: Arc<dyn Database>, messages: MessageService) -> Self {
+        Self { db, messages }
     }
 }
 
 #[async_trait]
 impl PromptForwarder for CapabilityPromptForwarder {
     async fn forward(&self, payload: PromptForwardPayload) -> Result<u32, ServiceError> {
+        let issuer = crate::audit_context::current_caller_agent().ok_or_else(|| {
+            ServiceError::InvalidParam(
+                "permission.relay requires an IPC caller scope (no caller_agent in context)".into(),
+            )
+        })?;
         let now_ms = Timestamp::now().unix_ms();
         let audience_ids = self
             .db
             .capabilities()
-            .active_audiences_for_scope(
-                &self.self_id,
-                hermod_routing::scope::PERMISSION_RESPOND,
-                now_ms,
-            )
+            .active_audiences_for_scope(&issuer, hermod_routing::scope::PERMISSION_RESPOND, now_ms)
             .await?;
         let mut reach: u32 = 0;
         for audience_id in audience_ids {

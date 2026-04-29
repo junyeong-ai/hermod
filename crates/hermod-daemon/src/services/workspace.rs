@@ -1,6 +1,5 @@
 use hermod_core::{
-    AgentAddress, AgentAlias, AgentId, MessageBody, MessagePriority, PubkeyBytes, Timestamp,
-    WorkspaceVisibility,
+    AgentAddress, AgentAlias, AgentId, MessageBody, MessagePriority, Timestamp, WorkspaceVisibility,
 };
 use hermod_crypto::{WorkspaceId, WorkspaceSecret, public_workspace_id};
 use hermod_protocol::ipc::methods::{
@@ -14,6 +13,8 @@ use serde_bytes::ByteBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use crate::audit_context::current_caller_agent;
+use crate::local_agent::LocalAgentRegistry;
 use crate::services::{ServiceError, audit_or_warn, message::MessageService};
 
 const MAX_NAME_LEN: usize = 64;
@@ -22,8 +23,12 @@ const MAX_NAME_LEN: usize = 64;
 pub struct WorkspaceService {
     db: Arc<dyn Database>,
     audit_sink: Arc<dyn AuditSink>,
-    self_id: AgentId,
-    self_pubkey: PubkeyBytes,
+    /// Audit fallback actor for emissions outside an IPC scope.
+    /// `audit_or_warn` overlays the IPC caller's agent_id when one
+    /// is in scope; this value is what lands when no caller is
+    /// present (background paths).
+    host_actor: AgentId,
+    registry: LocalAgentRegistry,
     messages: MessageService,
 }
 
@@ -31,17 +36,25 @@ impl WorkspaceService {
     pub fn new(
         db: Arc<dyn Database>,
         audit_sink: Arc<dyn AuditSink>,
-        self_id: AgentId,
-        self_pubkey: PubkeyBytes,
+        host_actor: AgentId,
+        registry: LocalAgentRegistry,
         messages: MessageService,
     ) -> Self {
         Self {
             db,
             audit_sink,
-            self_id,
-            self_pubkey,
+            host_actor,
+            registry,
             messages,
         }
+    }
+
+    fn caller(&self) -> Result<AgentId, ServiceError> {
+        current_caller_agent().ok_or_else(|| {
+            ServiceError::InvalidParam(
+                "workspace.* requires an IPC caller scope (no caller_agent in context)".into(),
+            )
+        })
     }
 
     pub async fn create(
@@ -49,6 +62,11 @@ impl WorkspaceService {
         params: WorkspaceCreateParams,
     ) -> Result<WorkspaceCreateResult, ServiceError> {
         validate_name(&params.name)?;
+        let caller = self.caller()?;
+        let agent = self
+            .registry
+            .lookup(&caller)
+            .ok_or(ServiceError::NotFound)?;
         let now = Timestamp::now();
 
         let (id, secret, visibility) = match params.visibility {
@@ -58,7 +76,7 @@ impl WorkspaceService {
                 (id, Some(secret), WorkspaceVisibility::Private)
             }
             WorkspaceVisibility::Public => {
-                let id = public_workspace_id(&self.self_pubkey, &params.name);
+                let id = public_workspace_id(&agent.keypair.to_pubkey_bytes(), &params.name);
                 (id, None, WorkspaceVisibility::Public)
             }
         };
@@ -79,18 +97,14 @@ impl WorkspaceService {
             })
             .await?;
 
-        // Self-membership.
-        self.db
-            .workspace_members()
-            .touch(&id, &self.self_id, now)
-            .await?;
+        self.db.workspace_members().touch(&id, &caller, now).await?;
 
         audit_or_warn(
             &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: now,
-                actor: self.self_id.clone(),
+                actor: self.host_actor.clone(),
                 action: "workspace.create".into(),
                 target: Some(id.to_hex()),
                 details: Some(serde_json::json!({
@@ -115,6 +129,7 @@ impl WorkspaceService {
         params: WorkspaceJoinParams,
     ) -> Result<WorkspaceJoinResult, ServiceError> {
         validate_name(&params.name)?;
+        let caller = self.caller()?;
         let secret = WorkspaceSecret::from_hex(&params.secret_hex)
             .map_err(|e| ServiceError::InvalidParam(format!("secret_hex: {e}")))?;
         let id = secret.workspace_id();
@@ -134,17 +149,14 @@ impl WorkspaceService {
             })
             .await?;
 
-        self.db
-            .workspace_members()
-            .touch(&id, &self.self_id, now)
-            .await?;
+        self.db.workspace_members().touch(&id, &caller, now).await?;
 
         audit_or_warn(
             &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: now,
-                actor: self.self_id.clone(),
+                actor: self.host_actor.clone(),
                 action: "workspace.join".into(),
                 target: Some(id.to_hex()),
                 details: Some(serde_json::json!({ "name": params.name })),
@@ -189,7 +201,7 @@ impl WorkspaceService {
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),
-                actor: self.self_id.clone(),
+                actor: self.host_actor.clone(),
                 action: "workspace.delete".into(),
                 target: Some(id.to_hex()),
                 details: None,
@@ -264,7 +276,7 @@ impl WorkspaceService {
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),
-                actor: self.self_id.clone(),
+                actor: self.host_actor.clone(),
                 action: "workspace.invite".into(),
                 target: Some(workspace.id.to_hex()),
                 details: Some(serde_json::json!({
@@ -325,7 +337,7 @@ impl WorkspaceService {
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),
-                actor: self.self_id.clone(),
+                actor: self.host_actor.clone(),
                 action: "workspace.mute".into(),
                 target: Some(id.to_hex()),
                 details: Some(serde_json::json!({ "muted": params.muted })),

@@ -58,17 +58,18 @@ impl ConfirmationService {
             .confirmations()
             .list_pending(limit, params.after_id.as_deref())
             .await?;
-        let mut alias_cache: std::collections::HashMap<
+        let mut sender_cache: std::collections::HashMap<
             hermod_core::AgentId,
-            crate::services::message::AliasTriple,
+            crate::services::message::SenderProjection,
         > = std::collections::HashMap::new();
         let mut confirmations = Vec::with_capacity(rows.len());
         for r in rows {
-            let triple = match alias_cache.get(&r.actor) {
+            let proj = match sender_cache.get(&r.actor) {
                 Some(v) => v.clone(),
                 None => {
-                    let t = crate::services::message::AliasTriple::lookup(&self.db, &r.actor).await;
-                    alias_cache.insert(r.actor.clone(), t.clone());
+                    let t = crate::services::message::SenderProjection::lookup(&self.db, &r.actor)
+                        .await;
+                    sender_cache.insert(r.actor.clone(), t.clone());
                     t
                 }
             };
@@ -76,9 +77,10 @@ impl ConfirmationService {
                 id: r.id,
                 requested_at: r.requested_at,
                 from: r.actor,
-                from_local_alias: triple.local,
-                from_peer_alias: triple.peer,
-                from_alias: triple.effective,
+                from_local_alias: proj.local,
+                from_peer_alias: proj.peer,
+                from_alias: proj.effective,
+                from_host_pubkey: proj.host_pubkey_hex,
                 intent: r.intent.as_str().to_string(),
                 sensitivity: r.sensitivity,
                 trust_level: r.trust_level,

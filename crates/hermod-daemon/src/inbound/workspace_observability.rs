@@ -99,7 +99,10 @@ impl InboundProcessor {
         // identities at once — no per-member out-of-band exchange.
         let now = Timestamp::now();
         for m in &sorted {
-            if m.id.as_str() == self.self_id.as_str() {
+            // Skip rows that already exist in our own registry —
+            // operator-set fields on locally-hosted agents must not
+            // be clobbered by an observed advertisement.
+            if self.local_agents.lookup(&m.id).is_some() {
                 continue;
             }
             self.db

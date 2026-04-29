@@ -1,9 +1,12 @@
-//! Manual hint + derived liveness for this daemon's identity.
+//! Manual hint + derived liveness, scoped per locally-hosted agent.
 //!
 //! The two facets are *combined* on read into the effective `PresenceStatus`.
-//! Self liveness is derived from `Database::mcp_sessions()` on every call —
-//! never cached in `agent_presence` — so a daemon restart with no attached
-//! Claude Code session immediately reads as offline without storage cleanup.
+//! Liveness for a locally-hosted agent is derived from `Database::mcp_sessions()`
+//! on every call — never cached in `agent_presence` — so a daemon restart
+//! with no attached Claude Code session immediately reads as offline without
+//! storage cleanup. (Until the `mcp_sessions` schema gains an `agent_id`
+//! column, liveness is host-wide: any live session lights up every locally-
+//! hosted agent. Multi-agent split lands with that schema change.)
 //!
 //! Whenever local state changes (manual hint set, MCP session attaches /
 //! detaches / decays), the service publishes a Presence envelope to
@@ -23,6 +26,7 @@ use hermod_storage::{
 use std::str::FromStr;
 use std::sync::Arc;
 
+use crate::audit_context::current_caller_agent;
 use crate::services::{ServiceError, audit_or_warn, fanout, message::MessageService};
 
 /// Cadence at which we publish self-liveness to workspace members. Equal to
@@ -41,7 +45,10 @@ const PRESENCE_PRIORITY: MessagePriority = MessagePriority::Low;
 pub struct PresenceService {
     db: Arc<dyn Database>,
     audit_sink: Arc<dyn AuditSink>,
-    self_id: AgentId,
+    /// Audit fallback actor for emissions outside an IPC scope. The
+    /// `audit_or_warn` overlay replaces this with the IPC caller's
+    /// agent_id when a `CALLER_AGENT` task_local is in scope.
+    host_actor: AgentId,
     messages: MessageService,
 }
 
@@ -49,21 +56,30 @@ impl PresenceService {
     pub fn new(
         db: Arc<dyn Database>,
         audit_sink: Arc<dyn AuditSink>,
-        self_id: AgentId,
+        host_actor: AgentId,
         messages: MessageService,
     ) -> Self {
         Self {
             db,
             audit_sink,
-            self_id,
+            host_actor,
             messages,
         }
+    }
+
+    fn caller(&self) -> Result<AgentId, ServiceError> {
+        current_caller_agent().ok_or_else(|| {
+            ServiceError::InvalidParam(
+                "presence.* requires an IPC caller scope (no caller_agent in context)".into(),
+            )
+        })
     }
 
     pub async fn set_manual(
         &self,
         params: PresenceSetManualParams,
     ) -> Result<PresenceSetManualResult, ServiceError> {
+        let caller = self.caller()?;
         let now = Timestamp::now();
         let expires_at = params
             .ttl_secs
@@ -73,17 +89,17 @@ impl PresenceService {
 
         self.db
             .presences()
-            .set_manual(&self.self_id, params.status, now, expires_at)
+            .set_manual(&caller, params.status, now, expires_at)
             .await?;
 
-        let outcome = self.broadcast_self().await?;
+        let outcome = self.broadcast_for(&caller).await?;
 
         audit_or_warn(
             &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: now,
-                actor: self.self_id.clone(),
+                actor: self.host_actor.clone(),
                 action: "presence.set_manual".into(),
                 target: None,
                 details: Some(serde_json::json!({
@@ -109,15 +125,16 @@ impl PresenceService {
         &self,
         _params: PresenceClearManualParams,
     ) -> Result<PresenceClearManualResult, ServiceError> {
+        let caller = self.caller()?;
         let now = Timestamp::now();
-        self.db.presences().clear_manual(&self.self_id).await?;
-        let outcome = self.broadcast_self().await?;
+        self.db.presences().clear_manual(&caller).await?;
+        let outcome = self.broadcast_for(&caller).await?;
         audit_or_warn(
             &*self.audit_sink,
             AuditEntry {
                 id: None,
                 ts: now,
-                actor: self.self_id.clone(),
+                actor: self.host_actor.clone(),
                 action: "presence.clear_manual".into(),
                 target: None,
                 details: Some(serde_json::json!({
@@ -140,14 +157,20 @@ impl PresenceService {
         })
     }
 
-    /// Build the public PresenceView. Self uses live `mcp_sessions` rows;
-    /// peers use cached `peer_live`/manual hint with TTL gating.
+    /// Build the public PresenceView. Locally-hosted agents use live
+    /// `mcp_sessions` rows; peers use cached `peer_live`/manual hint
+    /// with TTL gating.
     pub async fn view_for(&self, agent_id: &AgentId) -> Result<PresenceView, ServiceError> {
         let now = Timestamp::now();
         let rec = self.db.presences().get(agent_id).await?;
-        let is_self = agent_id == &self.self_id;
-        let live = if is_self {
-            self.self_live(now).await?
+        let is_local = self
+            .db
+            .local_agents()
+            .lookup_by_id(agent_id)
+            .await?
+            .is_some();
+        let live = if is_local {
+            self.host_live(now).await?
         } else {
             rec.as_ref()
                 .and_then(|r| r.active_peer_live(now))
@@ -158,7 +181,7 @@ impl PresenceService {
         let manual_status_set_at = rec.as_ref().and_then(|r| r.manual_status_set_at);
         let manual_status_expires_at = rec.as_ref().and_then(|r| r.manual_status_expires_at);
         let last_seen_at = rec.as_ref().and_then(|r| {
-            if is_self {
+            if is_local {
                 None
             } else {
                 r.peer_live_updated_at
@@ -187,20 +210,28 @@ impl PresenceService {
     }
 
     /// Whether this daemon currently has at least one attached MCP session.
-    pub async fn self_live(&self, now: Timestamp) -> Result<bool, ServiceError> {
+    /// Until `mcp_sessions` carries an `agent_id` column, this is a
+    /// host-wide signal — every locally-hosted agent reads as live when
+    /// any one of them has an attached session.
+    pub async fn host_live(&self, now: Timestamp) -> Result<bool, ServiceError> {
         let ttl_ms = (SESSION_TTL_SECS * 1_000) as i64;
         Ok(self.db.mcp_sessions().count_live(now, ttl_ms).await? > 0)
     }
 
-    /// Publish current self state to workspace members. Called whenever
-    /// liveness or manual hint change — by `set_manual`, by `McpService`
-    /// on attach/detach, and by the janitor when the last session decays.
+    /// Publish current state for `agent_id` to its workspace members.
+    /// Called whenever liveness or manual hint change — by IPC paths
+    /// (`set_manual` / `clear_manual`), by `McpService` on attach/detach
+    /// (passing the caller-derived agent_id), and by the janitor when
+    /// the last session decays.
     #[tracing::instrument(name = "presence.broadcast", skip(self))]
-    pub async fn broadcast_self(&self) -> Result<fanout::FanoutOutcome, ServiceError> {
+    pub async fn broadcast_for(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<fanout::FanoutOutcome, ServiceError> {
         let now = Timestamp::now();
-        let rec = self.db.presences().get(&self.self_id).await?;
+        let rec = self.db.presences().get(agent_id).await?;
         let manual_status = rec.as_ref().and_then(|r| r.active_manual_status(now));
-        let live = self.self_live(now).await?;
+        let live = self.host_live(now).await?;
         let body = MessageBody::Presence {
             manual_status,
             live,
@@ -208,7 +239,7 @@ impl PresenceService {
         fanout::fanout_to_workspace_members(
             &*self.db,
             &self.messages,
-            &self.self_id,
+            agent_id,
             body,
             PRESENCE_PRIORITY,
             PRESENCE_FANOUT_TTL_SECS,

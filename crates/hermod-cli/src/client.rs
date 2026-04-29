@@ -145,6 +145,10 @@ impl DaemonClient {
         self.call_noparams(methods::method::STATUS_GET).await
     }
 
+    pub async fn identity_get(&mut self) -> Result<methods::IdentityGetResult> {
+        self.call_noparams(methods::method::IDENTITY_GET).await
+    }
+
     pub async fn message_send(
         &mut self,
         params: methods::MessageSendParams,

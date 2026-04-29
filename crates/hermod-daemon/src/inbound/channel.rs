@@ -156,9 +156,13 @@ impl InboundProcessor {
             })
             .await
             .map_err(|e| FederationRejection::Storage(e.to_string()))?;
+        // Self-membership: the locally-hosted agent that received the
+        // invite (envelope.to.id) — not the daemon's host id, which is
+        // not registered in `agents`. The FK on `workspace_members.
+        // member_id → agents.id` would reject any non-agent value.
         self.db
             .workspace_members()
-            .touch(&claimed_id, &self.self_id, now)
+            .touch(&claimed_id, &envelope.to.id, now)
             .await
             .map_err(|e| FederationRejection::Storage(e.to_string()))?;
         self.db

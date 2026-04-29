@@ -254,6 +254,7 @@ fn event_to_channel_notification(event: &ChannelEvent) -> Value {
             from_local_alias,
             from_peer_alias,
             from_alias,
+            from_host_pubkey,
             from_live,
             priority,
             body,
@@ -266,6 +267,7 @@ fn event_to_channel_notification(event: &ChannelEvent) -> Value {
                 "from_local_alias": from_local_alias.as_ref().map(|a| a.as_str()),
                 "from_peer_alias": from_peer_alias.as_ref().map(|a| a.as_str()),
                 "from_alias": from_alias.as_ref().map(|a| a.as_str()),
+                "from_host": from_host_pubkey.as_deref().map(host_short),
                 "from_live": from_live,
                 "priority": priority.as_str(),
             }),
@@ -276,6 +278,7 @@ fn event_to_channel_notification(event: &ChannelEvent) -> Value {
             from_local_alias,
             from_peer_alias,
             from_alias,
+            from_host_pubkey,
             from_live,
             intent,
             sensitivity,
@@ -289,6 +292,7 @@ fn event_to_channel_notification(event: &ChannelEvent) -> Value {
                 "from_local_alias": from_local_alias.as_ref().map(|a| a.as_str()),
                 "from_peer_alias": from_peer_alias.as_ref().map(|a| a.as_str()),
                 "from_alias": from_alias.as_ref().map(|a| a.as_str()),
+                "from_host": from_host_pubkey.as_deref().map(host_short),
                 "from_live": from_live,
                 "intent": intent,
                 "sensitivity": sensitivity,
@@ -300,6 +304,7 @@ fn event_to_channel_notification(event: &ChannelEvent) -> Value {
             from_local_alias,
             from_peer_alias,
             from_alias,
+            from_host_pubkey,
             from_live,
             priority,
             name,
@@ -332,6 +337,7 @@ fn event_to_channel_notification(event: &ChannelEvent) -> Value {
                     "from_local_alias": from_local_alias.as_ref().map(|a| a.as_str()),
                     "from_peer_alias": from_peer_alias.as_ref().map(|a| a.as_str()),
                     "from_alias": from_alias.as_ref().map(|a| a.as_str()),
+                    "from_host": from_host_pubkey.as_deref().map(host_short),
                     "from_live": from_live,
                     "priority": priority.as_str(),
                     "name": name,
@@ -345,4 +351,11 @@ fn event_to_channel_notification(event: &ChannelEvent) -> Value {
         }
     };
     channel_notification(content, meta)
+}
+
+/// 8-char prefix of a hex host pubkey — enough to disambiguate cross-host
+/// alias collisions while keeping the channel-frame meta compact. Mirrors
+/// the `to_human_prefix(8)` shape used elsewhere for fingerprints.
+fn host_short(hex: &str) -> String {
+    hex.chars().take(8).collect()
 }

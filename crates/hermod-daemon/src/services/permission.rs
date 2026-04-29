@@ -212,7 +212,7 @@ impl State {
 #[derive(Clone)]
 pub struct PermissionService {
     audit_sink: Arc<dyn AuditSink>,
-    self_id: AgentId,
+    host_actor: AgentId,
     state: Arc<Mutex<State>>,
     ttl: Duration,
     /// Trait object that ships a `PermissionResponse` envelope back
@@ -230,7 +230,7 @@ pub struct PermissionService {
 impl std::fmt::Debug for PermissionService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PermissionService")
-            .field("self_id", &self.self_id)
+            .field("host_actor", &self.host_actor)
             .field("ttl", &self.ttl)
             .field("has_relay_responder", &self.relay_responder.get().is_some())
             .field(
@@ -242,10 +242,10 @@ impl std::fmt::Debug for PermissionService {
 }
 
 impl PermissionService {
-    pub fn new(audit_sink: Arc<dyn AuditSink>, self_id: AgentId) -> Self {
+    pub fn new(audit_sink: Arc<dyn AuditSink>, host_actor: AgentId) -> Self {
         Self {
             audit_sink,
-            self_id,
+            host_actor,
             state: Arc::new(Mutex::new(State::default())),
             ttl: REQUEST_TTL,
             relay_responder: Arc::new(OnceCell::new()),
@@ -323,7 +323,7 @@ impl PermissionService {
             AuditEntry {
                 id: None,
                 ts: now,
-                actor: self.self_id.clone(),
+                actor: self.host_actor.clone(),
                 action: "permission.request".into(),
                 target: Some(request_id.clone()),
                 details: Some(serde_json::json!({
@@ -366,7 +366,7 @@ impl PermissionService {
                         AuditEntry {
                             id: None,
                             ts: now,
-                            actor: self.self_id.clone(),
+                            actor: self.host_actor.clone(),
                             action: action.into(),
                             target: Some(request_id.clone()),
                             details: Some(serde_json::json!({
@@ -389,7 +389,7 @@ impl PermissionService {
                         AuditEntry {
                             id: None,
                             ts: now,
-                            actor: self.self_id.clone(),
+                            actor: self.host_actor.clone(),
                             action: "permission.relay.failed".into(),
                             target: Some(request_id.clone()),
                             details: Some(serde_json::json!({
@@ -583,7 +583,7 @@ impl PermissionService {
                 AuditEntry {
                     id: None,
                     ts: now,
-                    actor: self.self_id.clone(),
+                    actor: self.host_actor.clone(),
                     action: "permission.relay.send_failed".into(),
                     target: Some(params.request_id.clone()),
                     details: Some(serde_json::json!({
@@ -604,7 +604,7 @@ impl PermissionService {
                 AuditEntry {
                     id: None,
                     ts: now,
-                    actor: self.self_id.clone(),
+                    actor: self.host_actor.clone(),
                     action: params.behavior.audit_action().into(),
                     target: Some(params.request_id),
                     details: removed.map(|r| {
@@ -699,7 +699,7 @@ impl PermissionService {
                 AuditEntry {
                     id: None,
                     ts: at,
-                    actor: self.self_id.clone(),
+                    actor: self.host_actor.clone(),
                     action: "permission.expired".into(),
                     target: Some(req.request_id.clone()),
                     details: Some(serde_json::json!({

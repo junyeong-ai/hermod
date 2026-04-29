@@ -1,51 +1,52 @@
-use hermod_core::Timestamp;
-use hermod_crypto::Keypair;
+use hermod_core::{AgentId, Timestamp};
+use hermod_crypto::PublicKey;
 use hermod_protocol::ipc::methods::{IdentityGetResult, StatusGetResult};
 use hermod_storage::{Database, SESSION_TTL_SECS};
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::audit_context::current_caller_agent;
+use crate::local_agent::LocalAgentRegistry;
 use crate::services::ServiceError;
 
 #[derive(Debug, Clone)]
 pub struct StatusService {
     db: Arc<dyn Database>,
     started_at: Instant,
-    keypair: KeyRef,
-}
-
-#[derive(Debug, Clone)]
-pub struct KeyRef {
-    pub agent_id: hermod_core::AgentId,
-    pub alias: Option<hermod_core::AgentAlias>,
-    pub fingerprint: String,
-}
-
-impl KeyRef {
-    pub fn from_keypair(kp: &Keypair, alias: Option<hermod_core::AgentAlias>) -> Self {
-        Self {
-            agent_id: kp.agent_id(),
-            alias,
-            fingerprint: kp.fingerprint().to_human_prefix(8),
-        }
-    }
+    registry: LocalAgentRegistry,
+    host_pubkey_hex: String,
 }
 
 impl StatusService {
-    pub fn new(db: Arc<dyn Database>, keypair: KeyRef, started_at: Instant) -> Self {
+    pub fn new(
+        db: Arc<dyn Database>,
+        registry: LocalAgentRegistry,
+        host_pubkey: &PublicKey,
+        started_at: Instant,
+    ) -> Self {
         Self {
             db,
             started_at,
-            keypair,
+            registry,
+            host_pubkey_hex: hex::encode(host_pubkey.to_bytes().0),
         }
     }
 
+    fn caller(&self) -> Result<AgentId, ServiceError> {
+        current_caller_agent().ok_or_else(|| {
+            ServiceError::InvalidParam(
+                "status/identity require an IPC caller scope (no caller_agent in context)".into(),
+            )
+        })
+    }
+
     pub async fn status(&self) -> Result<StatusGetResult, ServiceError> {
-        let pending = self
-            .db
-            .messages()
-            .count_pending_to(&self.keypair.agent_id)
-            .await?;
+        let caller = self.caller()?;
+        let agent = self
+            .registry
+            .lookup(&caller)
+            .ok_or(ServiceError::NotFound)?;
+        let pending = self.db.messages().count_pending_to(&caller).await?;
         let peers = self.db.agents().list_federated().await?.len() as i64;
         let attached_sessions = self
             .db
@@ -55,8 +56,8 @@ impl StatusService {
         let schema_version = self.db.schema_version().await?;
         Ok(StatusGetResult {
             version: env!("CARGO_PKG_VERSION").to_string(),
-            agent_id: self.keypair.agent_id.clone(),
-            alias: self.keypair.alias.clone(),
+            agent_id: caller,
+            alias: agent.local_alias.clone(),
             pending_messages: pending,
             peer_count: peers,
             uptime_secs: self.started_at.elapsed().as_secs(),
@@ -66,10 +67,17 @@ impl StatusService {
     }
 
     pub async fn identity(&self) -> Result<IdentityGetResult, ServiceError> {
+        let caller = self.caller()?;
+        let agent = self
+            .registry
+            .lookup(&caller)
+            .ok_or(ServiceError::NotFound)?;
+        let fingerprint = agent.keypair.fingerprint().to_human_prefix(8);
         Ok(IdentityGetResult {
-            agent_id: self.keypair.agent_id.clone(),
-            alias: self.keypair.alias.clone(),
-            fingerprint: self.keypair.fingerprint.clone(),
+            agent_id: caller,
+            alias: agent.local_alias.clone(),
+            fingerprint,
+            host_pubkey_hex: self.host_pubkey_hex.clone(),
         })
     }
 }
