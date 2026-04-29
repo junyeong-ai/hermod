@@ -25,6 +25,24 @@ backend = one new arm in `open_database()` + one new module under
 (`gcs`, `s3`) take auth from the SDK's standard env-var chain (ADC,
 AWS credential chain) — DSN never carries secrets.
 
+## Pre-open DSN introspection
+
+Three companion functions answer "what would this DSN do?" without
+opening a connection — used by the daemon's `home_layout` to derive
+boot-time enforcement and `hermod doctor` audit before storage is
+constructed:
+
+```rust
+hermod_storage::classify_database_dsn(dsn)?;       // -> DatabaseBackend
+hermod_storage::database_local_files(dsn)?;        // -> Vec<LocalFile>
+hermod_storage::blob_store_local_files(dsn)?;      // -> Vec<LocalFile>
+```
+
+A new backend declares its on-disk artefacts in its `*_local_files`
+arm; the daemon's home-layout policy auto-picks them up. Backends
+with no local state (Postgres, GCS, S3, in-memory) return an empty
+Vec.
+
 ## Trait surface
 
 `Database` (in `database.rs`) hands out `&dyn <Repo>` accessors:

@@ -27,6 +27,22 @@ use crate::repositories::{
     },
 };
 
+/// Identifies which concrete relational backend is in use. Returned
+/// by [`crate::classify_database_dsn`] for callers that need to
+/// branch on the backend before opening it (e.g. `home_layout`
+/// deciding whether SQLite WAL/SHM files belong in the boot
+/// enforcement spec).
+///
+/// Variants are unconditional — classification is a static fact
+/// about the DSN, independent of which backend was compiled in. The
+/// `postgres` cargo feature only affects whether [`crate::open_database`]
+/// can construct a Postgres backend; classification answers without it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseBackend {
+    Sqlite,
+    Postgres,
+}
+
 /// Snapshot of every count the `/metrics` endpoint surfaces. Returned in
 /// one round-trip to keep the scrape cheap; backends that can compute
 /// these in a single query batch should do so.

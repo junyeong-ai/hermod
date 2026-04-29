@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use hermod_daemon::config::Config;
 use hermod_daemon::home_layout::{HomeFileKind, LayoutError, Presence};
 use hermod_daemon::paths;
@@ -28,17 +28,18 @@ pub async fn run(home: &Path, target: &ClientTarget) -> Result<()> {
     });
 
     // $HERMOD_HOME mode audit driven by the daemon's single-source-of-truth
-    // `home_layout::spec`. Adding a new file there automatically adds
-    // a row here — boot enforcement, doctor output, and chmod hints
-    // stay in sync via one declarative list.
+    // `home_layout::spec`. Adding a new file there (or in the storage
+    // layer's `database_local_files` / `blob_store_local_files`)
+    // automatically adds a row here — boot enforcement, doctor output,
+    // and chmod hints stay in sync via one declarative list.
     //
-    // Audit is storage-backend-aware: a Postgres-backed daemon has no
-    // local `hermod.db`, so the spec drops the sqlite triplet. Resolve
-    // the same DSN the daemon will see at boot.
-    let storage_dsn = Config::load_or_default(None, home)
-        .map(|c| paths::expand_dsn(&c.storage.dsn, home))
-        .unwrap_or_else(|_| format!("sqlite://{}/hermod.db", home.display()));
-    for (file, finding) in hermod_daemon::home_layout::audit(home, &storage_dsn) {
+    // Audit is backend-aware on both axes: a Postgres-backed daemon
+    // has no local database file; a cloud-blob daemon has no local
+    // blob root. Resolve the same DSNs the daemon will see at boot.
+    let config = Config::load_or_default(None, home).context("load config")?;
+    let storage_dsn = paths::expand_dsn(&config.storage.dsn, home);
+    let blob_dsn = paths::expand_dsn(&config.blob.dsn, home);
+    for (file, finding) in hermod_daemon::home_layout::audit(home, &storage_dsn, &blob_dsn) {
         match finding {
             Ok(()) => report.pass(&format!("{} ({:o})", file.label, file.required_mode)),
             Err(LayoutError::Missing { .. }) if file.presence == Presence::Optional => {

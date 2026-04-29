@@ -63,16 +63,18 @@ pub async fn serve_wss(
     let local = listener.local_addr()?;
     info!(addr = %local, "remote IPC (WSS+Bearer) listener up");
 
-    accept_loop(listener, bearer_token, dispatcher, move |sock, peer, t, d| {
-        let acceptor = acceptor.clone();
-        Box::pin(async move {
-            let stream = acceptor
-                .accept(sock)
-                .await
-                .context("TLS handshake")?;
-            handshake_and_serve(stream, peer, t, d).await
-        })
-    })
+    accept_loop(
+        listener,
+        bearer_token,
+        dispatcher,
+        move |sock, peer, t, d| {
+            let acceptor = acceptor.clone();
+            Box::pin(async move {
+                let stream = acceptor.accept(sock).await.context("TLS handshake")?;
+                handshake_and_serve(stream, peer, t, d).await
+            })
+        },
+    )
     .await
 }
 

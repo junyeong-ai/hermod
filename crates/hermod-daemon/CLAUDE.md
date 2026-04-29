@@ -63,10 +63,13 @@ circular dependencies with `MessageService`:
 
 ## $HERMOD_HOME layout policy
 
-Every file under `$HERMOD_HOME/` is declared once in
-`home_layout::spec(home)` — the single source of truth covering the
-home dir itself, `config.toml`, `identity/*`, `hermod.db*`,
-`blob-store/`, and `archive/`. Five APIs derive from that one list:
+`home_layout::spec(home, storage_dsn, blob_dsn)` is the single source
+of truth covering the home dir itself, `config.toml`, `identity/*`,
+and `archive/`. Storage-owned files (database + WAL/SHM, blob-store
+root) are declared by `hermod_storage::{database_local_files,
+blob_store_local_files}` and folded in — adding a new backend or a
+backend-local file is one new entry in the storage layer, not here.
+Five APIs derive from the combined list:
 
 - `home_layout::set_secure_umask()` — process-global `umask 0o077`
   set at the very top of `main()`, mirroring systemd `UMask=0077`.
@@ -76,11 +79,12 @@ home dir itself, `config.toml`, `identity/*`, `hermod.db*`,
   permissive modes. Explicit operator action ⇒ silent repair OK.
 - `home_layout::ensure_dirs(home)` — daemon boot path. Strict
   fail-loud — refuses to chmod existing dirs (sshd `StrictModes`).
-- `home_layout::enforce(home)` — boot post-init check; refuses to
-  start on any `Secret` / `Directory` mode breach. `Public` and
-  `OperatorManaged` kinds are reported by `audit` but not enforced.
-- `home_layout::audit(home)` — non-fatal per-file report consumed by
-  `hermod doctor`.
+- `home_layout::enforce(home, storage_dsn, blob_dsn)` — boot post-init
+  check; refuses to start on any `Secret` / `Directory` mode breach.
+  `Public` and `OperatorManaged` kinds are reported by `audit` but not
+  enforced.
+- `home_layout::audit(home, storage_dsn, blob_dsn)` — non-fatal
+  per-file report consumed by `hermod doctor`.
 
 **No silent repair on the daemon side.** A mode breach is a fail-loud
 signal; auto-repair would mask intrusions. Operators chmod manually;

@@ -52,9 +52,9 @@ impl LocalFsBlobStore {
     /// scheme).
     ///
     /// Surfaced so the MCP layer can hand a real path to Claude's
-    /// `Read` tool. Future cloud backends won't have this method —
-    /// callers gate on `BlobStore::backend_kind()` (or a downcast) if
-    /// they need a path.
+    /// `Read` tool. Cloud backends carry no such inverse mapping;
+    /// callers downcast to `LocalFsBlobStore` when they need a path
+    /// and skip the inspection feature otherwise.
     pub fn location_to_path(&self, location: &str) -> Option<PathBuf> {
         let suffix = location.strip_prefix(URI_SCHEME)?;
         let (bucket, key) = suffix.split_once('/')?;

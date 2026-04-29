@@ -160,6 +160,44 @@ pub async fn open(dsn: &str) -> Result<Arc<dyn BlobStore>, BlobError> {
     }
 }
 
+/// Enumerate the on-disk artefacts this DSN's blob backend writes
+/// under the daemon's filesystem root. Used by `home_layout` to
+/// derive boot-time enforcement and `hermod doctor` audit from the
+/// same source the backend itself defines.
+///
+/// Backend declarations:
+///
+/// - `file:///root` → the root directory (Optional Directory: created
+///   on first put, may not exist at boot of a fresh install).
+/// - `memory`, `gcs`, `s3` → empty Vec; these backends carry no
+///   on-disk state under `$HERMOD_HOME`.
+///
+/// Errors only on a malformed or unsupported DSN; symmetric with
+/// [`open`]'s validation.
+pub fn local_files(dsn: &str) -> Result<Vec<crate::LocalFile>, BlobError> {
+    let parsed = url::Url::parse(dsn)
+        .map_err(|e| BlobError::Backend(format!("parse blob dsn {dsn:?}: {e}")))?;
+    match parsed.scheme() {
+        "file" => {
+            let root = parse_file_path(&parsed)?;
+            Ok(vec![crate::LocalFile::directory_optional(
+                "blob store directory",
+                root,
+            )])
+        }
+        "memory" => Ok(Vec::new()),
+        #[cfg(feature = "gcs")]
+        "gcs" => Ok(Vec::new()),
+        #[cfg(feature = "s3")]
+        "s3" => Ok(Vec::new()),
+        other => Err(BlobError::Backend(format!(
+            "unsupported blob scheme {other:?} (supported: file, memory{}{})",
+            if cfg!(feature = "gcs") { ", gcs" } else { "" },
+            if cfg!(feature = "s3") { ", s3" } else { "" },
+        ))),
+    }
+}
+
 /// Extract an absolute filesystem path from a `file:///abs/path` DSN.
 /// Rejects the two-slash form (`file://relative/path`) early so a
 /// misconfigured DSN surfaces as a clear error rather than silently

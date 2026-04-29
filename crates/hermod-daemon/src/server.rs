@@ -550,13 +550,9 @@ pub async fn serve(
                 let tls_for_ipc = tls.clone();
                 let token = bearer_token.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = crate::ipc_remote::serve_wss(
-                        addr,
-                        tls_for_ipc,
-                        token,
-                        dispatcher_for_ipc,
-                    )
-                    .await
+                    if let Err(e) =
+                        crate::ipc_remote::serve_wss(addr, tls_for_ipc, token, dispatcher_for_ipc)
+                            .await
                     {
                         tracing::error!(error = %e, "remote IPC (WSS) listener exited");
                     }

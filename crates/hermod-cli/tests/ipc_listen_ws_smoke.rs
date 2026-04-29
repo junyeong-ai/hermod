@@ -63,7 +63,10 @@ fn wait_for_socket(socket: &std::path::Path, timeout: Duration) {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    panic!("ipc socket {} not created within {timeout:?}", socket.display());
+    panic!(
+        "ipc socket {} not created within {timeout:?}",
+        socket.display()
+    );
 }
 
 struct PlainWsDaemon {
@@ -189,9 +192,7 @@ fn wrong_bearer_is_rejected_on_plain_ws() {
     // diagnostic. We don't pin the exact phrasing (it can evolve)
     // but the failure must be auth-shaped, not transport-shaped.
     assert!(
-        stderr.contains("401")
-            || stderr.contains("rejected")
-            || stderr.contains("unauthorized"),
+        stderr.contains("401") || stderr.contains("rejected") || stderr.contains("unauthorized"),
         "expected an auth-rejection diagnostic in stderr; got:\n{stderr}",
     );
 }

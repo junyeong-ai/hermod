@@ -111,8 +111,10 @@ a 1:1 namespace: `init`, `status`, `identity`, `doctor`, `bearer`
 ## hermod doctor
 
 `hermod doctor` is the operator's self-diagnostic. Output is driven by
-`hermod_daemon::home_layout::audit(home)` — adding a new file to
-`home_layout::spec` automatically adds a doctor row. Beyond the
+`hermod_daemon::home_layout::audit(home, storage_dsn, blob_dsn)` —
+adding a new daemon-owned file to `home_layout::spec` (or a backend-
+local file to the storage layer's `database_local_files` /
+`blob_store_local_files`) automatically adds a doctor row. Beyond the
 spec-driven file/mode audit, doctor also checks: identity loadable,
 TLS cert validity (FAIL on expired, warn under 30 days), daemon
 reachability, schema version, audit-chain integrity, peer count,

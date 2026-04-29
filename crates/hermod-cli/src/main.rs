@@ -96,7 +96,12 @@ struct Cli {
     ///     cert would break on every rotation.
     ///   * `none` — skip TLS validation. Strictly opt-in for tests /
     ///     known-LAN where MITM is not a concern.
-    #[arg(long, env = "HERMOD_REMOTE_PIN", default_value = "tofu", value_name = "MODE | SHA256")]
+    #[arg(
+        long,
+        env = "HERMOD_REMOTE_PIN",
+        default_value = "tofu",
+        value_name = "MODE | SHA256"
+    )]
     pin: pins::PinArg,
 
     #[command(subcommand)]
