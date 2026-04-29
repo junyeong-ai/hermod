@@ -179,28 +179,43 @@ The daemon presents its self-signed cert on `:7824`. Clients TOFU-pin
 the cert fingerprint at the application layer; the bearer token is the
 credential, the pin protects against MITM.
 
-Three modes (in priority order):
+Four modes, picked by `--pin <MODE | SHA256>`:
 
 ```sh
-# 1. Explicit pin (recommended for cross-network deployments).
-#    The fingerprint is printed by `hermod init` on the daemon host
-#    (`tls_fingerprint: aa:bb:…`), or by `hermod identity` after init.
+# 1. TOFU (default — no flags). First connect records the fingerprint
+#    to `$HERMOD_HOME/remote_pins.json`; later connects fail loud on
+#    mismatch. Right for self-signed federation peers and LAN.
+hermod --remote wss://my-daemon.example.com:7824/ status
+
+# 2. Explicit pin. The fingerprint is printed by `hermod init` on the
+#    daemon host (`tls_fingerprint: aa:bb:…`), or by `hermod identity`
+#    after init. Right for production federation where the pin is
+#    provisioned out-of-band.
 hermod --remote wss://my-daemon.example.com:7824/ \
        --pin aa:bb:cc:…:ff status
 
-# 2. TOFU (default — no flags). First connect records the fingerprint
-#    to `$HERMOD_HOME/remote_pins.json`; later connects fail loud on
-#    mismatch.
-hermod --remote wss://my-daemon.example.com:7824/ status
+# 3. Public CA. Validate the daemon's chain via the OS root CA store.
+#    Right when a public-CA-trusted reverse proxy fronts the daemon
+#    (Cloud Run, Google IAP, Cloudflare Access, ALB+Cognito) — pinning
+#    the LB's cert breaks on every rotation; system-CA validation is
+#    what browsers do.
+hermod --remote wss://hermod.example.com/ --pin public-ca status
 
-# 3. Disabled. Strictly opt-in for known-LAN / test deployments.
-hermod --remote wss://daemon.local:7824/ --insecure-no-pin status
+# 4. Disabled. Strictly opt-in for known-LAN / test deployments where
+#    MITM is not a concern.
+hermod --remote wss://daemon.local:7824/ --pin none status
 ```
 
 If you'd rather use a publicly trusted cert (browser compatibility,
 middlebox-friendliness), terminate TLS at a reverse proxy (caddy,
-nginx, traefik) and proxy plain WS to `hermodd` listening on
-`127.0.0.1:7824` — the bearer token still authenticates each request.
+nginx, traefik, Cloud Run, IAP, …) and either:
+
+* set `[daemon] ipc_listen_ws = "0.0.0.0:7824"` (plaintext WS — the
+  proxy carries TLS) and connect with `--pin public-ca`, or
+* keep `ipc_listen_wss = "0.0.0.0:7824"` (TLS at hermod) and connect
+  with `--pin <sha256>` of the daemon's self-signed cert.
+
+The bearer token still authenticates each request in both shapes.
 
 ### Behind an SSO reverse proxy (IAP / oauth2-proxy / Cloudflare Access)
 

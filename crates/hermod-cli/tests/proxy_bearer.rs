@@ -202,8 +202,8 @@ fn invocations(counter: &std::path::Path) -> usize {
 
 /// All four tests share the same setup: a `--bearer-file` for the
 /// daemon-layer bearer, an ephemeral mock listening on a free port,
-/// and `--insecure-no-pin` to disable TLS pinning (we use plain
-/// `ws://` since the dual-header behaviour is transport-agnostic).
+/// and `--pin none` to disable TLS pinning (we use plain `ws://`
+/// since the dual-header behaviour is transport-agnostic).
 struct Fixture {
     home: tempfile::TempDir,
     daemon_bearer_file: PathBuf,
@@ -246,7 +246,8 @@ async fn dual_auth_success() {
             .args([
                 "--remote",
                 &fx.url,
-                "--insecure-no-pin",
+                "--pin",
+                "none",
                 "--bearer-file",
                 fx.daemon_bearer_file.to_str().unwrap(),
                 "--proxy-bearer-file",
@@ -287,7 +288,8 @@ async fn proxy_token_refresh_after_401() {
             .args([
                 "--remote",
                 &url,
-                "--insecure-no-pin",
+                "--pin",
+                "none",
                 "--bearer-file",
                 daemon_file.to_str().unwrap(),
                 "--proxy-bearer-command",
@@ -337,7 +339,8 @@ async fn proxy_token_persistent_failure_is_fatal() {
             .args([
                 "--remote",
                 &url,
-                "--insecure-no-pin",
+                "--pin",
+                "none",
                 "--bearer-file",
                 daemon_file.to_str().unwrap(),
                 "--proxy-bearer-command",
@@ -385,7 +388,8 @@ async fn neither_token_appears_in_stderr() {
             .args([
                 "--remote",
                 &fx.url,
-                "--insecure-no-pin",
+                "--pin",
+                "none",
                 "--bearer-file",
                 fx.daemon_bearer_file.to_str().unwrap(),
                 "--proxy-bearer-file",

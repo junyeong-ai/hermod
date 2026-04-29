@@ -1052,6 +1052,7 @@ dependencies = [
  "hermod-transport",
  "hex",
  "rustls",
+ "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_bytes",

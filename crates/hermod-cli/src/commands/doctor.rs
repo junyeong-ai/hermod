@@ -1,5 +1,7 @@
 use anyhow::Result;
+use hermod_daemon::config::Config;
 use hermod_daemon::home_layout::{HomeFileKind, LayoutError, Presence};
+use hermod_daemon::paths;
 use std::path::Path;
 
 use crate::client::ClientTarget;
@@ -29,7 +31,14 @@ pub async fn run(home: &Path, target: &ClientTarget) -> Result<()> {
     // `home_layout::spec`. Adding a new file there automatically adds
     // a row here — boot enforcement, doctor output, and chmod hints
     // stay in sync via one declarative list.
-    for (file, finding) in hermod_daemon::home_layout::audit(home) {
+    //
+    // Audit is storage-backend-aware: a Postgres-backed daemon has no
+    // local `hermod.db`, so the spec drops the sqlite triplet. Resolve
+    // the same DSN the daemon will see at boot.
+    let storage_dsn = Config::load_or_default(None, home)
+        .map(|c| paths::expand_dsn(&c.storage.dsn, home))
+        .unwrap_or_else(|_| format!("sqlite://{}/hermod.db", home.display()));
+    for (file, finding) in hermod_daemon::home_layout::audit(home, &storage_dsn) {
         match finding {
             Ok(()) => report.pass(&format!("{} ({:o})", file.label, file.required_mode)),
             Err(LayoutError::Missing { .. }) if file.presence == Presence::Optional => {

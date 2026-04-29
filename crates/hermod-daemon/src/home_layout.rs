@@ -201,8 +201,17 @@ impl HomeFile {
 /// Adding a new file ⇒ one new entry here; boot enforcement,
 /// `hermod doctor` audit, and `chmod` hints all stay in sync
 /// automatically.
-pub fn spec(home: &Path) -> Vec<HomeFile> {
-    vec![
+///
+/// The layout is **storage-backend-aware**. The sqlite triplet
+/// (`hermod.db` + `-wal` + `-shm`) is included only when the resolved
+/// `storage_dsn` selects the SQLite backend; a Postgres-backed daemon
+/// (`postgres://…`) carries no local database file, and a Postgres
+/// boot must not be blocked by an absent SQLite sentinel. The
+/// `storage_dsn` should already have `$HERMOD_HOME` expanded
+/// (via [`crate::paths::expand_dsn`]) so the scheme prefix is the
+/// authoritative selector.
+pub fn spec(home: &Path, storage_dsn: &str) -> Vec<HomeFile> {
+    let mut files = vec![
         // $HERMOD_HOME itself.
         HomeFile::dir_required("home directory", home.to_path_buf()),
         // Operator-managed config.
@@ -213,16 +222,60 @@ pub fn spec(home: &Path) -> Vec<HomeFile> {
         HomeFile::secret("TLS private key", tls_key_path(home)),
         HomeFile::secret("bearer token", bearer_token_path(home)),
         HomeFile::public("TLS certificate", tls_cert_path(home), 0o644),
-        // Storage layer — SQLite database + WAL/SHM frames.
-        HomeFile::secret("hermod database", home.join("hermod.db")),
-        HomeFile::secret_optional("hermod database WAL", home.join("hermod.db-wal")),
-        HomeFile::secret_optional("hermod database SHM", home.join("hermod.db-shm")),
-        // Blob store (LocalFs backend; cloud backends have no on-disk
-        // root and skip naturally via `Optional`).
-        HomeFile::dir_optional("blob store directory", home.join("blob-store")),
-        // Archived state (created by `hermod init --force`).
-        HomeFile::dir_optional("archive directory", home.join("archive")),
-    ]
+    ];
+    if storage_dsn.starts_with("sqlite:") {
+        let sqlite_path = sqlite_path_from_dsn(home, storage_dsn);
+        files.push(HomeFile::secret("hermod database", sqlite_path.clone()));
+        files.push(HomeFile::secret_optional(
+            "hermod database WAL",
+            with_extension_suffix(&sqlite_path, "-wal"),
+        ));
+        files.push(HomeFile::secret_optional(
+            "hermod database SHM",
+            with_extension_suffix(&sqlite_path, "-shm"),
+        ));
+    }
+    // Blob store (LocalFs backend; cloud backends have no on-disk
+    // root and skip naturally via `Optional`).
+    files.push(HomeFile::dir_optional(
+        "blob store directory",
+        home.join("blob-store"),
+    ));
+    // Archived state (created by `hermod init --force`).
+    files.push(HomeFile::dir_optional(
+        "archive directory",
+        home.join("archive"),
+    ));
+    files
+}
+
+/// Extract the on-disk path from a `sqlite:` DSN. Recognises
+/// `sqlite:///abs/path`, `sqlite://./relative`, `sqlite:rel`, and the
+/// `?mode=...` query suffix sqlx accepts. Falls back to the canonical
+/// `$HERMOD_HOME/hermod.db` if the path can't be parsed — keeps the
+/// spec list non-empty for the doctor's audit even on malformed DSNs.
+fn sqlite_path_from_dsn(home: &Path, dsn: &str) -> PathBuf {
+    let after_scheme = dsn.strip_prefix("sqlite:").unwrap_or(dsn);
+    // Strip any `?…` query string sqlx tolerates (e.g.
+    // `sqlite:///x.db?mode=rwc`).
+    let no_query = after_scheme.split('?').next().unwrap_or(after_scheme);
+    // `sqlite:///abs/path` → `//abs/path` (one `/` already eaten by
+    // the scheme strip), then strip the empty authority.
+    let path_str = no_query.strip_prefix("//").unwrap_or(no_query);
+    if path_str.is_empty() {
+        return home.join("hermod.db");
+    }
+    PathBuf::from(path_str)
+}
+
+/// SQLite's `-wal` / `-shm` companions are produced by appending the
+/// suffix to the *full* db path, not by replacing the extension. A db
+/// at `/var/lib/hermod/hermod.db` has WAL at `…/hermod.db-wal`, not
+/// `…/hermod-wal`. `Path::with_extension` would do the latter.
+fn with_extension_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(suffix);
+    PathBuf::from(s)
 }
 
 /// Create `$HERMOD_HOME` and `identity/` with their required modes if
@@ -300,8 +353,8 @@ pub fn prepare_dirs(home: &Path) -> Result<(), LayoutError> {
 /// `OperatorManaged` and `Public` entries are not enforced — see
 /// [`audit`] for the doctor-visible report that includes them.
 #[cfg(unix)]
-pub fn enforce(home: &Path) -> Result<(), LayoutError> {
-    for file in spec(home) {
+pub fn enforce(home: &Path, storage_dsn: &str) -> Result<(), LayoutError> {
+    for file in spec(home, storage_dsn) {
         match file.kind {
             HomeFileKind::Directory | HomeFileKind::Secret => {}
             HomeFileKind::Public | HomeFileKind::OperatorManaged => continue,
@@ -320,8 +373,8 @@ pub fn enforce(home: &Path) -> Result<(), LayoutError> {
 /// `OperatorManaged` files. The doctor renders the result without
 /// exiting on non-fatal findings.
 #[cfg(unix)]
-pub fn audit(home: &Path) -> Vec<(HomeFile, Result<(), LayoutError>)> {
-    spec(home)
+pub fn audit(home: &Path, storage_dsn: &str) -> Vec<(HomeFile, Result<(), LayoutError>)> {
+    spec(home, storage_dsn)
         .into_iter()
         .map(|file| {
             let result = check_one(&file);
@@ -384,13 +437,16 @@ pub fn prepare_dirs(home: &Path) -> Result<(), LayoutError> {
 }
 
 #[cfg(not(unix))]
-pub fn enforce(_home: &Path) -> Result<(), LayoutError> {
+pub fn enforce(_home: &Path, _storage_dsn: &str) -> Result<(), LayoutError> {
     Ok(())
 }
 
 #[cfg(not(unix))]
-pub fn audit(home: &Path) -> Vec<(HomeFile, Result<(), LayoutError>)> {
-    spec(home).into_iter().map(|f| (f, Ok(()))).collect()
+pub fn audit(home: &Path, storage_dsn: &str) -> Vec<(HomeFile, Result<(), LayoutError>)> {
+    spec(home, storage_dsn)
+        .into_iter()
+        .map(|f| (f, Ok(())))
+        .collect()
 }
 
 #[cfg(all(test, unix))]
@@ -412,11 +468,18 @@ mod tests {
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
     }
 
+    /// Default sqlite DSN form used by every test that doesn't care
+    /// about the backend axis. Mirrors `defaults::storage_dsn` after
+    /// `paths::expand_dsn` substitutes `$HERMOD_HOME`.
+    fn sqlite_dsn(home: &Path) -> String {
+        format!("sqlite://{}/hermod.db", home.display())
+    }
+
     /// Bootstrap a tempdir as a fully-conformant Hermod home — every
     /// `Required` spec'd file present with its required mode and every
     /// `Optional` directory created.
     fn populate_conformant(home: &Path) {
-        for file in spec(home) {
+        for file in spec(home, &sqlite_dsn(home)) {
             match (file.kind, file.presence) {
                 (HomeFileKind::Directory, _) => make_dir(&file.path, file.required_mode),
                 (_, Presence::Required) => write_file(&file.path, file.required_mode),
@@ -497,7 +560,7 @@ mod tests {
     fn enforce_passes_on_conformant_layout() {
         let tmp = TempDir::new().unwrap();
         populate_conformant(tmp.path());
-        enforce(tmp.path()).unwrap();
+        enforce(tmp.path(), &sqlite_dsn(tmp.path())).unwrap();
     }
 
     #[test]
@@ -506,7 +569,7 @@ mod tests {
         populate_conformant(tmp.path());
         let db = tmp.path().join("hermod.db");
         fs::set_permissions(&db, fs::Permissions::from_mode(0o644)).unwrap();
-        match enforce(tmp.path()) {
+        match enforce(tmp.path(), &sqlite_dsn(tmp.path())) {
             Err(LayoutError::ModeMismatch {
                 label,
                 observed,
@@ -527,7 +590,7 @@ mod tests {
         populate_conformant(tmp.path());
         let bs = tmp.path().join("blob-store");
         fs::set_permissions(&bs, fs::Permissions::from_mode(0o755)).unwrap();
-        match enforce(tmp.path()) {
+        match enforce(tmp.path(), &sqlite_dsn(tmp.path())) {
             Err(LayoutError::ModeMismatch {
                 label,
                 observed,
@@ -548,7 +611,7 @@ mod tests {
         populate_conformant(tmp.path());
         // hermod.db-wal is Optional — its absence should not fail.
         assert!(!tmp.path().join("hermod.db-wal").exists());
-        enforce(tmp.path()).unwrap();
+        enforce(tmp.path(), &sqlite_dsn(tmp.path())).unwrap();
     }
 
     #[test]
@@ -556,7 +619,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         populate_conformant(tmp.path());
         fs::remove_file(tmp.path().join("hermod.db")).unwrap();
-        match enforce(tmp.path()) {
+        match enforce(tmp.path(), &sqlite_dsn(tmp.path())) {
             Err(LayoutError::Missing { label, .. }) => {
                 assert_eq!(label, "hermod database");
             }
@@ -573,9 +636,9 @@ mod tests {
         fs::set_permissions(&cert, fs::Permissions::from_mode(0o600)).unwrap();
         // config.toml: OperatorManaged — wrong mode is OK at boot.
         write_file(&tmp.path().join("config.toml"), 0o644);
-        enforce(tmp.path()).unwrap();
+        enforce(tmp.path(), &sqlite_dsn(tmp.path())).unwrap();
         // …but audit() still reports the discrepancies.
-        let findings = audit(tmp.path());
+        let findings = audit(tmp.path(), &sqlite_dsn(tmp.path()));
         let cert_finding = findings
             .iter()
             .find(|(f, _)| f.label == "TLS certificate")
@@ -598,8 +661,72 @@ mod tests {
     fn audit_returns_one_entry_per_spec() {
         let tmp = TempDir::new().unwrap();
         populate_conformant(tmp.path());
-        let findings = audit(tmp.path());
-        assert_eq!(findings.len(), spec(tmp.path()).len());
+        let dsn = sqlite_dsn(tmp.path());
+        let findings = audit(tmp.path(), &dsn);
+        assert_eq!(findings.len(), spec(tmp.path(), &dsn).len());
+    }
+
+    #[test]
+    fn spec_includes_sqlite_triplet_for_sqlite_dsn() {
+        let tmp = TempDir::new().unwrap();
+        let labels: Vec<&str> = spec(tmp.path(), &sqlite_dsn(tmp.path()))
+            .iter()
+            .map(|f| f.label)
+            .collect();
+        assert!(labels.contains(&"hermod database"));
+        assert!(labels.contains(&"hermod database WAL"));
+        assert!(labels.contains(&"hermod database SHM"));
+    }
+
+    #[test]
+    fn spec_omits_sqlite_triplet_for_postgres_dsn() {
+        let tmp = TempDir::new().unwrap();
+        let labels: Vec<&str> = spec(tmp.path(), "postgres://hermod@db/hermod")
+            .iter()
+            .map(|f| f.label)
+            .collect();
+        assert!(!labels.contains(&"hermod database"));
+        assert!(!labels.contains(&"hermod database WAL"));
+        assert!(!labels.contains(&"hermod database SHM"));
+    }
+
+    /// A Postgres-backed daemon must boot cleanly even when no
+    /// `$HERMOD_HOME/hermod.db` exists. This is the failure that
+    /// motivated the storage-aware spec.
+    #[test]
+    fn enforce_passes_postgres_layout_without_sqlite_files() {
+        let tmp = TempDir::new().unwrap();
+        // Populate every spec'd file *except* the sqlite triplet —
+        // mirrors what a Postgres-backed deployment looks like at boot.
+        for file in spec(tmp.path(), "postgres://hermod@db/hermod") {
+            match (file.kind, file.presence) {
+                (HomeFileKind::Directory, _) => make_dir(&file.path, file.required_mode),
+                (_, Presence::Required) => write_file(&file.path, file.required_mode),
+                (_, Presence::Optional) => {}
+            }
+        }
+        // Crucially: hermod.db is absent — and enforce() must not care.
+        assert!(!tmp.path().join("hermod.db").exists());
+        enforce(tmp.path(), "postgres://hermod@db/hermod").unwrap();
+    }
+
+    #[test]
+    fn sqlite_path_from_dsn_handles_common_forms() {
+        // Triple-slash absolute path (the canonical form sqlx emits).
+        assert_eq!(
+            sqlite_path_from_dsn(Path::new("/h"), "sqlite:////var/lib/hermod/hermod.db"),
+            PathBuf::from("/var/lib/hermod/hermod.db")
+        );
+        // No authority — bare path.
+        assert_eq!(
+            sqlite_path_from_dsn(Path::new("/h"), "sqlite:relative.db"),
+            PathBuf::from("relative.db")
+        );
+        // Query-string suffix (sqlx accepts `?mode=rwc` etc.).
+        assert_eq!(
+            sqlite_path_from_dsn(Path::new("/h"), "sqlite:////tmp/x.db?mode=rwc"),
+            PathBuf::from("/tmp/x.db")
+        );
     }
 
     #[test]

@@ -80,18 +80,24 @@ struct Cli {
     #[arg(long, env = "HERMOD_PROXY_BEARER_COMMAND", requires = "remote")]
     proxy_bearer_command: Option<String>,
 
-    /// SHA-256 fingerprint of the remote daemon's TLS cert (any case;
-    /// colons optional). When set, the connection fails loud if the
-    /// presented cert doesn't match. When unset, the client TOFU-pins
-    /// to `$HERMOD_HOME/remote_pins.json` on first connect.
-    #[arg(long, env = "HERMOD_REMOTE_PIN")]
-    pin: Option<String>,
-
-    /// Skip TLS pinning entirely. Strictly opt-in for tests / known-LAN
-    /// deployments where MITM is not a concern. Mutually exclusive with
-    /// `--pin`.
-    #[arg(long, default_value_t = false)]
-    insecure_no_pin: bool,
+    /// TLS verification policy for the remote daemon's cert.
+    /// One of:
+    ///   * `tofu` (default) — record the daemon's cert SHA-256 to
+    ///     `$HERMOD_HOME/remote_pins.json` on first connect; fail loud
+    ///     on later mismatch. Right for self-signed / federation /
+    ///     LAN.
+    ///   * `<sha256>` — explicit fingerprint pin (any case; colons
+    ///     optional). Right for production federation where the pin
+    ///     is provisioned out-of-band.
+    ///   * `public-ca` — validate the daemon's chain via the OS root
+    ///     CA store. Right when a public-CA-trusted reverse proxy
+    ///     (Cloud Run, Google IAP, Cloudflare Access, ALB+Cognito)
+    ///     terminates TLS in front of the daemon — pinning the LB's
+    ///     cert would break on every rotation.
+    ///   * `none` — skip TLS validation. Strictly opt-in for tests /
+    ///     known-LAN where MITM is not a concern.
+    #[arg(long, env = "HERMOD_REMOTE_PIN", default_value = "tofu", value_name = "MODE | SHA256")]
+    pin: pins::PinArg,
 
     #[command(subcommand)]
     command: Command,
@@ -510,27 +516,22 @@ fn build_pin_policy(
     url: &url::Url,
     home: &std::path::Path,
 ) -> anyhow::Result<pins::PinPolicy> {
-    if cli.insecure_no_pin && cli.pin.is_some() {
-        return Err(anyhow::anyhow!(
-            "--insecure-no-pin and --pin are mutually exclusive"
-        ));
+    match &cli.pin {
+        pins::PinArg::None => Ok(pins::PinPolicy::InsecureNoVerify),
+        pins::PinArg::PublicCa => Ok(pins::PinPolicy::PublicCa),
+        pins::PinArg::Fingerprint(fp) => Ok(pins::PinPolicy::Explicit(fp.clone())),
+        pins::PinArg::Tofu => {
+            let host = url
+                .host_str()
+                .ok_or_else(|| anyhow::anyhow!("--remote URL missing host"))?;
+            let port = url
+                .port_or_known_default()
+                .ok_or_else(|| anyhow::anyhow!("--remote URL missing port"))?;
+            let host_port = format!("{host}:{port}");
+            Ok(pins::PinPolicy::Tofu {
+                store: pins::RemotePinStore::at_home(home),
+                host_port,
+            })
+        }
     }
-    if cli.insecure_no_pin {
-        return Ok(pins::PinPolicy::InsecureNoVerify);
-    }
-    if let Some(raw) = &cli.pin {
-        let normalized = pins::PinPolicy::normalize_fingerprint(raw)?;
-        return Ok(pins::PinPolicy::Explicit(normalized));
-    }
-    let host = url
-        .host_str()
-        .ok_or_else(|| anyhow::anyhow!("--remote URL missing host"))?;
-    let port = url
-        .port_or_known_default()
-        .ok_or_else(|| anyhow::anyhow!("--remote URL missing port"))?;
-    let host_port = format!("{host}:{port}");
-    Ok(pins::PinPolicy::Tofu {
-        store: pins::RemotePinStore::at_home(home),
-        host_port,
-    })
 }

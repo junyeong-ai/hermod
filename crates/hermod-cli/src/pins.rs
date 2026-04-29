@@ -1,13 +1,25 @@
-//! Persistent TOFU pin store for Remote IPC TLS fingerprints.
+//! TLS verification policy for Remote IPC clients.
 //!
-//! Operators who run `hermod --remote wss://host:port/ …` get TOFU semantics
-//! by default: the first connection records the daemon's TLS fingerprint to
-//! `$HERMOD_HOME/remote_pins.json`; subsequent connections fail loud if the
-//! presented cert no longer matches.
+//! Hermod authenticates the *peer identity* via the bearer token —
+//! TLS only provides confidentiality and a way to recognise the same
+//! daemon across reconnects. `--pin <MODE>` picks how the TLS chain is
+//! validated:
 //!
-//! The on-disk format is a small JSON map keyed by `host:port` → SHA-256
-//! fingerprint (lowercase, colon-separated, exactly the format
-//! `hermod-crypto::tls::sha256_fingerprint` produces).
+//! | mode | use case |
+//! |------|----------|
+//! | `tofu` (default) | self-signed daemon, federation peer-to-peer, LAN |
+//! | `<sha256>` | explicit fingerprint pin (production federation, audited) |
+//! | `public-ca` | broker behind a public-CA-trusted reverse proxy (Cloud Run, IAP, Cloudflare) |
+//! | `none` | tests / fully-trusted LAN; skip TLS validation |
+//!
+//! TOFU records the first-seen fingerprint to
+//! `$HERMOD_HOME/remote_pins.json` (a small JSON map keyed by
+//! `host:port` → SHA-256 fingerprint, lowercase colon-separated, matching
+//! `hermod-crypto::tls::sha256_fingerprint`). Subsequent connects fail
+//! loud on mismatch. `public-ca` skips the TOFU store entirely and
+//! delegates chain validation to the OS trust store via
+//! `rustls-native-certs` (matching reqwest's `rustls-tls-native-roots`
+//! used elsewhere in this binary).
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -78,8 +90,55 @@ pub enum PinPolicy {
         store: RemotePinStore,
         host_port: String,
     },
-    /// Skip pinning entirely. Strictly opt-in for testing or known-LAN.
+    /// Validate the daemon's TLS chain via the OS trust store (system
+    /// root CAs). The right answer when a public-CA-trusted reverse
+    /// proxy (Cloud Run, IAP, Cloudflare Access, ALB+Cognito) sits in
+    /// front of the daemon and presents the user-facing cert — pinning
+    /// the LB's cert fingerprint would break on every cert rotation.
+    /// Hostname is taken from the `--remote` URL and validated against
+    /// the cert's SAN list, matching browser semantics.
+    PublicCa,
+    /// Skip TLS validation entirely. Strictly opt-in for tests / known-LAN.
     InsecureNoVerify,
+}
+
+/// CLI argument shape for `--pin`. `clap` parses one of the textual
+/// modes (`tofu` | `public-ca` | `none`) or a raw SHA-256 fingerprint.
+/// The runtime [`PinPolicy`] needs the resolved `$HERMOD_HOME` and the
+/// remote URL's `host:port` (for the TOFU store), so the conversion
+/// happens in `build_pin_policy` rather than here.
+#[derive(Debug, Clone)]
+pub enum PinArg {
+    /// Default — record-on-first-use, fail-loud-on-mismatch.
+    Tofu,
+    /// Validate via the OS root CA store.
+    PublicCa,
+    /// Skip TLS validation.
+    None,
+    /// Explicit SHA-256 fingerprint (lowercase, colon-separated form
+    /// produced by [`PinPolicy::normalize_fingerprint`]).
+    Fingerprint(String),
+}
+
+impl std::str::FromStr for PinArg {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "tofu" => Ok(Self::Tofu),
+            "public-ca" => Ok(Self::PublicCa),
+            "none" => Ok(Self::None),
+            other => PinPolicy::normalize_fingerprint(other)
+                .map(Self::Fingerprint)
+                .map_err(|e| {
+                    anyhow!(
+                        "--pin must be one of `tofu`, `public-ca`, `none`, or a SHA-256 \
+                         hex fingerprint (64 hex chars, optional `:` separators); got {other:?} \
+                         ({e})"
+                    )
+                }),
+        }
+    }
 }
 
 impl PinPolicy {
@@ -131,6 +190,29 @@ mod tests {
     #[test]
     fn normalize_rejects_short_fp() {
         assert!(PinPolicy::normalize_fingerprint("abcd").is_err());
+    }
+
+    #[test]
+    fn pin_arg_parses_modes_and_fingerprint() {
+        use std::str::FromStr;
+        assert!(matches!(PinArg::from_str("tofu").unwrap(), PinArg::Tofu));
+        assert!(matches!(
+            PinArg::from_str("public-ca").unwrap(),
+            PinArg::PublicCa
+        ));
+        assert!(matches!(PinArg::from_str("none").unwrap(), PinArg::None));
+        let fp = "AB".to_string() + &"00".repeat(31);
+        match PinArg::from_str(&fp).unwrap() {
+            PinArg::Fingerprint(s) => assert!(s.starts_with("ab:00:")),
+            other => panic!("expected Fingerprint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pin_arg_rejects_garbage() {
+        use std::str::FromStr;
+        assert!(PinArg::from_str("maybe").is_err());
+        assert!(PinArg::from_str("abc").is_err()); // too short for fingerprint
     }
 
     #[test]

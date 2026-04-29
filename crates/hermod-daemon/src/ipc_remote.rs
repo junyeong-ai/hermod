@@ -1,12 +1,25 @@
-//! Remote IPC over WSS + Bearer auth.
+//! Remote IPC over WebSocket + Bearer auth.
 //!
-//! Same JSON-RPC dispatch the Unix socket serves, exposed over a WebSocket
-//! channel inside TLS. Auth: `Authorization: Bearer <bearer_token>` on the
-//! handshake. The token is `$HERMOD_HOME/identity/bearer_token` (mode 0600,
-//! generated on `hermod init`).
+//! Same JSON-RPC dispatch the Unix socket serves, exposed over a
+//! WebSocket channel. Auth: `Authorization: Bearer <bearer_token>` on
+//! the handshake. The token is `$HERMOD_HOME/identity/bearer_token`
+//! (mode 0600, generated on `hermod init`).
 //!
-//! Reuses the daemon's existing TLS material (`identity/tls.crt|key`).
-//! Clients TOFU-pin the cert fingerprint just like federation peers do.
+//! Two listener flavours, picked by config:
+//!
+//! - [`serve_wss`] — TLS terminated *at the daemon*. Reuses the
+//!   daemon's TLS material (`identity/tls.crt|key`); clients TOFU-pin
+//!   the cert fingerprint just like federation peers do.
+//!   `daemon.ipc_listen_wss = "0.0.0.0:7824"`.
+//! - [`serve_ws`] — plaintext WebSocket, expects an upstream reverse
+//!   proxy (Cloud Run, Google IAP, oauth2-proxy, Cloudflare Access,
+//!   ALB+Cognito, k8s ingress) to terminate TLS in front of the
+//!   daemon. The bearer token still gates auth — TLS termination at
+//!   the proxy authenticates the *transport*, not the *client*.
+//!   `daemon.ipc_listen_ws = "0.0.0.0:7824"`.
+//!
+//! The two are mutually exclusive; the config layer rejects both
+//! being set (see [`crate::config::Config::validate`]).
 
 use crate::dispatcher::Dispatcher;
 use anyhow::{Context, Result, anyhow};
@@ -18,6 +31,7 @@ use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::tungstenite::Message;
@@ -35,7 +49,10 @@ const EXPECTED_BEARER_PREFIX: &str = "Bearer ";
 /// enough that a misbehaving client can't pin the daemon's memory.
 const MAX_REMOTE_IPC_BYTES: usize = 1024 * 1024;
 
-pub async fn serve(
+/// TLS-at-the-daemon listener. Use when the daemon is reachable over
+/// the network without a fronting reverse proxy (federation peers
+/// connecting directly, internal LAN, …).
+pub async fn serve_wss(
     addr: SocketAddr,
     tls: TlsMaterial,
     bearer_token: Arc<SecretString>,
@@ -46,6 +63,60 @@ pub async fn serve(
     let local = listener.local_addr()?;
     info!(addr = %local, "remote IPC (WSS+Bearer) listener up");
 
+    accept_loop(listener, bearer_token, dispatcher, move |sock, peer, t, d| {
+        let acceptor = acceptor.clone();
+        Box::pin(async move {
+            let stream = acceptor
+                .accept(sock)
+                .await
+                .context("TLS handshake")?;
+            handshake_and_serve(stream, peer, t, d).await
+        })
+    })
+    .await
+}
+
+/// Plaintext-at-the-daemon listener. Use when an upstream L7 reverse
+/// proxy (Cloud Run, Google IAP, oauth2-proxy, Cloudflare Access,
+/// ALB+Cognito, k8s ingress) terminates TLS and forwards plain
+/// HTTP/HTTP2 to the daemon. The bearer (and optional
+/// proxy-bearer-via-`Proxy-Authorization`) carries the auth weight;
+/// the proxy guarantees confidentiality.
+pub async fn serve_ws(
+    addr: SocketAddr,
+    bearer_token: Arc<SecretString>,
+    dispatcher: Dispatcher,
+) -> Result<()> {
+    let listener = TcpListener::bind(addr).await?;
+    let local = listener.local_addr()?;
+    info!(addr = %local, "remote IPC (WS+Bearer, TLS-upstream) listener up");
+
+    accept_loop(listener, bearer_token, dispatcher, |sock, peer, t, d| {
+        Box::pin(async move { handshake_and_serve(sock, peer, t, d).await })
+    })
+    .await
+}
+
+/// Shared accept loop — the per-connection wrap differs only in
+/// whether a TLS handshake runs before the WebSocket handshake.
+async fn accept_loop<F>(
+    listener: TcpListener,
+    bearer_token: Arc<SecretString>,
+    dispatcher: Dispatcher,
+    wrap: F,
+) -> Result<()>
+where
+    F: Fn(
+            tokio::net::TcpStream,
+            SocketAddr,
+            Arc<SecretString>,
+            Dispatcher,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
     loop {
         let (sock, peer) = match listener.accept().await {
             Ok(p) => p,
@@ -55,11 +126,11 @@ pub async fn serve(
                 continue;
             }
         };
-        let acceptor = acceptor.clone();
         let token = bearer_token.clone();
         let dispatcher = dispatcher.clone();
+        let wrap = wrap.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(sock, peer, acceptor, token, dispatcher).await {
+            if let Err(e) = wrap(sock, peer, token, dispatcher).await {
                 debug!(peer = %peer, error = %e, "remote IPC connection ended");
             }
         });
@@ -81,18 +152,23 @@ fn build_tls_acceptor(tls: &TlsMaterial) -> Result<TlsAcceptor> {
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
+/// Stream-generic handshake + RPC loop. The stream is either a raw
+/// `TcpStream` (plaintext mode) or a `TlsStream<TcpStream>` (TLS-at-
+/// daemon mode) — the WebSocket handshake plus auth callback plus
+/// per-frame JSON-RPC dispatch are identical in either case.
 // `Result<HsResponse, ErrorResponse>` is the fixed signature
 // `accept_hdr_async` requires from its callback — the Err variant carries an
 // `http::Response`, which is heavyweight by design. Allowed locally.
 #[allow(clippy::result_large_err)]
-async fn handle_connection(
-    sock: tokio::net::TcpStream,
+async fn handshake_and_serve<S>(
+    stream: S,
     peer: SocketAddr,
-    acceptor: TlsAcceptor,
     expected_token: Arc<SecretString>,
     dispatcher: Dispatcher,
-) -> Result<()> {
-    let tls = acceptor.accept(sock).await?;
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     // Capture the auth header during the WS handshake. accept_hdr_async lets
     // us inspect the upgrade request before completing the handshake.
     let auth_ok = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -104,7 +180,7 @@ async fn handle_connection(
         .max_frame_size(Some(MAX_REMOTE_IPC_BYTES));
 
     let ws = tokio_tungstenite::accept_hdr_async_with_config(
-        tls,
+        stream,
         move |req: &HsRequest, resp: HsResponse| -> Result<HsResponse, ErrorResponse> {
             let header = req
                 .headers()

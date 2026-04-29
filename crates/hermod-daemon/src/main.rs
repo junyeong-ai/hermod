@@ -124,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
     // now exists with its canonical mode — umask 0o077 governed all
     // create()s, atomic writers chmodded explicitly. Fail loud if
     // anything was tampered between creation and now.
-    home_layout::enforce(&home).context("home layout")?;
+    home_layout::enforce(&home, &storage_dsn).context("home layout")?;
 
     let audit_file_path = config
         .audit

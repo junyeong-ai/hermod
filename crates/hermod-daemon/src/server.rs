@@ -535,9 +535,14 @@ pub async fn serve(
         janitor.run(janitor_shutdown_rx).await;
     });
 
-    // Optional remote IPC over WSS+Bearer. Lets `hermod --remote …` and
-    // `hermod mcp --remote …` connect to this daemon over the network with
-    // the same JSON-RPC surface the local Unix socket serves.
+    // Optional remote IPC over WebSocket+Bearer. Lets `hermod --remote …`
+    // and `hermod mcp --remote …` connect to this daemon over the network
+    // with the same JSON-RPC surface the local Unix socket serves. Two
+    // mutually-exclusive flavours (config layer enforces exclusivity):
+    //   * `ipc_listen_wss` — TLS terminated at the daemon, reuses the
+    //     daemon's TLS material. Federation + LAN deployments.
+    //   * `ipc_listen_ws`  — plaintext, expects an upstream reverse
+    //     proxy (Cloud Run, IAP, oauth2-proxy, …) to terminate TLS.
     if let Some(addr_str) = &config.daemon.ipc_listen_wss {
         match addr_str.parse::<std::net::SocketAddr>() {
             Ok(addr) => {
@@ -545,15 +550,37 @@ pub async fn serve(
                 let tls_for_ipc = tls.clone();
                 let token = bearer_token.clone();
                 tokio::spawn(async move {
-                    if let Err(e) =
-                        crate::ipc_remote::serve(addr, tls_for_ipc, token, dispatcher_for_ipc).await
+                    if let Err(e) = crate::ipc_remote::serve_wss(
+                        addr,
+                        tls_for_ipc,
+                        token,
+                        dispatcher_for_ipc,
+                    )
+                    .await
                     {
-                        tracing::error!(error = %e, "remote IPC listener exited");
+                        tracing::error!(error = %e, "remote IPC (WSS) listener exited");
                     }
                 });
             }
             Err(e) => {
                 tracing::warn!(addr = %addr_str, error = %e, "invalid ipc_listen_wss");
+            }
+        }
+    } else if let Some(addr_str) = &config.daemon.ipc_listen_ws {
+        match addr_str.parse::<std::net::SocketAddr>() {
+            Ok(addr) => {
+                let dispatcher_for_ipc = dispatcher.clone();
+                let token = bearer_token.clone();
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        crate::ipc_remote::serve_ws(addr, token, dispatcher_for_ipc).await
+                    {
+                        tracing::error!(error = %e, "remote IPC (WS) listener exited");
+                    }
+                });
+            }
+            Err(e) => {
+                tracing::warn!(addr = %addr_str, error = %e, "invalid ipc_listen_ws");
             }
         }
     }

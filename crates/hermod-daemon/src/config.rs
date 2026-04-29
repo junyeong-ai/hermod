@@ -221,9 +221,27 @@ pub struct DaemonConfig {
     /// Optional WSS+Bearer endpoint for remote IPC (`hermod --remote …`).
     /// When set, exposes the same JSON-RPC surface the Unix socket serves,
     /// gated by the bearer token at `$HERMOD_HOME/identity/bearer_token`.
-    /// Reuses the daemon's TLS material. None disables the listener.
+    /// Reuses the daemon's TLS material — TLS termination at the daemon
+    /// itself. None disables the listener. Mutually exclusive with
+    /// [`Self::ipc_listen_ws`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ipc_listen_wss: Option<String>,
+    /// Optional plaintext WS+Bearer endpoint for remote IPC, intended
+    /// for deployments where TLS terminates at an upstream reverse
+    /// proxy (Cloud Run, Google IAP, oauth2-proxy, Cloudflare Access,
+    /// AWS ALB+Cognito, k8s ingress). The wire-format JSON-RPC surface
+    /// is identical to [`Self::ipc_listen_wss`]; the only difference
+    /// is that this listener accepts the WebSocket handshake on a raw
+    /// TCP stream instead of inside its own TLS envelope.
+    ///
+    /// The bearer token still gates auth — TLS termination at the
+    /// proxy doesn't authenticate the *client*, only the *transport*.
+    /// Federation peer-to-peer connections never use this mode (peers
+    /// authenticate identity via TLS material, see
+    /// [`Self::listen_ws`]). None disables the listener. Mutually
+    /// exclusive with [`Self::ipc_listen_wss`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipc_listen_ws: Option<String>,
     /// Optional plaintext HTTP bind for `/healthz` (liveness),
     /// `/readyz` (readiness), and `/metrics` (Prometheus). Bind to
     /// `127.0.0.1:9690` for sidecar use, or to a private interface
@@ -248,6 +266,7 @@ impl Default for DaemonConfig {
             socket_path: defaults::socket_path(),
             listen_ws: None,
             ipc_listen_wss: None,
+            ipc_listen_ws: None,
             metrics_listen: None,
             shutdown_grace_secs: defaults::shutdown_grace(),
         }
@@ -420,6 +439,18 @@ impl Config {
             s.parse::<SocketAddr>()
                 .with_context(|| format!("invalid [daemon] ipc_listen_wss = {s:?}"))?;
         }
+        if let Some(s) = &self.daemon.ipc_listen_ws {
+            s.parse::<SocketAddr>()
+                .with_context(|| format!("invalid [daemon] ipc_listen_ws = {s:?}"))?;
+        }
+        if self.daemon.ipc_listen_wss.is_some() && self.daemon.ipc_listen_ws.is_some() {
+            anyhow::bail!(
+                "[daemon] ipc_listen_wss and ipc_listen_ws are mutually exclusive — \
+                 the WSS form terminates TLS at the daemon, the WS form expects an \
+                 upstream reverse proxy (Cloud Run / IAP / oauth2-proxy) to do TLS \
+                 termination. Pick one."
+            );
+        }
         if let Some(s) = &self.daemon.metrics_listen {
             s.parse::<SocketAddr>()
                 .with_context(|| format!("invalid [daemon] metrics_listen = {s:?}"))?;
@@ -478,6 +509,9 @@ impl Config {
         }
         if let Ok(v) = std::env::var("HERMOD_DAEMON_IPC_LISTEN_WSS") {
             self.daemon.ipc_listen_wss = Some(v);
+        }
+        if let Ok(v) = std::env::var("HERMOD_DAEMON_IPC_LISTEN_WS") {
+            self.daemon.ipc_listen_ws = Some(v);
         }
         if let Ok(v) = std::env::var("HERMOD_DAEMON_METRICS_LISTEN") {
             self.daemon.metrics_listen = Some(v);

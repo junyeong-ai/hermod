@@ -15,13 +15,21 @@
 //!   ALB+Cognito, …). Real proxies strip the header before forwarding,
 //!   so the daemon never sees it.
 //!
-//! ## TLS pinning
+//! ## TLS verification
 //!
-//! The daemon presents a self-signed cert and the client compares its
-//! SHA-256 fingerprint to either an explicit pin (`--pin <hex>`) or a
-//! TOFU pin recorded at `$HERMOD_HOME/remote_pins.json`. Use
-//! `PinPolicy::InsecureNoVerify` only for tests / fully-trusted LAN
-//! deployments.
+//! Four policies, picked by `--pin`:
+//!
+//!   * `tofu` (default) — record the daemon's SHA-256 fingerprint to
+//!     `$HERMOD_HOME/remote_pins.json` on first connect; fail loud on
+//!     mismatch thereafter.
+//!   * `<sha256>` — explicit fingerprint pin.
+//!   * `public-ca` — validate the chain via the OS root CA store
+//!     (`rustls-native-certs`). Use when a public-CA-trusted reverse
+//!     proxy fronts the daemon (Cloud Run, Google IAP, Cloudflare
+//!     Access, ALB+Cognito); pinning the LB cert would break on every
+//!     rotation.
+//!   * `none` — skip TLS validation. Strictly opt-in for tests /
+//!     known-LAN.
 //!
 //! ## Auth-failure refresh
 //!
@@ -213,19 +221,62 @@ impl RemoteIpcClient {
 
         let connector = if scheme == "wss" {
             install_default_crypto_provider();
-            let verifier: Arc<dyn ServerCertVerifier> = match policy {
-                PinPolicy::InsecureNoVerify => Arc::new(NoVerify),
-                PinPolicy::Explicit(expected) => Arc::new(PinningVerifier::explicit(expected)),
+            let config = match policy {
+                PinPolicy::InsecureNoVerify => ClientConfig::builder_with_protocol_versions(
+                    hermod_transport::tls::PROTOCOL_VERSIONS,
+                )
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(NoVerify))
+                .with_no_client_auth(),
+                PinPolicy::Explicit(expected) => ClientConfig::builder_with_protocol_versions(
+                    hermod_transport::tls::PROTOCOL_VERSIONS,
+                )
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(PinningVerifier::explicit(expected)))
+                .with_no_client_auth(),
                 PinPolicy::Tofu { store, host_port } => {
-                    Arc::new(PinningVerifier::tofu(store, host_port))
+                    ClientConfig::builder_with_protocol_versions(
+                        hermod_transport::tls::PROTOCOL_VERSIONS,
+                    )
+                    .dangerous()
+                    .with_custom_certificate_verifier(Arc::new(PinningVerifier::tofu(
+                        store, host_port,
+                    )))
+                    .with_no_client_auth()
+                }
+                // Public-CA mode delegates chain + hostname validation
+                // to rustls' built-in `WebPkiServerVerifier` over the
+                // OS trust store. No custom verifier — `with_root_certificates`
+                // is the production-blessed path that enforces SAN /
+                // expiry / EKU correctly. `connect_async_tls_with_config`
+                // forwards the URL host as the SNI / verification
+                // target, so cert rotation on the LB just works.
+                PinPolicy::PublicCa => {
+                    let mut roots = rustls::RootCertStore::empty();
+                    let native = rustls_native_certs::load_native_certs();
+                    if !native.errors.is_empty() {
+                        tracing::debug!(
+                            errors = ?native.errors,
+                            "rustls-native-certs reported {} non-fatal load error(s)",
+                            native.errors.len()
+                        );
+                    }
+                    let (added, _ignored) = roots.add_parsable_certificates(native.certs);
+                    if added == 0 {
+                        return Err(RemoteConnectError::Other(anyhow!(
+                            "--pin public-ca requested but the OS trust store yielded \
+                             no usable root certificates — install/repair the system CA \
+                             bundle, or use `--pin <sha256>` with an explicitly-provisioned \
+                             fingerprint"
+                        )));
+                    }
+                    ClientConfig::builder_with_protocol_versions(
+                        hermod_transport::tls::PROTOCOL_VERSIONS,
+                    )
+                    .with_root_certificates(roots)
+                    .with_no_client_auth()
                 }
             };
-            let config = ClientConfig::builder_with_protocol_versions(
-                hermod_transport::tls::PROTOCOL_VERSIONS,
-            )
-            .dangerous()
-            .with_custom_certificate_verifier(verifier)
-            .with_no_client_auth();
             Some(Connector::Rustls(Arc::new(config)))
         } else {
             None
