@@ -72,10 +72,11 @@ pub struct JanitorWorker {
     db: Arc<dyn Database>,
     audit_sink: Arc<dyn AuditSink>,
     config: JanitorConfig,
-    /// Used as `actor` for audit rows the janitor writes (e.g.
-    /// `audit.archive`). The janitor acts on behalf of *this* daemon,
-    /// so attributing the row to `self_id` is the honest answer.
-    self_id: hermod_core::AgentId,
+    /// Audit fallback actor for janitor-emitted rows (e.g.
+    /// `audit.archive`). The janitor acts on behalf of *this*
+    /// daemon, so attributing the row to the host id is the honest
+    /// answer when no IPC caller is in scope.
+    host_actor: hermod_core::AgentId,
     /// When set, a transition from ≥1 live session to 0 live sessions
     /// triggers a federation broadcast so peers stop showing us as live
     /// before their own cache TTL ages out — once per locally-hosted
@@ -100,14 +101,14 @@ impl JanitorWorker {
     pub fn new(
         db: Arc<dyn Database>,
         audit_sink: Arc<dyn AuditSink>,
-        self_id: hermod_core::AgentId,
+        host_actor: hermod_core::AgentId,
         config: JanitorConfig,
     ) -> Self {
         Self {
             db,
             audit_sink,
             config,
-            self_id,
+            host_actor,
             presence: None,
             local_agents: None,
         }
@@ -265,7 +266,7 @@ impl JanitorWorker {
                             hermod_storage::AuditEntry {
                                 id: None,
                                 ts: hermod_core::Timestamp::now(),
-                                actor: self.self_id.clone(),
+                                actor: self.host_actor.clone(),
                                 action: "audit.archived".into(),
                                 target: None,
                                 details: Some(serde_json::json!({
@@ -287,7 +288,7 @@ impl JanitorWorker {
                         hermod_storage::AuditEntry {
                             id: None,
                             ts: hermod_core::Timestamp::now(),
-                            actor: self.self_id.clone(),
+                            actor: self.host_actor.clone(),
                             action: "audit.archived".into(),
                             target: None,
                             details: Some(serde_json::json!({

@@ -66,14 +66,14 @@ enum MemberOutcome {
 pub async fn fanout_to_workspace_members(
     db: &dyn Database,
     messages: &MessageService,
-    self_id: &AgentId,
+    from_agent: &AgentId,
     body: MessageBody,
     priority: MessagePriority,
     ttl_secs: u32,
 ) -> Result<FanoutOutcome, ServiceError> {
     let members = db
         .workspace_members()
-        .list_distinct_excluding(self_id)
+        .list_distinct_excluding(from_agent)
         .await?;
 
     let total = members.len();

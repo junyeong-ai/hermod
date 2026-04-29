@@ -29,7 +29,7 @@ pub struct ChannelService {
     /// any IPC scope. Carrying a host-derived id keeps daemon-internal
     /// emissions (none today, but symmetric with peer services)
     /// attributed correctly when no IPC frame is on the stack.
-    self_id: AgentId,
+    host_actor: AgentId,
     /// Membership oracle: skips fan-out to any of *our* hosted agents
     /// when iterating workspace members. Multi-tenant deploys host
     /// more than one local agent, so a static `self_id == member`
@@ -42,14 +42,14 @@ impl ChannelService {
     pub fn new(
         db: Arc<dyn Database>,
         audit_sink: Arc<dyn AuditSink>,
-        self_id: AgentId,
+        host_actor: AgentId,
         router: Router,
         messages: MessageService,
     ) -> Self {
         Self {
             db,
             audit_sink,
-            self_id,
+            host_actor,
             router,
             messages,
         }
@@ -89,7 +89,7 @@ impl ChannelService {
             AuditEntry {
                 id: None,
                 ts: now,
-                actor: self.self_id.clone(),
+                actor: self.host_actor.clone(),
                 action: "channel.create".into(),
                 target: Some(channel_id.to_hex()),
                 details: Some(serde_json::json!({
@@ -153,7 +153,7 @@ impl ChannelService {
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),
-                actor: self.self_id.clone(),
+                actor: self.host_actor.clone(),
                 action: "channel.delete".into(),
                 target: Some(id.to_hex()),
                 details: None,
@@ -222,7 +222,7 @@ impl ChannelService {
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),
-                actor: self.self_id.clone(),
+                actor: self.host_actor.clone(),
                 action: "channel.advertise".into(),
                 target: Some(channel.id.to_hex()),
                 details: Some(serde_json::json!({
@@ -311,7 +311,7 @@ impl ChannelService {
             AuditEntry {
                 id: None,
                 ts: now,
-                actor: self.self_id.clone(),
+                actor: self.host_actor.clone(),
                 action: "channel.adopt".into(),
                 target: Some(channel_id.to_hex()),
                 details: Some(serde_json::json!({
@@ -342,7 +342,7 @@ impl ChannelService {
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),
-                actor: self.self_id.clone(),
+                actor: self.host_actor.clone(),
                 action: "channel.mute".into(),
                 target: Some(id.to_hex()),
                 details: Some(serde_json::json!({ "muted": params.muted })),

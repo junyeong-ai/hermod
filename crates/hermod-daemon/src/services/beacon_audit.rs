@@ -15,20 +15,20 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct AuditSinkBeaconAuditor {
     sink: Arc<dyn AuditSink>,
-    self_id: AgentId,
+    host_actor: AgentId,
 }
 
 impl std::fmt::Debug for AuditSinkBeaconAuditor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AuditSinkBeaconAuditor")
-            .field("self_id", &self.self_id)
+            .field("self_id", &self.host_actor)
             .finish_non_exhaustive()
     }
 }
 
 impl AuditSinkBeaconAuditor {
-    pub fn new(sink: Arc<dyn AuditSink>, self_id: AgentId) -> Self {
-        Self { sink, self_id }
+    pub fn new(sink: Arc<dyn AuditSink>, host_actor: AgentId) -> Self {
+        Self { sink, host_actor }
     }
 
     fn dispatch(&self, entry: AuditEntry) {
@@ -44,7 +44,7 @@ impl BeaconAuditor for AuditSinkBeaconAuditor {
         self.dispatch(AuditEntry {
             id: None,
             ts: Timestamp::now(),
-            actor: self.self_id.clone(),
+            actor: self.host_actor.clone(),
             action: "mdns.beacon_emitted".into(),
             target: None,
             details: Some(serde_json::json!({
@@ -60,7 +60,7 @@ impl BeaconAuditor for AuditSinkBeaconAuditor {
         self.dispatch(AuditEntry {
             id: None,
             ts: Timestamp::now(),
-            actor: self.self_id.clone(),
+            actor: self.host_actor.clone(),
             action: "mdns.beacon_observed".into(),
             target: Some(agent_id.to_string()),
             details: Some(serde_json::json!({
@@ -75,7 +75,7 @@ impl BeaconAuditor for AuditSinkBeaconAuditor {
         self.dispatch(AuditEntry {
             id: None,
             ts: Timestamp::now(),
-            actor: self.self_id.clone(),
+            actor: self.host_actor.clone(),
             action: "mdns.beacon_rejected".into(),
             target: agent_id.map(str::to_string),
             details: Some(serde_json::json!({

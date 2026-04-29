@@ -38,9 +38,9 @@ pub struct Config {
 ///
 /// Three exhaustive modes — every legal combination of "do I relay?"
 /// and "do I audit each relay?" lives here. The same daemon may
-/// simultaneously host its own identity AND act as a broker for others
-/// (the `to.id == self_id` envelopes are processed normally;
-/// everything else is relayed).
+/// simultaneously host its own local agents AND act as a broker for
+/// others (envelopes whose `to.id` is one of our hosted agents are
+/// processed normally; everything else is relayed).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BrokerMode {

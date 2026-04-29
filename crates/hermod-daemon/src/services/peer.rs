@@ -23,7 +23,7 @@ use crate::services::{
 pub struct PeerService {
     db: Arc<dyn Database>,
     audit_sink: Arc<dyn AuditSink>,
-    self_id: AgentId,
+    host_actor: AgentId,
     presence: PresenceService,
     pool: Arc<PeerPool>,
     /// Locally-hosted agents enumerated by `peer.advertise`.
@@ -40,7 +40,7 @@ impl PeerService {
     pub fn new(
         db: Arc<dyn Database>,
         audit_sink: Arc<dyn AuditSink>,
-        self_id: AgentId,
+        host_actor: AgentId,
         presence: PresenceService,
         pool: Arc<PeerPool>,
         registry: LocalAgentRegistry,
@@ -50,7 +50,7 @@ impl PeerService {
         Self {
             db,
             audit_sink,
-            self_id,
+            host_actor,
             presence,
             pool,
             registry,
@@ -94,7 +94,7 @@ impl PeerService {
                 AuditEntry {
                     id: None,
                     ts: Timestamp::now(),
-                    actor: self.self_id.clone(),
+                    actor: self.host_actor.clone(),
                     action: "peer.alias_collision".into(),
                     target: Some(conflicting_id.to_string()),
                     details: Some(serde_json::json!({
@@ -113,7 +113,7 @@ impl PeerService {
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),
-                actor: self.self_id.clone(),
+                actor: self.host_actor.clone(),
                 action: "peer.add".into(),
                 target: Some(rec.id.to_string()),
                 details: Some(serde_json::json!({
@@ -207,7 +207,7 @@ impl PeerService {
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),
-                actor: self.self_id.clone(),
+                actor: self.host_actor.clone(),
                 action: "peer.advertise".into(),
                 target: None,
                 details: Some(serde_json::json!({
@@ -348,7 +348,7 @@ impl PeerService {
                 AuditEntry {
                     id: None,
                     ts: Timestamp::now(),
-                    actor: self.self_id.clone(),
+                    actor: self.host_actor.clone(),
                     action: "peer.remove".into(),
                     target: Some(agent_id.to_string()),
                     details: Some(serde_json::json!({
@@ -401,7 +401,7 @@ impl PeerService {
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),
-                actor: self.self_id.clone(),
+                actor: self.host_actor.clone(),
                 action: "peer.repin".into(),
                 target: Some(agent_id.to_string()),
                 details: Some(serde_json::json!({
@@ -443,7 +443,7 @@ impl PeerService {
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),
-                actor: self.self_id.clone(),
+                actor: self.host_actor.clone(),
                 action: "peer.trust".into(),
                 target: Some(agent_id.to_string()),
                 details: Some(serde_json::json!({

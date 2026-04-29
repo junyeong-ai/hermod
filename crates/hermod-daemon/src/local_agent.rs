@@ -98,11 +98,16 @@ struct RegistryInner {
     agents: Vec<LocalAgent>,
     /// blake3(bearer_token) → agent_id, rebuilt on every mutation.
     bearer_index: HashMap<[u8; 32], AgentId>,
-    /// Per-agent shutdown channels for active IPC sessions. Each
-    /// connection registers one on accept; mutations that
-    /// invalidate a bearer (rotate / remove) fire all senders for
-    /// the affected agent so its open connections close out.
-    sessions: HashMap<AgentId, Vec<oneshot::Sender<()>>>,
+    /// Per-agent shutdown channels for active IPC sessions, keyed
+    /// by a per-session id so a clean disconnect can remove its own
+    /// entry via [`SessionGuard`]. Mutations that invalidate a
+    /// bearer (rotate / remove) fire every sender in the agent's
+    /// inner map so all of its open connections close out.
+    sessions: HashMap<AgentId, HashMap<u64, oneshot::Sender<()>>>,
+    /// Monotonic counter for session ids. Wraps after 2^64 — that's
+    /// "forever" for a real daemon; the `HashMap` would clash on
+    /// wrap, so use saturating semantics on the realistic side.
+    next_session_id: u64,
 }
 
 impl LocalAgentRegistry {
@@ -119,12 +124,19 @@ impl LocalAgentRegistry {
         }
     }
 
+    /// Acquire a read lock, recovering from poison. A panic in any
+    /// holder of the write lock would otherwise leave the daemon
+    /// permanently stuck (every subsequent registry call would
+    /// re-panic). After recovery the data may be mid-mutation, but
+    /// each mutation site is short and structurally simple — the
+    /// half-applied state is "an agent vec slightly stale w.r.t.
+    /// its bearer index" which the next successful write repairs.
     fn read(&self) -> std::sync::RwLockReadGuard<'_, RegistryInner> {
-        self.inner.read().expect("registry rwlock poisoned")
+        self.inner.read().unwrap_or_else(|p| p.into_inner())
     }
 
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, RegistryInner> {
-        self.inner.write().expect("registry rwlock poisoned")
+        self.inner.write().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Snapshot of every hosted agent. Cheap clone — the heavy
@@ -163,26 +175,48 @@ impl LocalAgentRegistry {
         }
     }
 
-    /// Hash `token` with blake3 and return the matching agent_id, or
-    /// `None` if no hosted agent owns this bearer. The hot path of
-    /// the IPC handshake — sync, no allocation, no I/O.
+    /// Hash `token` with blake3 and return the matching agent_id.
+    /// Read-only — does NOT register a session. Used by tests and
+    /// diagnostics; the hot path uses [`Self::resolve_and_register_bearer`]
+    /// to close the resolve-vs-rotate race window.
     pub fn resolve_bearer(&self, token: &str) -> Option<AgentId> {
         let hash: [u8; 32] = *blake3::hash(token.as_bytes()).as_bytes();
         self.read().bearer_index.get(&hash).cloned()
     }
 
-    /// Register an active IPC session pinned to `agent_id`. The
-    /// returned receiver fires when the agent's bearer is rotated
-    /// or the agent is removed — connections must `select!` on it
-    /// alongside the inbound message stream and close cleanly.
-    pub fn register_session(&self, agent_id: &AgentId) -> oneshot::Receiver<()> {
+    /// Atomic bearer lookup + session registration. Used by the
+    /// IPC handshake's auth callback — by combining lookup and
+    /// register under one write lock, a concurrent `local rotate`
+    /// either:
+    ///   - fires before this call: the lookup misses, the connection
+    ///     gets 401;
+    ///   - fires after: the new session is in the sessions map and
+    ///     `replace_bearer` fires its shutdown sender immediately.
+    ///
+    /// Returns the resolved `agent_id`, an RAII guard that removes
+    /// the session on drop (so a clean client disconnect doesn't
+    /// leak a `oneshot::Sender` in the registry), and the receiver
+    /// the connection's `select!` watches for shutdown.
+    pub fn resolve_and_register_bearer(
+        &self,
+        token: &str,
+    ) -> Option<(AgentId, SessionGuard, oneshot::Receiver<()>)> {
+        let hash: [u8; 32] = *blake3::hash(token.as_bytes()).as_bytes();
+        let mut g = self.write();
+        let agent_id = g.bearer_index.get(&hash).cloned()?;
+        let session_id = g.next_session_id;
+        g.next_session_id = g.next_session_id.wrapping_add(1);
         let (tx, rx) = oneshot::channel();
-        self.write()
-            .sessions
+        g.sessions
             .entry(agent_id.clone())
             .or_default()
-            .push(tx);
-        rx
+            .insert(session_id, tx);
+        let guard = SessionGuard {
+            inner: self.inner.clone(),
+            agent_id: agent_id.clone(),
+            session_id,
+        };
+        Some((agent_id, guard, rx))
     }
 
     /// Insert a freshly-provisioned agent. Refreshes the bearer
@@ -211,7 +245,7 @@ impl LocalAgentRegistry {
         let removed = g.agents.remove(idx);
         g.bearer_index.remove(&removed.bearer_hash());
         if let Some(senders) = g.sessions.remove(id) {
-            for tx in senders {
+            for (_id, tx) in senders {
                 let _ = tx.send(());
             }
         }
@@ -232,7 +266,7 @@ impl LocalAgentRegistry {
         g.bearer_index.remove(&prior_hash);
         g.bearer_index.insert(new_hash, id.clone());
         if let Some(senders) = g.sessions.remove(id) {
-            for tx in senders {
+            for (_id, tx) in senders {
                 let _ = tx.send(());
             }
         }
@@ -248,6 +282,44 @@ impl LocalAgentRegistry {
         };
         agent.local_alias = alias;
         true
+    }
+}
+
+/// Drop-on-disconnect cleanup for an active IPC session. Returned by
+/// [`LocalAgentRegistry::resolve_and_register_bearer`]; held alive by
+/// the connection's task tree for the duration of the session.
+///
+/// On drop (clean disconnect, panic, or any other path that unwinds
+/// the connection's stack) the guard removes its own entry from the
+/// registry's `sessions` map. Without this, a long-running daemon
+/// with frequent connect/disconnect cycles would accumulate
+/// `oneshot::Sender`s indefinitely — every closed connection's
+/// shutdown channel would stay in the agent's session list forever
+/// even though its receiver was already dropped.
+///
+/// `rotate` / `remove` mutations remove the agent's entire session
+/// table in one swap; the guard's drop becomes a no-op in that case
+/// (the inner `sessions[agent_id]` HashMap is already gone), which
+/// is correct.
+#[derive(Debug)]
+pub struct SessionGuard {
+    inner: Arc<RwLock<RegistryInner>>,
+    agent_id: AgentId,
+    session_id: u64,
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        let mut g = match self.inner.write() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if let Some(map) = g.sessions.get_mut(&self.agent_id) {
+            map.remove(&self.session_id);
+            if map.is_empty() {
+                g.sessions.remove(&self.agent_id);
+            }
+        }
     }
 }
 
@@ -664,7 +736,9 @@ mod tests {
         let agent = create_bootstrap(tmp.path(), None).unwrap();
         let token = agent.bearer_token.expose_secret().to_string();
         let registry = LocalAgentRegistry::from_agents(vec![agent.clone()]);
-        let mut rx = registry.register_session(&agent.agent_id);
+        let (_id, _guard, mut rx) = registry
+            .resolve_and_register_bearer(&token)
+            .expect("bearer resolves");
         assert!(rx.try_recv().is_err(), "no shutdown until removed");
         assert!(registry.remove(&agent.agent_id));
         assert_eq!(registry.resolve_bearer(&token), None);
@@ -677,7 +751,9 @@ mod tests {
         let agent = create_bootstrap(tmp.path(), None).unwrap();
         let old = agent.bearer_token.expose_secret().to_string();
         let registry = LocalAgentRegistry::from_agents(vec![agent.clone()]);
-        let mut rx = registry.register_session(&agent.agent_id);
+        let (_id, _guard, mut rx) = registry
+            .resolve_and_register_bearer(&old)
+            .expect("bearer resolves");
         let new_token = generate_bearer_token();
         let new_str = new_token.expose_secret().to_string();
         assert!(registry.replace_bearer(&agent.agent_id, new_token));
@@ -688,6 +764,50 @@ mod tests {
             "new bearer accepted"
         );
         assert!(rx.try_recv().is_ok(), "session shutdown fires on rotate");
+    }
+
+    #[test]
+    fn session_guard_drop_cleans_up_on_clean_disconnect() {
+        // The leak this test guards against: a connection that closed
+        // normally (no rotate / no remove) used to leave its
+        // `oneshot::Sender` in `sessions[agent]` forever. Now the
+        // RAII guard removes its own entry on drop; sustained
+        // connect/disconnect churn no longer accumulates senders.
+        let tmp = TempDir::new().unwrap();
+        let agent = create_bootstrap(tmp.path(), None).unwrap();
+        let token = agent.bearer_token.expose_secret().to_string();
+        let registry = LocalAgentRegistry::from_agents(vec![agent.clone()]);
+
+        // Open + drop 100 sessions with no mutation in between. After
+        // every drop the agent's session table should be gone (or
+        // empty) — the guard's Drop impl removes the entry and, when
+        // empty, the agent key.
+        for _ in 0..100 {
+            let (_id, guard, _rx) = registry
+                .resolve_and_register_bearer(&token)
+                .expect("bearer resolves");
+            drop(guard);
+        }
+        let g = registry.read();
+        assert!(
+            g.sessions.get(&agent.agent_id).is_none_or(|m| m.is_empty()),
+            "drop-on-disconnect must clean up the per-session entry",
+        );
+    }
+
+    #[test]
+    fn resolve_and_register_returns_none_for_unknown_bearer() {
+        // Atomic check: an unknown bearer must not get a session row
+        // — otherwise the rotate-vs-resolve race window stays open.
+        let tmp = TempDir::new().unwrap();
+        let agent = create_bootstrap(tmp.path(), None).unwrap();
+        let registry = LocalAgentRegistry::from_agents(vec![agent.clone()]);
+        assert!(registry.resolve_and_register_bearer("nope").is_none());
+        let g = registry.read();
+        assert!(
+            g.sessions.is_empty(),
+            "unknown bearer must not register a session",
+        );
     }
 
     #[test]

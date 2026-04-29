@@ -7,6 +7,7 @@ use hermod_protocol::ipc::methods::{
 use hermod_storage::{AuditEntry, AuditSink, ConfirmationStatus, Database};
 use std::sync::Arc;
 
+use crate::audit_context::current_caller_agent;
 use crate::inbound::InboundProcessor;
 use crate::services::{ServiceError, audit_or_warn};
 
@@ -17,7 +18,11 @@ const MAX_LIST_LIMIT: u32 = 500;
 pub struct ConfirmationService {
     db: Arc<dyn Database>,
     audit_sink: Arc<dyn AuditSink>,
-    self_id: AgentId,
+    /// Audit fallback actor for emissions outside an IPC scope.
+    /// `audit_or_warn` overlays the IPC caller's agent_id when one
+    /// is in scope; this value is what lands in audit rows when no
+    /// caller is present.
+    host_actor: AgentId,
     /// Held envelopes replay through the post-gate apply path on accept.
     inbound: InboundProcessor,
 }
@@ -25,7 +30,7 @@ pub struct ConfirmationService {
 impl std::fmt::Debug for ConfirmationService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConfirmationService")
-            .field("self_id", &self.self_id)
+            .field("host_actor", &self.host_actor)
             .finish_non_exhaustive()
     }
 }
@@ -34,15 +39,28 @@ impl ConfirmationService {
     pub fn new(
         db: Arc<dyn Database>,
         audit_sink: Arc<dyn AuditSink>,
-        self_id: AgentId,
+        host_actor: AgentId,
         inbound: InboundProcessor,
     ) -> Self {
         Self {
             db,
             audit_sink,
-            self_id,
+            host_actor,
             inbound,
         }
+    }
+
+    /// Resolve the IPC caller. Confirmation decisions write a
+    /// `decided_by` column verbatim, so a missing caller is a hard
+    /// error here — falling back to host_actor would store the
+    /// wrong identity in storage. Audit-only sites use the
+    /// `audit_or_warn` overlay instead.
+    fn caller(&self) -> Result<AgentId, ServiceError> {
+        current_caller_agent().ok_or_else(|| {
+            ServiceError::InvalidParam(
+                "confirmation.* requires an IPC caller scope (no caller_agent in context)".into(),
+            )
+        })
     }
 
     pub async fn list(
@@ -94,6 +112,7 @@ impl ConfirmationService {
         &self,
         params: ConfirmationAcceptParams,
     ) -> Result<ConfirmationAcceptResult, ServiceError> {
+        let caller = self.caller()?;
         let row = self
             .db
             .confirmations()
@@ -123,7 +142,7 @@ impl ConfirmationService {
             .decide(
                 &params.confirmation_id,
                 ConfirmationStatus::Accepted,
-                &self.self_id,
+                &caller,
                 now,
             )
             .await?;
@@ -138,7 +157,7 @@ impl ConfirmationService {
             AuditEntry {
                 id: None,
                 ts: now,
-                actor: self.self_id.clone(),
+                actor: self.host_actor.clone(),
                 action: "confirmation.accept".into(),
                 target: Some(row.id.clone()),
                 details: Some(serde_json::json!({
@@ -160,6 +179,7 @@ impl ConfirmationService {
         &self,
         params: ConfirmationRejectParams,
     ) -> Result<ConfirmationRejectResult, ServiceError> {
+        let caller = self.caller()?;
         let now = Timestamp::now();
         let row = self
             .db
@@ -179,7 +199,7 @@ impl ConfirmationService {
             .decide(
                 &params.confirmation_id,
                 ConfirmationStatus::Rejected,
-                &self.self_id,
+                &caller,
                 now,
             )
             .await?;
@@ -188,7 +208,7 @@ impl ConfirmationService {
             AuditEntry {
                 id: None,
                 ts: now,
-                actor: self.self_id.clone(),
+                actor: self.host_actor.clone(),
                 action: "confirmation.reject".into(),
                 target: Some(row.id.clone()),
                 details: Some(serde_json::json!({

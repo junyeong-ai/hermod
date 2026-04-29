@@ -49,7 +49,7 @@ impl InboundProcessor {
                 ts: Timestamp::now(),
                 actor: envelope.from.id.clone(),
                 action: "permission.relay.observed".into(),
-                target: Some(self.self_id.to_string()),
+                target: Some(self.host_actor.to_string()),
                 details: Some(serde_json::json!({
                     "envelope_id": envelope.id.to_string(),
                     "request_id": request_id,
@@ -107,7 +107,7 @@ impl InboundProcessor {
                 ts: Timestamp::now(),
                 actor: envelope.from.id.clone(),
                 action: "permission.relay.responded".into(),
-                target: Some(self.self_id.to_string()),
+                target: Some(self.host_actor.to_string()),
                 details: Some(serde_json::json!({
                     "envelope_id": envelope.id.to_string(),
                     "request_id": request_id,

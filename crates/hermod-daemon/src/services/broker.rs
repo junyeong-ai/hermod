@@ -4,9 +4,9 @@
 //! When `[broker] mode = "relay_only"` or `"relay_and_witness"`, this
 //! service is wired into [`crate::inbound::InboundProcessor`] via the
 //! `with_broker_service` builder method. The inbound pipeline's
-//! standard `to.id == self_id` check is relaxed: envelopes addressed
-//! to other peers are handed to this service instead of being
-//! rejected as `NotForUs`.
+//! standard "envelope.to.id ∈ local_agents" check is relaxed:
+//! envelopes addressed to other peers are handed to this service
+//! instead of being rejected as `NotForUs`.
 //!
 //! ## Forwarding model
 //!
@@ -135,7 +135,7 @@ mod doc_coverage {
 pub struct BrokerService {
     db: Arc<dyn Database>,
     audit_sink: Arc<dyn AuditSink>,
-    self_id: AgentId,
+    host_actor: AgentId,
     remote: RemoteDeliverer,
     mode: BrokerMode,
 }
@@ -143,7 +143,7 @@ pub struct BrokerService {
 impl std::fmt::Debug for BrokerService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BrokerService")
-            .field("self_id", &self.self_id)
+            .field("self_id", &self.host_actor)
             .field("mode", &self.mode)
             .finish()
     }
@@ -153,14 +153,14 @@ impl BrokerService {
     pub fn new(
         db: Arc<dyn Database>,
         audit_sink: Arc<dyn AuditSink>,
-        self_id: AgentId,
+        host_actor: AgentId,
         remote: RemoteDeliverer,
         mode: BrokerMode,
     ) -> Self {
         Self {
             db,
             audit_sink,
-            self_id,
+            host_actor,
             remote,
             mode,
         }
@@ -178,14 +178,14 @@ impl BrokerService {
         inbound_hops: u8,
     ) -> RelayOutcome {
         // Defensive: caller should have checked, but be safe.
-        if envelope.to.id.as_str() == self.self_id.as_str() {
+        if envelope.to.id.as_str() == self.host_actor.as_str() {
             return RelayOutcome::LocalDestination;
         }
         // Identity-level loop guard: an envelope this daemon originated
         // and that has come back to us must not re-enter the relay
         // pipeline. The hops bound below catches mesh cycles between
         // distinct peers; this catches single-step echoes.
-        if envelope.from.id.as_str() == self.self_id.as_str() {
+        if envelope.from.id.as_str() == self.host_actor.as_str() {
             return RelayOutcome::LoopDetected;
         }
         // Hop-count loop bound. Receivers also enforce this defensively

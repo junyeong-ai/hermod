@@ -54,7 +54,7 @@ impl InboundProcessor {
                 ts: Timestamp::now(),
                 actor: envelope.from.id.clone(),
                 action: "file.delivered".into(),
-                target: Some(self.self_id.to_string()),
+                target: Some(self.host_actor.to_string()),
                 details: Some(serde_json::json!({
                     "id": envelope.id.to_string(),
                     "name": name,

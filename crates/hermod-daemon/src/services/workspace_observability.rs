@@ -82,7 +82,7 @@ struct State {
 pub struct WorkspaceObservabilityService {
     db: Arc<dyn Database>,
     audit_sink: Arc<dyn AuditSink>,
-    self_id: AgentId,
+    host_actor: AgentId,
     state: Arc<Mutex<State>>,
     /// Wired post-construction so this service can ship responses +
     /// fan out requests. Same OnceLock pattern as `RemoteAuditSink`.
@@ -92,18 +92,18 @@ pub struct WorkspaceObservabilityService {
 impl std::fmt::Debug for WorkspaceObservabilityService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WorkspaceObservabilityService")
-            .field("self_id", &self.self_id)
+            .field("self_id", &self.host_actor)
             .field("messages_wired", &self.messages.get().is_some())
             .finish()
     }
 }
 
 impl WorkspaceObservabilityService {
-    pub fn new(db: Arc<dyn Database>, audit_sink: Arc<dyn AuditSink>, self_id: AgentId) -> Self {
+    pub fn new(db: Arc<dyn Database>, audit_sink: Arc<dyn AuditSink>, host_actor: AgentId) -> Self {
         Self {
             db,
             audit_sink,
-            self_id,
+            host_actor,
             state: Arc::new(Mutex::new(State::default())),
             messages: Arc::new(OnceLock::new()),
         }
@@ -397,13 +397,13 @@ impl WorkspaceObservabilityService {
         let known_members = self.db.workspace_members().list(&workspace_id).await?;
         let targets: Vec<AgentId> = known_members
             .iter()
-            .filter(|m| m.as_str() != self.self_id.as_str())
+            .filter(|m| m.as_str() != self.host_actor.as_str())
             .cloned()
             .collect();
 
         // Seed: our own view of the workspace.
         let mut union: std::collections::HashSet<AgentId> = known_members.into_iter().collect();
-        union.insert(self.self_id.clone());
+        union.insert(self.host_actor.clone());
 
         if targets.is_empty() {
             let mut out: Vec<AgentId> = union.into_iter().collect();
@@ -471,7 +471,7 @@ impl WorkspaceObservabilityService {
         let known_members = self.db.workspace_members().list(&workspace_id).await?;
         let targets: Vec<AgentId> = known_members
             .iter()
-            .filter(|m| m.as_str() != self.self_id.as_str())
+            .filter(|m| m.as_str() != self.host_actor.as_str())
             .cloned()
             .collect();
 

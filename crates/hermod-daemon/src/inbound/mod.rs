@@ -34,7 +34,7 @@ use crate::services::audit_or_warn;
 pub struct InboundProcessor {
     pub(super) db: Arc<dyn Database>,
     pub(super) audit_sink: Arc<dyn AuditSink>,
-    pub(super) self_id: AgentId,
+    pub(super) host_actor: AgentId,
     /// Snapshot of agents this daemon hosts at boot. Recipient
     /// resolution checks `to.id ∈ local_agents` — an envelope is
     /// accepted locally if its `to.id` is any of our hosted agents,
@@ -79,7 +79,7 @@ pub struct InboundProcessor {
 impl std::fmt::Debug for InboundProcessor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InboundProcessor")
-            .field("self_id", &self.self_id)
+            .field("host_actor", &self.host_actor)
             .field("replay_window_secs", &self.replay_window_secs)
             .field(
                 "held_envelope_max_age_secs",
@@ -94,7 +94,7 @@ impl InboundProcessor {
     pub fn new(
         db: Arc<dyn Database>,
         audit_sink: Arc<dyn AuditSink>,
-        self_id: AgentId,
+        host_actor: AgentId,
         local_agents: hermod_daemon::local_agent::LocalAgentRegistry,
         access: AccessController,
         rate_limit: RateLimiter,
@@ -108,7 +108,7 @@ impl InboundProcessor {
         Self {
             db,
             audit_sink,
-            self_id,
+            host_actor,
             local_agents,
             access,
             rate_limit,
@@ -142,8 +142,9 @@ impl InboundProcessor {
     }
 
     /// Wire the broker service. When wired, the inbound dispatch's
-    /// `to.id != self_id` check becomes a relay hand-off instead of
-    /// an immediate `NotForUs` rejection.
+    /// "envelope.to.id is not one of our local agents" check
+    /// becomes a relay hand-off instead of an immediate `NotForUs`
+    /// rejection.
     pub fn with_broker_service(mut self, svc: crate::services::BrokerService) -> Self {
         self.broker = Some(svc);
         self
@@ -604,7 +605,7 @@ impl InboundProcessor {
                 ts: Timestamp::now(),
                 actor: envelope.from.id.clone(),
                 action: "message.delivered".into(),
-                target: Some(self.self_id.to_string()),
+                target: Some(self.host_actor.to_string()),
                 details: Some(serde_json::json!({
                     "id": envelope.id.to_string(),
                     "kind": envelope.kind.as_str(),
@@ -759,7 +760,7 @@ mod tests {
     async fn apply_held_rejects_envelope_older_than_max_age() {
         let p = fresh_processor(60).await;
         // 5 minutes old vs 60-second cap → reject.
-        let env = fake_envelope(&p.self_id, -5 * 60 * 1000);
+        let env = fake_envelope(&p.host_actor, -5 * 60 * 1000);
         let cbor = serialize_envelope(&env).unwrap();
         let err = p.apply_held(&cbor).await.unwrap_err();
         match err {
@@ -775,7 +776,7 @@ mod tests {
         let p = fresh_processor(3600).await;
         // 30 seconds old vs 1-hour cap → accept (downstream apply may
         // still error on missing cert / etc., but freshness gate passes).
-        let env = fake_envelope(&p.self_id, -30 * 1000);
+        let env = fake_envelope(&p.host_actor, -30 * 1000);
         let cbor = serialize_envelope(&env).unwrap();
         let res = p.apply_held(&cbor).await;
         assert!(
@@ -788,7 +789,7 @@ mod tests {
     async fn apply_held_freshness_gate_disabled_when_max_age_zero() {
         let p = fresh_processor(0).await;
         // Years old, but the gate is disabled.
-        let env = fake_envelope(&p.self_id, -10 * 365 * 24 * 3600 * 1000);
+        let env = fake_envelope(&p.host_actor, -10 * 365 * 24 * 3600 * 1000);
         let cbor = serialize_envelope(&env).unwrap();
         let res = p.apply_held(&cbor).await;
         assert!(
@@ -806,7 +807,7 @@ mod tests {
         // accepting one would just feed the cycle the bound is meant
         // to break.
         let p = fresh_processor(0).await;
-        let env = fake_envelope(&p.self_id, 0);
+        let env = fake_envelope(&p.host_actor, 0);
         // Use a different agent_id to bypass the LocalDestination
         // short-circuit and exercise the hop bound; the call must
         // fail with `Invalid` before any storage / cap check.
@@ -815,7 +816,7 @@ mod tests {
         env.to = AgentAddress::local(stranger);
         let res = p
             .accept_envelope(
-                &p.self_id.clone(),
+                &p.host_actor.clone(),
                 &env,
                 hermod_protocol::wire::MAX_RELAY_HOPS + 1,
             )

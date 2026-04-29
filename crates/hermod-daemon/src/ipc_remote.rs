@@ -210,21 +210,28 @@ async fn handshake_and_serve<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    // Capture the resolved caller agent + the X-Forwarded-For header
-    // during the WS handshake. accept_hdr_async lets us inspect the
-    // upgrade request before completing the handshake; the auth
-    // callback hashes the presented bearer, looks it up against the
-    // hosted-agent roster, and stores the matching `agent_id` (or
-    // returns 401). The XFF capture feeds the client-IP resolution
-    // that audit logging needs to recover the originating IP from
-    // behind a chain of trusted reverse proxies.
+    // Capture the resolved caller agent (with its session
+    // registration), the shutdown receiver, and the X-Forwarded-For
+    // header during the WS handshake. `accept_hdr_async` lets us
+    // inspect the upgrade request before completing the handshake;
+    // the auth callback hashes the presented bearer, atomically
+    // resolves + registers the session under one registry write
+    // lock (closes the rotate-vs-resolve race window), and stashes
+    // the resulting `(agent_id, guard, rx)` triple for the
+    // post-handshake reader. Returns 401 if the bearer doesn't
+    // match any hosted agent.
     //
-    // `OnceLock` matches the write-once-then-read semantics — the
-    // tungstenite callback fires at most once per handshake, and the
-    // post-handshake reader runs after the callback has returned.
-    let caller: std::sync::Arc<std::sync::OnceLock<AgentId>> =
-        std::sync::Arc::new(std::sync::OnceLock::new());
-    let caller_for_callback = caller.clone();
+    // The `Mutex<Option<...>>` slot is what lets us move the guard
+    // + receiver out of the sync handshake callback into the async
+    // message loop without a clone (oneshot::Receiver isn't Clone).
+    type Session = (
+        AgentId,
+        crate::local_agent::SessionGuard,
+        tokio::sync::oneshot::Receiver<()>,
+    );
+    let session_slot: Arc<std::sync::Mutex<Option<Session>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let session_for_callback = session_slot.clone();
     let xff_value: std::sync::Arc<std::sync::OnceLock<String>> =
         std::sync::Arc::new(std::sync::OnceLock::new());
     let xff_for_callback = xff_value.clone();
@@ -250,9 +257,11 @@ where
                 .and_then(|v| v.to_str().ok());
             let presented = header.and_then(|h| h.strip_prefix(EXPECTED_BEARER_PREFIX));
             if let Some(token) = presented
-                && let Some(agent_id) = auth_registry.resolve_bearer(token)
+                && let Some(triple) = auth_registry.resolve_and_register_bearer(token)
             {
-                let _ = caller_for_callback.set(agent_id);
+                if let Ok(mut g) = session_for_callback.lock() {
+                    *g = Some(triple);
+                }
                 return Ok(resp);
             }
             let mut deny = ErrorResponse::new(Some("invalid or missing bearer token".into()));
@@ -263,9 +272,10 @@ where
     )
     .await?;
 
-    let caller_agent = caller
-        .get()
-        .cloned()
+    let (caller_agent, _session_guard, mut shutdown_rx) = session_slot
+        .lock()
+        .ok()
+        .and_then(|mut g| g.take())
         .ok_or_else(|| anyhow!("bearer auth failed for {peer}"))?;
     let xff_seen = xff_value.get().cloned();
     let client = resolve_client_ip(peer.ip(), xff_seen.as_deref(), &trusted_proxies);
@@ -279,11 +289,13 @@ where
     let _enter = span.enter();
     debug!("remote IPC client authenticated");
 
-    // Register this connection with the registry so a `local rotate`
-    // / `local rm` of the caller's bearer can force-close us. The
-    // returned receiver fires exactly once, and the inner loop
-    // `select!`s on it alongside the inbound frame stream.
-    let mut shutdown_rx = registry.register_session(&caller_agent);
+    // `_session_guard` lives until this function exits — its `Drop`
+    // impl removes the per-session entry from the registry's
+    // `sessions` map, so a clean disconnect doesn't leak a sender.
+    // A rotate / remove that fires while we're alive sends the
+    // shutdown signal first, then the guard's drop is a harmless
+    // no-op (the sessions map for this agent has already been
+    // wholesale-removed).
 
     // Bind both ambient context values for every task-local read
     // inside the message loop. `audit_or_warn` overlays them onto
