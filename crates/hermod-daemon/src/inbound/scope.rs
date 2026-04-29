@@ -233,6 +233,14 @@ pub(crate) fn validate_inbound_body_size(
                 bound("WorkspaceChannelsResponse.hmac", h.len(), 32)?;
             }
         }
+        B::PeerAdvertise { agents, .. } => {
+            // Same operational scale as `WorkspaceRosterResponse` —
+            // a daemon hosting more than ~1024 agents is well past
+            // the "one daemon per developer + their projects" model
+            // Hermod is built for; truncating defends against an
+            // adversarial peer asserting a giant roster.
+            bound("PeerAdvertise.agents", agents.len(), 1024)?;
+        }
     }
     Ok(())
 }
@@ -260,6 +268,7 @@ pub(crate) fn intent_for(envelope: &Envelope) -> hermod_storage::HoldedIntent {
         MessageKind::WorkspaceRosterResponse => HoldedIntent::WorkspaceRosterResponse,
         MessageKind::WorkspaceChannelsRequest => HoldedIntent::WorkspaceChannelsRequest,
         MessageKind::WorkspaceChannelsResponse => HoldedIntent::WorkspaceChannelsResponse,
+        MessageKind::PeerAdvertise => HoldedIntent::PeerAdvertise,
     }
 }
 
@@ -301,5 +310,6 @@ pub(crate) fn scope_for(kind: hermod_core::MessageKind) -> &'static str {
         MessageKind::WorkspaceRosterResponse => hermod_routing::scope::WORKSPACE_ROSTER,
         MessageKind::WorkspaceChannelsRequest => hermod_routing::scope::WORKSPACE_CHANNELS,
         MessageKind::WorkspaceChannelsResponse => hermod_routing::scope::WORKSPACE_CHANNELS,
+        MessageKind::PeerAdvertise => hermod_routing::scope::PEER_ADVERTISE,
     }
 }

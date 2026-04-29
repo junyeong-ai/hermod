@@ -344,6 +344,10 @@ enum PeerCmd {
     /// Replace a Verified peer's TLS fingerprint after a legitimate cert
     /// rotation (confirm OOB before submitting).
     Repin(commands::peer::RepinArgs),
+    /// Push a `PeerAdvertise` envelope listing this daemon's hosted
+    /// agents. Without `--target`, fans out to every federated peer
+    /// once per distinct host.
+    Advertise(commands::peer::AdvertiseArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -441,6 +445,7 @@ async fn main() -> anyhow::Result<()> {
             PeerCmd::Trust(a) => commands::peer::trust(a, &target).await,
             PeerCmd::Remove(a) => commands::peer::remove(a, &target).await,
             PeerCmd::Repin(a) => commands::peer::repin(a, &target).await,
+            PeerCmd::Advertise(a) => commands::peer::advertise(a, &target).await,
         },
         Command::Capability(sub) => match sub {
             CapabilityCmd::Issue(a) => commands::capability::issue(a, &target).await,

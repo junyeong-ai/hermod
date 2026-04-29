@@ -71,6 +71,7 @@ pub enum HoldedIntent {
     WorkspaceRosterResponse,
     WorkspaceChannelsRequest,
     WorkspaceChannelsResponse,
+    PeerAdvertise,
 }
 
 impl HoldedIntent {
@@ -91,6 +92,7 @@ impl HoldedIntent {
             HoldedIntent::WorkspaceRosterResponse => "workspace.roster.response",
             HoldedIntent::WorkspaceChannelsRequest => "workspace.channels.request",
             HoldedIntent::WorkspaceChannelsResponse => "workspace.channels.response",
+            HoldedIntent::PeerAdvertise => "peer.advertise",
         }
     }
 }
@@ -114,6 +116,7 @@ impl FromStr for HoldedIntent {
             "workspace.roster.response" => Ok(HoldedIntent::WorkspaceRosterResponse),
             "workspace.channels.request" => Ok(HoldedIntent::WorkspaceChannelsRequest),
             "workspace.channels.response" => Ok(HoldedIntent::WorkspaceChannelsResponse),
+            "peer.advertise" => Ok(HoldedIntent::PeerAdvertise),
             other => Err(hermod_core::HermodError::InvalidEnvelope(format!(
                 "unknown holded intent {other:?}"
             ))),
@@ -152,6 +155,7 @@ mod intent_tests {
         HoldedIntent::WorkspaceRosterResponse,
         HoldedIntent::WorkspaceChannelsRequest,
         HoldedIntent::WorkspaceChannelsResponse,
+        HoldedIntent::PeerAdvertise,
     ];
 
     #[test]

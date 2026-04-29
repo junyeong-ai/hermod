@@ -1,15 +1,23 @@
-use hermod_core::{AgentId, Endpoint, PubkeyBytes, Timestamp, TrustLevel};
+use hermod_core::{
+    AdvertisedAgent, AgentAddress, AgentAlias, AgentId, Endpoint, MessageBody, MessagePriority,
+    PubkeyBytes, Timestamp, TrustLevel,
+};
 use hermod_protocol::ipc::methods::{
-    AliasOutcomeView, PeerAddParams, PeerAddResult, PeerListResult, PeerRemoveParams,
-    PeerRemoveResult, PeerRepinParams, PeerRepinResult, PeerSummary, PeerTrustParams,
+    AliasOutcomeView, MessageSendParams, PeerAddParams, PeerAddResult, PeerAdvertiseParams,
+    PeerAdvertiseResult, PeerListResult, PeerRemoveParams, PeerRemoveResult, PeerRepinParams,
+    PeerRepinResult, PeerSummary, PeerTrustParams,
 };
 use hermod_routing::PeerPool;
 use hermod_storage::{AuditEntry, AuditSink, Database};
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::federation::record_agent_peer;
-use crate::services::{ServiceError, audit_or_warn, presence::PresenceService};
+use crate::local_agent::LocalAgentRegistry;
+use crate::services::{
+    ServiceError, audit_or_warn, message::MessageService, presence::PresenceService,
+};
 
 #[derive(Debug, Clone)]
 pub struct PeerService {
@@ -18,15 +26,26 @@ pub struct PeerService {
     self_id: AgentId,
     presence: PresenceService,
     pool: Arc<PeerPool>,
+    /// Locally-hosted agents enumerated by `peer.advertise`.
+    registry: LocalAgentRegistry,
+    /// Daemon's host pubkey — body.host_pubkey of every emitted
+    /// `PeerAdvertise`.
+    host_pubkey: PubkeyBytes,
+    /// Outbound envelope path for the advertise fan-out.
+    messages: MessageService,
 }
 
 impl PeerService {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db: Arc<dyn Database>,
         audit_sink: Arc<dyn AuditSink>,
         self_id: AgentId,
         presence: PresenceService,
         pool: Arc<PeerPool>,
+        registry: LocalAgentRegistry,
+        host_pubkey: PubkeyBytes,
+        messages: MessageService,
     ) -> Self {
         Self {
             db,
@@ -34,6 +53,9 @@ impl PeerService {
             self_id,
             presence,
             pool,
+            registry,
+            host_pubkey,
+            messages,
         }
     }
 
@@ -108,6 +130,21 @@ impl PeerService {
         )
         .await;
 
+        // Auto-advertise our local agents back to the freshly-added
+        // peer so the operator doesn't have to think about a second
+        // step. Best-effort — if the envelope can't be enqueued
+        // (broker down, transport unavailable), the explicit
+        // `peer.advertise` IPC method or the next outbound dial covers
+        // the gap.
+        let target_id = rec.id.clone();
+        if let Err(e) = self.advertise_to_agent(&target_id).await {
+            tracing::warn!(
+                target = %target_id,
+                error = %e,
+                "auto-advertise on peer.add failed (operator can retry via `hermod peer advertise`)",
+            );
+        }
+
         Ok(PeerAddResult {
             id: rec.id,
             fingerprint,
@@ -117,6 +154,147 @@ impl PeerService {
                 hermod_storage::AliasOutcome::LocalDropped { .. } => AliasOutcomeView::LocalDropped,
             },
         })
+    }
+
+    /// Enumerate this daemon's hosted agents and ship a `PeerAdvertise`
+    /// envelope to one peer (or every peer with a known endpoint).
+    /// Body carries `host_pubkey` + the agents' `(id, pubkey, alias)`
+    /// triples. Receiver upserts into its directory; subsequent
+    /// envelopes from those agents land without further out-of-band
+    /// exchange.
+    pub async fn advertise(
+        &self,
+        params: PeerAdvertiseParams,
+    ) -> Result<PeerAdvertiseResult, ServiceError> {
+        let agents = self.advertised_agents();
+        let agent_count = agents.len() as u32;
+        let mut fanout: u32 = 0;
+        match params.target {
+            Some(reference) => {
+                let target = self.resolve_target(&reference).await?;
+                if self.send_advertise(&target, agents.clone()).await.is_ok() {
+                    fanout = 1;
+                }
+            }
+            None => {
+                // Walk federated peers; pick one canonical local-agent
+                // recipient per distinct host_pubkey so a peer running N
+                // hosted agents receives the advertise once, not N
+                // times.
+                let rows = self.db.agents().list_federated().await?;
+                let mut seen_hosts: HashSet<PubkeyBytes> = HashSet::new();
+                for r in rows {
+                    let host = match r.host_pubkey {
+                        Some(h) => h,
+                        // No host pubkey known yet — can't dedup safely;
+                        // skip rather than risk a duplicate advertise. The
+                        // first inbound envelope from this peer will
+                        // populate host_pubkey via TOFU.
+                        None => continue,
+                    };
+                    if !seen_hosts.insert(host) {
+                        continue;
+                    }
+                    if self.send_advertise(&r.id, agents.clone()).await.is_ok() {
+                        fanout = fanout.saturating_add(1);
+                    }
+                }
+            }
+        }
+
+        audit_or_warn(
+            &*self.audit_sink,
+            AuditEntry {
+                id: None,
+                ts: Timestamp::now(),
+                actor: self.self_id.clone(),
+                action: "peer.advertise".into(),
+                target: None,
+                details: Some(serde_json::json!({
+                    "fanout": fanout,
+                    "agents": agent_count,
+                })),
+                client_ip: None,
+                federation: hermod_storage::AuditFederationPolicy::Default,
+            },
+        )
+        .await;
+
+        Ok(PeerAdvertiseResult {
+            fanout,
+            agents: agent_count,
+        })
+    }
+
+    /// Internal: advertise to a specific peer agent_id. Used by the
+    /// `peer.add` auto-trigger.
+    async fn advertise_to_agent(&self, target: &AgentId) -> Result<(), ServiceError> {
+        let agents = self.advertised_agents();
+        self.send_advertise(target, agents).await
+    }
+
+    fn advertised_agents(&self) -> Vec<AdvertisedAgent> {
+        self.registry
+            .list()
+            .iter()
+            .map(|a| AdvertisedAgent {
+                id: a.agent_id.clone(),
+                pubkey: a.keypair.to_pubkey_bytes(),
+                alias: a.local_alias.clone(),
+            })
+            .collect()
+    }
+
+    async fn send_advertise(
+        &self,
+        target: &AgentId,
+        agents: Vec<AdvertisedAgent>,
+    ) -> Result<(), ServiceError> {
+        // Resolve recipient endpoint so the router knows whether to
+        // dial direct or via a broker.
+        let rec = self.db.agents().get(target).await?.ok_or_else(|| {
+            ServiceError::InvalidParam(format!("peer.advertise target {target} not in directory"))
+        })?;
+        let to = match rec.endpoint {
+            Some(ep) if !ep.is_local() => AgentAddress::with_endpoint(rec.id, ep),
+            _ => AgentAddress::local(rec.id),
+        };
+        let body = MessageBody::PeerAdvertise {
+            host_pubkey: self.host_pubkey,
+            agents,
+        };
+        // Self-inclusion proof: the caller (resolved by
+        // `MessageService::send` from the IPC scope) must be one of
+        // the listed agents — it already is, since `advertised_agents`
+        // walks our own registry.
+        self.messages
+            .send(MessageSendParams {
+                to,
+                body,
+                priority: Some(MessagePriority::Low),
+                thread: None,
+                ttl_secs: Some(300),
+                caps: None,
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn resolve_target(&self, reference: &str) -> Result<AgentId, ServiceError> {
+        if let Some(alias_raw) = reference.strip_prefix('@') {
+            let alias = AgentAlias::from_str(alias_raw)
+                .map_err(|e| ServiceError::InvalidParam(format!("invalid alias: {e}")))?;
+            let rec = self
+                .db
+                .agents()
+                .get_by_local_alias(&alias)
+                .await?
+                .ok_or(ServiceError::NotFound)?;
+            Ok(rec.id)
+        } else {
+            AgentId::from_str(reference)
+                .map_err(|e| ServiceError::InvalidParam(format!("invalid agent id: {e}")))
+        }
     }
 
     pub async fn list(&self) -> Result<PeerListResult, ServiceError> {

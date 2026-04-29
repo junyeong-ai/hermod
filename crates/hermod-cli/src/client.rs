@@ -427,6 +427,13 @@ impl DaemonClient {
         self.call(methods::method::PEER_REPIN, params).await
     }
 
+    pub async fn peer_advertise(
+        &mut self,
+        params: methods::PeerAdvertiseParams,
+    ) -> Result<methods::PeerAdvertiseResult> {
+        self.call(methods::method::PEER_ADVERTISE, params).await
+    }
+
     pub async fn audit_query(
         &mut self,
         params: methods::AuditQueryParams,

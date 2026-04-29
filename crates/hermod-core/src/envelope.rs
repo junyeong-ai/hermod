@@ -6,7 +6,7 @@ use ulid::Ulid;
 use crate::bytes::{PubkeyBytes, SignatureBytes};
 use crate::capability::CapabilityToken;
 use crate::error::HermodError;
-use crate::identity::{AgentAddress, AgentId};
+use crate::identity::{AgentAddress, AgentAlias, AgentId};
 use crate::time::Timestamp;
 use serde_bytes::ByteBuf;
 
@@ -89,6 +89,11 @@ pub enum MessageKind {
     WorkspaceRosterResponse,
     WorkspaceChannelsRequest,
     WorkspaceChannelsResponse,
+    /// Sender daemon enumerates the agents it hosts. Recipients
+    /// upsert each advertised `(agent_id, pubkey, host_pubkey)`
+    /// triple into their directory so cross-host reachability is
+    /// known before the first envelope from that agent arrives.
+    PeerAdvertise,
 }
 
 impl MessageKind {
@@ -109,6 +114,7 @@ impl MessageKind {
             MessageKind::WorkspaceRosterResponse => "workspace_roster_response",
             MessageKind::WorkspaceChannelsRequest => "workspace_channels_request",
             MessageKind::WorkspaceChannelsResponse => "workspace_channels_response",
+            MessageKind::PeerAdvertise => "peer_advertise",
         }
     }
 
@@ -131,6 +137,7 @@ impl MessageKind {
             MessageKind::WorkspaceRosterResponse => "WorkspaceRosterResponse",
             MessageKind::WorkspaceChannelsRequest => "WorkspaceChannelsRequest",
             MessageKind::WorkspaceChannelsResponse => "WorkspaceChannelsResponse",
+            MessageKind::PeerAdvertise => "PeerAdvertise",
         }
     }
 }
@@ -212,6 +219,7 @@ impl FromStr for MessageKind {
             "workspace_roster_response" => Ok(MessageKind::WorkspaceRosterResponse),
             "workspace_channels_request" => Ok(MessageKind::WorkspaceChannelsRequest),
             "workspace_channels_response" => Ok(MessageKind::WorkspaceChannelsResponse),
+            "peer_advertise" => Ok(MessageKind::PeerAdvertise),
             other => Err(HermodError::InvalidEnvelope(format!(
                 "unknown message kind {other:?}"
             ))),
@@ -533,6 +541,31 @@ pub enum MessageBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hmac: Option<ByteBuf>,
     },
+
+    /// Sender daemon enumerates the agents it hosts. The receiver
+    /// upserts each `(agent_id, pubkey)` triple into its directory
+    /// keyed on `host_pubkey`. Authentication chain:
+    ///   1. The standard envelope-signing path binds
+    ///      `envelope.from_pubkey ↔ envelope.from.id` (self-cert).
+    ///   2. The acceptor verifies that `envelope.from.id` appears in
+    ///      `agents` (so the sender claims authority over its own
+    ///      agent_id, not someone else's).
+    ///   3. The acceptor verifies `host_pubkey` matches the sender's
+    ///      already-known host binding (or pins on first contact).
+    ///   4. Each `AdvertisedAgent` is self-cert-checked
+    ///      (`id == blake3(pubkey)[:26]`); existing rows are
+    ///      upserted (operator-set fields preserved), new rows land
+    ///      with `TrustLevel::Tofu`.
+    PeerAdvertise {
+        /// Sender's daemon-level Noise host pubkey. The receiver pins
+        /// every advertised agent's `host_pubkey` to this value, so
+        /// `(agent_id, host_pubkey)` is the cross-host directory key.
+        host_pubkey: PubkeyBytes,
+        /// Agents hosted by this daemon. Must include `envelope.from.id`
+        /// (self-inclusion is the proof that the sender belongs to the
+        /// claimed host).
+        agents: Vec<AdvertisedAgent>,
+    },
 }
 
 /// One channel descriptor inside a [`MessageBody::WorkspaceChannelsResponse`].
@@ -558,6 +591,20 @@ pub struct RosterMember {
     pub pubkey: PubkeyBytes,
 }
 
+/// One agent descriptor inside a [`MessageBody::PeerAdvertise`].
+/// `id` is bound to `pubkey` by `id == blake3(pubkey)[:26]`; the
+/// receiver verifies this binding before upserting. `alias`
+/// surfaces the operator-set local alias as a `peer_asserted_alias`
+/// hint for the receiver — never overwrites the receiver's own
+/// `local_alias` for this agent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdvertisedAgent {
+    pub id: AgentId,
+    pub pubkey: PubkeyBytes,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<AgentAlias>,
+}
+
 impl MessageBody {
     pub fn kind(&self) -> MessageKind {
         match self {
@@ -576,6 +623,7 @@ impl MessageBody {
             MessageBody::WorkspaceRosterResponse { .. } => MessageKind::WorkspaceRosterResponse,
             MessageBody::WorkspaceChannelsRequest { .. } => MessageKind::WorkspaceChannelsRequest,
             MessageBody::WorkspaceChannelsResponse { .. } => MessageKind::WorkspaceChannelsResponse,
+            MessageBody::PeerAdvertise { .. } => MessageKind::PeerAdvertise,
         }
     }
 

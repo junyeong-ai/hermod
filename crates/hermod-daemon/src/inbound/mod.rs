@@ -10,6 +10,7 @@
 mod capability_audit;
 mod channel;
 mod file_brief_presence;
+mod peer_advertise;
 mod permission;
 mod scope;
 mod workspace_observability;
@@ -572,6 +573,14 @@ impl InboundProcessor {
                         channels,
                         hmac.as_ref().map(|b| b.as_ref()),
                     )
+                    .await;
+            }
+            hermod_core::MessageBody::PeerAdvertise {
+                host_pubkey,
+                agents,
+            } => {
+                return self
+                    .accept_peer_advertise(envelope, host_pubkey, agents)
                     .await;
             }
             // Direct DMs land in the inbox via the `messages` table below.

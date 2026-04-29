@@ -212,6 +212,10 @@ impl Dispatcher {
                 let p = parse_params(params)?;
                 to_value(self.peers.repin(p).await)
             }
+            method::PEER_ADVERTISE => {
+                let p = parse_params_or_default(params)?;
+                to_value(self.peers.advertise(p).await)
+            }
 
             method::AUDIT_QUERY => {
                 let p = parse_params_or_default(params)?;

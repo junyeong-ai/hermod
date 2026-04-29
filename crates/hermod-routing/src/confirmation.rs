@@ -108,6 +108,15 @@ pub fn classify(envelope: &Envelope) -> Sensitivity {
         MessageBody::WorkspaceRosterResponse { .. } => Sensitivity::Routine,
         MessageBody::WorkspaceChannelsRequest { .. } => Sensitivity::Routine,
         MessageBody::WorkspaceChannelsResponse { .. } => Sensitivity::Routine,
+        // PeerAdvertise upserts directory entries the receiver may not
+        // have seen before. Trust gate is the standard envelope chain
+        // (signature + self-cert) plus the acceptor's host_pubkey
+        // cross-check — adding a confirmation prompt per advertise
+        // would defeat the auto-discovery point. Verified+ peers fold
+        // the new agents in silently; Tofu peers do too (the receiver
+        // marks each advertised agent as Tofu, so the *agent's* first
+        // envelope still hits the confirmation gate).
+        MessageBody::PeerAdvertise { .. } => Sensitivity::Routine,
     }
 }
 
@@ -238,6 +247,11 @@ pub fn summarize(envelope: &Envelope) -> String {
             envelope.from.id,
             hex::encode(workspace_id),
             channels.len(),
+        ),
+        MessageBody::PeerAdvertise { agents, .. } => format!(
+            "peer advertise from {}: {} agent(s)",
+            envelope.from.id,
+            agents.len(),
         ),
     }
 }

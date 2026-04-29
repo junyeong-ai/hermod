@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Args;
 use hermod_core::{Endpoint, TrustLevel};
 use hermod_protocol::ipc::methods::{
-    PeerAddParams, PeerRemoveParams, PeerRepinParams, PeerTrustParams,
+    PeerAddParams, PeerAdvertiseParams, PeerRemoveParams, PeerRepinParams, PeerTrustParams,
 };
 
 use std::str::FromStr;
@@ -120,6 +120,25 @@ pub async fn repin(args: RepinArgs, target: &ClientTarget) -> Result<()> {
         .peer_repin(PeerRepinParams {
             peer: args.peer,
             fingerprint: args.fingerprint,
+        })
+        .await?;
+    println!("{}", serde_json::to_string_pretty(&r)?);
+    Ok(())
+}
+
+#[derive(Args, Debug)]
+pub struct AdvertiseArgs {
+    /// Target peer (`agent_id` or `@<local_alias>`). Omit to advertise
+    /// to every federated peer once per distinct host.
+    #[arg(long)]
+    pub target: Option<String>,
+}
+
+pub async fn advertise(args: AdvertiseArgs, target: &ClientTarget) -> Result<()> {
+    let mut c = target.connect().await?;
+    let r = c
+        .peer_advertise(PeerAdvertiseParams {
+            target: args.target,
         })
         .await?;
     println!("{}", serde_json::to_string_pretty(&r)?);

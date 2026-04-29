@@ -16,17 +16,24 @@ The gate consults two inputs and produces one of three verdicts.
   - **routine** — `Brief`, `Presence`, `ChannelBroadcast`,
     `ChannelAdvertise`, `PermissionResponse`, `AuditFederate`,
     `WorkspaceRosterRequest`, `WorkspaceRosterResponse`,
-    `WorkspaceChannelsRequest`, `WorkspaceChannelsResponse`. Group MAC
-    + workspace membership already gate the channel kinds;
-    `PermissionResponse` is capability-gated (the `permission:respond`
-    scope is the real authority check); `AuditFederate` is gated by the
-    operator's `[audit] accept_federation` opt-in (a daemon that hasn't
-    opted in rejects the envelope outright before the confirmation gate
-    runs), so per-envelope confirmation prompts on bulk audit shipping
-    would be impractical. The `Workspace*` RPC variants are gated by
-    the workspace MAC (private) or the receiver's `workspace_members`
-    table (public) — membership IS the trust gate, so per-envelope
-    confirmation would be infinite friction between members.
+    `WorkspaceChannelsRequest`, `WorkspaceChannelsResponse`,
+    `PeerAdvertise`. Group MAC + workspace membership already gate
+    the channel kinds; `PermissionResponse` is capability-gated
+    (the `permission:respond` scope is the real authority check);
+    `AuditFederate` is gated by the operator's `[audit]
+    accept_federation` opt-in (a daemon that hasn't opted in
+    rejects the envelope outright before the confirmation gate
+    runs), so per-envelope confirmation prompts on bulk audit
+    shipping would be impractical. The `Workspace*` RPC variants
+    are gated by the workspace MAC (private) or the receiver's
+    `workspace_members` table (public) — membership IS the trust
+    gate, so per-envelope confirmation would be infinite friction
+    between members. `PeerAdvertise` carries directory upserts;
+    the inbound acceptor's self-inclusion proof + host_pubkey
+    cross-check IS the trust gate, and per-advertise confirmation
+    would defeat the auto-discovery point. (Each advertised agent
+    still lands as `TrustLevel::Tofu`, so the *agent's* first
+    real envelope still hits the confirmation gate.)
   - **review** — `Direct`, `File`, `PermissionPrompt`. DM bodies land in
     a human-visible inbox feed; `File` payloads are also user-visible
     (and could be opened by a sandbox); a `PermissionPrompt` from an

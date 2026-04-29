@@ -38,6 +38,11 @@ pub mod method {
     pub const PEER_TRUST: &str = "peer.trust";
     pub const PEER_REMOVE: &str = "peer.remove";
     pub const PEER_REPIN: &str = "peer.repin";
+    /// Push a `PeerAdvertise` envelope to one peer (or all known
+    /// peers) describing the agents this daemon hosts. Operator-
+    /// triggered explicit form; the daemon also auto-advertises on
+    /// successful `peer.add`.
+    pub const PEER_ADVERTISE: &str = "peer.advertise";
 
     // Capabilities
     pub const CAPABILITY_ISSUE: &str = "capability.issue";
@@ -416,6 +421,26 @@ pub struct PeerSummary {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PeerListResult {
     pub peers: Vec<PeerSummary>,
+}
+
+/// Push a `PeerAdvertise` envelope to one peer (or all known peers).
+/// Reply lets the operator confirm the fan-out reach + see any
+/// per-peer enqueue errors.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PeerAdvertiseParams {
+    /// Target peer reference — agent_id (26-char base32) or
+    /// `@<local_alias>`. `None` advertises to every peer with a
+    /// non-empty `endpoint` in the directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PeerAdvertiseResult {
+    /// Number of envelopes successfully enqueued (one per peer).
+    pub fanout: u32,
+    /// Number of agents listed in the body.
+    pub agents: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

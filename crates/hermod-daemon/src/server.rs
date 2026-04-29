@@ -524,7 +524,12 @@ pub async fn serve(
             router.clone(),
             messages.clone(),
         ),
-        broadcasts: BroadcastService::new(db.clone(), audit_sink.clone(), router.clone(), messages),
+        broadcasts: BroadcastService::new(
+            db.clone(),
+            audit_sink.clone(),
+            router.clone(),
+            messages.clone(),
+        ),
         confirmations: ConfirmationService::new(
             db.clone(),
             audit_sink.clone(),
@@ -537,6 +542,9 @@ pub async fn serve(
             host_id.clone(),
             presence.clone(),
             remote.pool(),
+            registry.clone(),
+            host_keypair.to_pubkey_bytes(),
+            messages.clone(),
         ),
         permissions,
         audit: AuditService::new(db.clone(), config.policy.audit_retention_secs),

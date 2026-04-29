@@ -47,6 +47,11 @@ pub mod scope {
     /// Workspace channel listing query/response. Same gate model as
     /// `WORKSPACE_ROSTER`.
     pub const WORKSPACE_CHANNELS: &str = "workspace:channels";
+    /// Peer-advertise: sender enumerates the agents it hosts. The
+    /// inbound acceptor cross-checks self-inclusion + binds each
+    /// advertised agent's host_pubkey, so the scope is here only so a
+    /// hardened deployment can demand explicit delegation on top.
+    pub const PEER_ADVERTISE: &str = "peer:advertise";
 }
 
 /// Configuration knob — when `false`, any authenticated Noise peer may send

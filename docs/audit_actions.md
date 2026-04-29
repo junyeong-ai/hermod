@@ -117,6 +117,8 @@ runs it on every PR.
 | `peer.trust` | `peer.trust` (operator promotes / demotes). | `level` |
 | `peer.remove` | `peer.remove` (clears endpoint and TLS pin). | none |
 | `peer.repin` | `peer.repin` (operator-confirmed cert rotation). | `previous`, `new` |
+| `peer.advertise` | Operator pushed a `PeerAdvertise` (or `peer.add` auto-trigger). | `fanout`, `agents` |
+| `peer.advertise.received` | Inbound `PeerAdvertise` from a peer. | `agents_advertised`, `agents_upserted`, `rejected_self_cert`, `rejected_host_conflict` |
 
 ### permission.*
 
