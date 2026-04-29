@@ -341,9 +341,13 @@ pub struct AgentRegisterResult {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PeerAddParams {
     pub endpoint: Endpoint,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pubkey_hex: Option<String>,
-    /// Operator's local nickname for this peer. Stored as `local_alias`.
+    /// Remote daemon's host pubkey — pinned for the Noise XX handshake.
+    pub host_pubkey_hex: String,
+    /// The peer agent we want to address by name. Envelopes sent
+    /// `--to <local_alias>` resolve to this agent_id; sig verification
+    /// uses this pubkey.
+    pub agent_pubkey_hex: String,
+    /// Operator's local nickname for the agent. Stored as `local_alias`.
     /// Validated by `AgentAlias`'s `try_from` impl at deserialize time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_alias: Option<AgentAlias>,

@@ -15,12 +15,16 @@ pub struct AddArgs {
     /// Endpoint URI, e.g. `wss://host:7823`.
     #[arg(long)]
     pub endpoint: String,
-    /// 64-char hex of the peer's ed25519 identity pubkey. Required —
-    /// federation peers authenticate via Noise XX, so an endpoint without
-    /// a known pubkey can't talk to us.
+    /// 64-char hex of the remote daemon's host identity pubkey. Pinned
+    /// for the Noise XX handshake when this daemon dials the peer.
     #[arg(long)]
-    pub pubkey_hex: String,
-    /// Optional human-readable alias.
+    pub host_pubkey_hex: String,
+    /// 64-char hex of the peer agent's identity pubkey. Envelopes
+    /// addressed `--to <alias>` resolve to this agent's id; signature
+    /// verification uses this pubkey.
+    #[arg(long)]
+    pub agent_pubkey_hex: String,
+    /// Optional human-readable alias for the peer agent.
     #[arg(long)]
     pub alias: Option<String>,
 }
@@ -57,7 +61,8 @@ pub async fn add(args: AddArgs, target: &ClientTarget) -> Result<()> {
     let r = c
         .peer_add(PeerAddParams {
             endpoint,
-            pubkey_hex: Some(args.pubkey_hex),
+            host_pubkey_hex: args.host_pubkey_hex,
+            agent_pubkey_hex: args.agent_pubkey_hex,
             local_alias: args
                 .alias
                 .as_deref()

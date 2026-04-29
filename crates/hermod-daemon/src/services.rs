@@ -93,44 +93,32 @@ pub use workspace_observability::WorkspaceObservabilityService;
 
 use hermod_storage::{AgentRecord, Database};
 
-/// Register every locally-hosted agent in the `agents` directory and
-/// the `local_agents` sub-relation. Each agent's row carries
-/// `host_pubkey = Some(host_pubkey)` so federation peers can resolve
-/// "which daemon hosts this agent_id" without a separate lookup.
-///
-/// The operator-set `[identity] alias` is attached to the *bootstrap*
-/// agent — identified by `agent.keypair.pubkey == host_pubkey`, which
-/// is the H2 single-tenant invariant (the bootstrap re-uses the host
-/// keypair). Selecting by that match instead of by registry index
-/// keeps the assignment stable regardless of filesystem ordering;
-/// when H5 introduces non-bootstrap agents whose keypairs diverge
-/// from `host_pubkey`, those agents correctly receive `None` here
-/// and rely on per-agent aliases from `hermod local add --alias`.
+/// Register every locally-hosted agent in the `agents` directory
+/// and the `local_agents` sub-relation. Each agent's row carries
+/// `host_pubkey = Some(host_pubkey)` so federation peers can
+/// resolve "which daemon hosts this agent_id" without a separate
+/// lookup, and `local_alias` mirrors the operator-set value from
+/// the agent's on-disk `alias` file (read at scan time).
 ///
 /// On return the registry's `workspace_root` / `created_at` fields
-/// reflect the persisted `local_agents` rows (see
-/// [`crate::local_agent::merge_with_db`]).
+/// reflect the persisted `local_agents` rows. See
+/// [`crate::local_agent::merge_with_db`] for the bearer-drift
+/// reconciliation that runs alongside.
 pub async fn ensure_local_agents(
     db: &dyn Database,
     host_pubkey: hermod_core::PubkeyBytes,
     registry: crate::local_agent::LocalAgentRegistry,
-    primary_alias: Option<hermod_core::AgentAlias>,
+    audit_sink: &dyn AuditSink,
 ) -> anyhow::Result<crate::local_agent::LocalAgentRegistry> {
     let now = hermod_core::Timestamp::now();
     for agent in registry.list().iter() {
-        let agent_pubkey = agent.keypair.to_pubkey_bytes();
-        let alias = if agent_pubkey == host_pubkey {
-            primary_alias.clone()
-        } else {
-            None
-        };
         db.agents()
             .upsert(&AgentRecord {
                 id: agent.agent_id.clone(),
-                pubkey: agent_pubkey,
+                pubkey: agent.keypair.to_pubkey_bytes(),
                 host_pubkey: Some(host_pubkey),
                 endpoint: None,
-                local_alias: alias,
+                local_alias: agent.local_alias.clone(),
                 peer_asserted_alias: None,
                 trust_level: hermod_core::TrustLevel::Local,
                 tls_fingerprint: None,
@@ -140,5 +128,5 @@ pub async fn ensure_local_agents(
             })
             .await?;
     }
-    crate::local_agent::merge_with_db(db, registry).await
+    crate::local_agent::merge_with_db(db, audit_sink, registry).await
 }

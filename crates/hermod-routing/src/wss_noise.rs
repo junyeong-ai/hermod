@@ -10,7 +10,7 @@
 //! FederationServer.
 
 use async_trait::async_trait;
-use hermod_core::{AgentAlias, Endpoint, MessageId, PubkeyBytes};
+use hermod_core::{Endpoint, MessageId};
 use hermod_crypto::Keypair;
 use hermod_protocol::wire::{AckStatus, WireFrame};
 use hermod_transport::ws::{SharedTlsAcceptor, WsListener, connect_tls};
@@ -25,42 +25,29 @@ use crate::transport::{
 
 /// WSS + Noise XX transport.
 ///
-/// Holds the daemon's keypair (used for the Noise handshake's static
-/// key derivation and for the post-handshake `Hello` frame the peer
-/// uses to bind agent_id ↔ noise pubkey) plus the operator-set alias.
+/// Holds the daemon's *host* keypair: it derives the Noise XX static
+/// key for the handshake and is the identity asserted in the
+/// post-handshake `Hello` frame. Per-tenant agent keypairs live one
+/// layer up (in `LocalAgentRegistry`); they sign envelopes but never
+/// participate in the Noise handshake.
+///
 /// Optional TLS material is required for the listener side; outbound
-/// dialing only consumes the keypair.
-///
-/// The listener's TLS acceptor lives behind a [`SharedTlsAcceptor`]
-/// stored in `tls_state`, populated lazily on the first `listen`
-/// call. `reload_tls` rebuilds the acceptor from new PEM and atomically
-/// swaps the inner `Arc<TlsAcceptor>` — in-flight handshakes finish
-/// with their pinned acceptor reference, new accepts use the rotated
-/// material. Same handle is returned to every `listen` caller, so an
-/// operator can hot-rotate certs without restarting the daemon.
-///
-/// Inbound handshake concurrency (`max_inflight_handshakes`) is
-/// enforced one layer up by `FederationServer`'s semaphore — flow
-/// control is the server's responsibility, not the transport's.
+/// dialing only consumes the keypair. The listener's TLS acceptor
+/// lives behind a [`SharedTlsAcceptor`] stored in `tls_state`,
+/// populated lazily on the first `listen` call. `reload_tls`
+/// rebuilds the acceptor and atomically swaps the inner
+/// `Arc<TlsAcceptor>` — in-flight handshakes finish with their
+/// pinned acceptor reference, new accepts use the rotated material.
 #[derive(Clone)]
 pub struct WssNoiseTransport {
-    keypair: Arc<Keypair>,
-    alias: Option<AgentAlias>,
-    /// Original TLS PEM kept around so we can rebuild the acceptor on
-    /// the first `listen` call. None disables `listen` entirely
-    /// (outbound-only mode).
+    host_keypair: Arc<Keypair>,
     tls_material: Option<(Arc<str>, Arc<str>)>,
-    /// Shared rotation point. Populated on first `listen()`; subsequent
-    /// `listen()` calls reuse the same handle so `reload_tls` is a
-    /// single point-of-truth swap for every active listener spawned
-    /// from this transport.
     tls_state: Arc<Mutex<Option<SharedTlsAcceptor>>>,
 }
 
 impl std::fmt::Debug for WssNoiseTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WssNoiseTransport")
-            .field("alias", &self.alias)
             .field("listen_capable", &self.tls_material.is_some())
             .finish_non_exhaustive()
     }
@@ -70,10 +57,9 @@ impl WssNoiseTransport {
     /// Outbound-only constructor — no TLS material, `listen` returns an
     /// error. Used by daemons running pure outbound federation
     /// (e.g. mobile clients that never accept inbound).
-    pub fn outbound_only(keypair: Arc<Keypair>, alias: Option<AgentAlias>) -> Self {
+    pub fn outbound_only(host_keypair: Arc<Keypair>) -> Self {
         Self {
-            keypair,
-            alias,
+            host_keypair,
             tls_material: None,
             tls_state: Arc::new(Mutex::new(None)),
         }
@@ -82,15 +68,9 @@ impl WssNoiseTransport {
     /// Full constructor: outbound + inbound. `cert_pem` / `key_pem` are
     /// the daemon's self-signed TLS material (see
     /// `hermod_crypto::TlsMaterial`).
-    pub fn new(
-        keypair: Arc<Keypair>,
-        alias: Option<AgentAlias>,
-        cert_pem: Arc<str>,
-        key_pem: Arc<str>,
-    ) -> Self {
+    pub fn new(host_keypair: Arc<Keypair>, cert_pem: Arc<str>, key_pem: Arc<str>) -> Self {
         Self {
-            keypair,
-            alias,
+            host_keypair,
             tls_material: Some((cert_pem, key_pem)),
             tls_state: Arc::new(Mutex::new(None)),
         }
@@ -113,10 +93,6 @@ impl Transport for WssNoiseTransport {
             )
         })?;
 
-        // Reuse the rotation handle if `listen` ran before; otherwise
-        // build a fresh one from the configured PEM and store it.
-        // The mutex is held only across the bind, not across accepts
-        // — accepts read the inner RwLock independently.
         let listener = {
             let mut guard = self.tls_state.lock().await;
             if let Some(shared) = guard.clone() {
@@ -136,8 +112,7 @@ impl Transport for WssNoiseTransport {
 
         Ok(Box::new(WssNoiseListener {
             inner: Arc::new(listener),
-            keypair: self.keypair.clone(),
-            alias: self.alias.clone(),
+            host_keypair: self.host_keypair.clone(),
         }))
     }
 
@@ -148,18 +123,8 @@ impl Transport for WssNoiseTransport {
                     .into(),
             ));
         }
-        // Validate the new material by building an acceptor against
-        // it. If `listen` hasn't run yet we still want a clear
-        // success/fail signal here (and the new material becomes the
-        // baseline so the next `listen` picks it up). Build a fresh
-        // listener-less swap point and stash it.
         let mut guard = self.tls_state.lock().await;
         if let Some(shared) = guard.as_ref() {
-            // Reuse the existing handle — `WsListener` doesn't need to
-            // mediate the swap; the same `Arc<RwLock<…>>` is held by
-            // every active listener spawned from this transport.
-            // Build the new acceptor via a throwaway listener so we
-            // hit the same parse/validate path.
             let validator = hermod_transport::ws::WsListener::bind_tls_shared(
                 "127.0.0.1:0".parse().unwrap(),
                 shared.clone(),
@@ -171,12 +136,6 @@ impl Transport for WssNoiseTransport {
                 .await
                 .map_err(|e| PeerTransportError::Backend(e.to_string()))?;
         } else {
-            // No active listener yet — just build a new shared handle
-            // so the *next* `listen` picks up the rotated material.
-            // We do this by binding a throwaway listener on
-            // `127.0.0.1:0`, snapshotting its shared acceptor, then
-            // dropping the listener (the TCP socket goes away with
-            // it; only the `Arc<RwLock<…>>` survives).
             let throwaway = hermod_transport::ws::WsListener::bind_tls(
                 "127.0.0.1:0".parse().unwrap(),
                 cert_pem,
@@ -207,13 +166,11 @@ impl Transport for WssNoiseTransport {
             .map_err(|e| PeerTransportError::Io(e.to_string()))?;
         let tls_fp = ws.peer_tls_fingerprint().map(|s| s.to_string());
 
-        let noise = self.keypair.noise_static_key();
+        let noise = self.host_keypair.noise_static_key();
         let conn = PeerConnection::handshake_outbound(
             ws,
             noise.private_bytes(),
-            self.keypair.to_pubkey_bytes(),
-            PubkeyBytes(*noise.public_bytes()),
-            self.alias.clone(),
+            self.host_keypair.to_pubkey_bytes(),
         )
         .await
         .map_err(|e| PeerTransportError::Handshake(e.to_string()))?;
@@ -227,8 +184,7 @@ impl Transport for WssNoiseTransport {
 #[derive(Clone)]
 struct WssNoiseListener {
     inner: Arc<WsListener>,
-    keypair: Arc<Keypair>,
-    alias: Option<AgentAlias>,
+    host_keypair: Arc<Keypair>,
 }
 
 impl std::fmt::Debug for WssNoiseListener {
@@ -247,13 +203,11 @@ impl TransportListener for WssNoiseListener {
             .map_err(|e| PeerTransportError::Io(e.to_string()))?;
         let tls_fp = ws.peer_tls_fingerprint().map(|s| s.to_string());
 
-        let noise = self.keypair.noise_static_key();
+        let noise = self.host_keypair.noise_static_key();
         let conn = PeerConnection::handshake_inbound(
             ws,
             noise.private_bytes(),
-            self.keypair.to_pubkey_bytes(),
-            PubkeyBytes(*noise.public_bytes()),
-            self.alias.clone(),
+            self.host_keypair.to_pubkey_bytes(),
         )
         .await
         .map_err(|e| PeerTransportError::Handshake(e.to_string()))?;
@@ -269,8 +223,8 @@ impl TransportListener for WssNoiseListener {
 }
 
 /// One authenticated WSS+Noise peer session. Wraps the existing
-/// concrete `PeerConnection` and exposes its post-handshake identity
-/// through [`PeerIdentity`].
+/// concrete `PeerConnection` and exposes its post-handshake host
+/// identity through [`PeerIdentity`].
 #[derive(Debug)]
 struct WssNoiseConnection {
     inner: PeerConnection,
@@ -280,9 +234,8 @@ struct WssNoiseConnection {
 impl WssNoiseConnection {
     fn new(inner: PeerConnection, tls_fingerprint: Option<String>) -> Self {
         let identity = PeerIdentity {
-            agent_id: inner.remote_agent_id.clone(),
-            agent_pubkey: inner.remote_agent_pubkey,
-            alias: inner.remote_alias.clone(),
+            host_id: inner.remote_host_id.clone(),
+            host_pubkey: inner.remote_host_pubkey,
             tls_fingerprint,
         };
         Self { inner, identity }

@@ -286,7 +286,8 @@ async fn xff_resolved_client_ip_lands_in_audit_row() {
     // Use a different fake peer endpoint+pubkey for each invocation so
     // the test never collides with state left by an earlier run on a
     // shared tempdir (we don't have one, but cheap insurance).
-    let pubkey_hex = "ab".repeat(32);
+    let host_pubkey_hex = "ab".repeat(32);
+    let agent_pubkey_hex = "ac".repeat(32);
     let response = rpc_with_xff(
         &daemon.url(),
         &bearer,
@@ -294,7 +295,8 @@ async fn xff_resolved_client_ip_lands_in_audit_row() {
         "peer.add",
         serde_json::json!({
             "endpoint": {"scheme": "wss", "host": "fake-peer.example", "port": 7823},
-            "pubkey_hex": pubkey_hex,
+            "host_pubkey_hex": host_pubkey_hex,
+            "agent_pubkey_hex": agent_pubkey_hex,
         }),
     )
     .await;
@@ -326,7 +328,8 @@ async fn xff_from_untrusted_peer_is_ignored_in_audit() {
         .trim()
         .to_string();
 
-    let pubkey_hex = "cd".repeat(32);
+    let host_pubkey_hex = "cd".repeat(32);
+    let agent_pubkey_hex = "ce".repeat(32);
     let response = rpc_with_xff(
         &daemon.url(),
         &bearer,
@@ -334,7 +337,8 @@ async fn xff_from_untrusted_peer_is_ignored_in_audit() {
         "peer.add",
         serde_json::json!({
             "endpoint": {"scheme": "wss", "host": "fake-peer-2.example", "port": 7823},
-            "pubkey_hex": pubkey_hex,
+            "host_pubkey_hex": host_pubkey_hex,
+            "agent_pubkey_hex": agent_pubkey_hex,
         }),
     )
     .await;

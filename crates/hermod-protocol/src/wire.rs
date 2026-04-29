@@ -3,7 +3,7 @@
 //! Each frame is CBOR-encoded, then wrapped in one Noise XX transport message,
 //! then carried as one WebSocket binary frame.
 
-use hermod_core::{AgentAlias, Envelope, MessageId, PROTOCOL_VERSION, PubkeyBytes};
+use hermod_core::{Envelope, MessageId, PROTOCOL_VERSION, PubkeyBytes};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -97,34 +97,31 @@ pub struct Pong {
     pub nonce: u64,
 }
 
+/// First application-layer frame sent inside the Noise XX channel by
+/// each side of a federation handshake. The Noise handshake itself
+/// authenticates the remote's *transport* static key; Hello binds
+/// that transport key to the daemon's host identity at the
+/// application layer.
+///
+/// The receiver verifies `derive_noise_static(host_pubkey) ==
+/// transport.remote_static_pubkey()` to detect mis-derivation or
+/// substitution attempts. The host_pubkey then becomes the row key
+/// for TOFU registration in the agents directory.
+///
+/// Hello carries host-level identity only; per-tenant agents are
+/// learned dynamically as their envelopes arrive (see
+/// `InboundProcessor`'s envelope-receipt TOFU).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Hello {
     pub protocol_version: u16,
-    pub agent_pubkey: PubkeyBytes,
-    /// x25519 noise static pubkey — verified separately by snow's handshake.
-    /// Sent here so that the receiver can pin (TOFU) the *binding* between
-    /// agent_pubkey and noise_pubkey.
-    pub noise_pubkey: PubkeyBytes,
-    /// Sender's self-asserted display name. Validated at the deserializer
-    /// boundary via `AgentAlias`'s `try_from` impl — a hostile or
-    /// typo'd value can't smuggle past Hello-frame parsing. Receivers
-    /// store this verbatim as `peer_asserted_alias` (advisory; never
-    /// `local_alias`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub alias: Option<AgentAlias>,
+    pub host_pubkey: PubkeyBytes,
 }
 
 impl Hello {
-    pub fn new(
-        agent_pubkey: PubkeyBytes,
-        noise_pubkey: PubkeyBytes,
-        alias: Option<AgentAlias>,
-    ) -> Self {
+    pub fn new(host_pubkey: PubkeyBytes) -> Self {
         Self {
             protocol_version: PROTOCOL_VERSION,
-            agent_pubkey,
-            noise_pubkey,
-            alias,
+            host_pubkey,
         }
     }
 }
@@ -174,17 +171,14 @@ mod tests {
     fn hello_roundtrip() {
         let h = WireFrame::Hello(Hello {
             protocol_version: 1,
-            agent_pubkey: PubkeyBytes([1u8; 32]),
-            noise_pubkey: PubkeyBytes([2u8; 32]),
-            alias: Some(AgentAlias::from_str("alice").unwrap()),
+            host_pubkey: PubkeyBytes([7u8; 32]),
         });
         let bytes = encode(&h).unwrap();
         let back = decode(&bytes).unwrap();
         match back {
             WireFrame::Hello(h2) => {
-                assert_eq!(h2.alias.as_ref().map(|a| a.as_str()), Some("alice"));
-                assert_eq!(h2.agent_pubkey.0[0], 1);
-                assert_eq!(h2.noise_pubkey.0[0], 2);
+                assert_eq!(h2.protocol_version, 1);
+                assert_eq!(h2.host_pubkey.0[0], 7);
             }
             other => panic!("expected Hello, got {other:?}"),
         }

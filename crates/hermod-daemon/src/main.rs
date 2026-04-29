@@ -115,26 +115,27 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
+    let audit_file_path = config
+        .audit
+        .file_path
+        .as_deref()
+        .map(|p| paths::expand(p, &home));
+    let bootstrap::audit_sink::AuditSinkBundle {
+        sink: audit_sink,
+        remote: remote_audit_sink,
+    } = bootstrap::audit_sink::build_audit_sink(db.clone(), audit_file_path, &config.audit)?;
+
     // Build the local-agent registry from disk. Empty registry ⇒
     // refuse to boot (operator hasn't run `hermod init` yet, OR
     // accidentally deleted `$HERMOD_HOME/agents/`). Auto-provisioning
     // here would silently mint a new agent_id and break every peer's
-    // pin — fail-loud is the safer default. The bootstrap agent's
-    // keypair is shared with the host (see `local_agent` module
-    // docs), so `host_keypair` is needed for the load fallback.
-    let registry = local_agent::load_registry(&home, host_keypair.clone())
-        .context("load local agent registry")?;
+    // pin — fail-loud is the safer default.
+    let registry = local_agent::load_registry(&home).context("load local agent registry")?;
     if registry.is_empty() {
         anyhow::bail!("no local agents found at $HERMOD_HOME/agents/ — run `hermod init` first");
     }
 
-    let primary_alias = config
-        .identity
-        .alias
-        .as_deref()
-        .and_then(|a| a.parse::<hermod_core::AgentAlias>().ok());
-    let registry =
-        services::ensure_local_agents(&*db, host_pubkey, registry, primary_alias).await?;
+    let registry = services::ensure_local_agents(&*db, host_pubkey, registry, &*audit_sink).await?;
 
     // Post-init enforcement: every spec'd secret file across
     // $HERMOD_HOME (host/, agents/<id>/, hermod.db*, blob-store/,
@@ -145,11 +146,6 @@ async fn main() -> anyhow::Result<()> {
         registry.list().iter().map(|a| a.agent_id.clone()).collect();
     home_layout::enforce(&home, &storage_dsn, &blob_dsn, &agent_ids).context("home layout")?;
 
-    let audit_file_path = config
-        .audit
-        .file_path
-        .as_deref()
-        .map(|p| paths::expand(p, &home));
     serve(
         effective_socket,
         db,
@@ -157,7 +153,8 @@ async fn main() -> anyhow::Result<()> {
         host_keypair,
         registry,
         tls,
-        audit_file_path,
+        audit_sink,
+        remote_audit_sink,
         home,
         config,
     )

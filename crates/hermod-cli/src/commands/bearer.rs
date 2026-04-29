@@ -15,10 +15,9 @@
 use anyhow::{Context, Result};
 use clap::Args;
 use std::path::Path;
-use std::sync::Arc;
 
 use hermod_crypto::SecretString;
-use hermod_daemon::{host_identity, local_agent};
+use hermod_daemon::local_agent;
 
 #[derive(Args, Debug)]
 pub struct ShowArgs {
@@ -28,7 +27,7 @@ pub struct ShowArgs {
 }
 
 pub async fn show(args: ShowArgs, home: &Path) -> Result<()> {
-    let agent = primary_agent(home)?;
+    let agent = solo_agent(home)?;
     let path = local_agent::bearer_token_path(home, &agent.agent_id);
     println!("agent: {}", agent.agent_id);
     println!("path:  {}", path.display());
@@ -43,7 +42,7 @@ pub async fn show(args: ShowArgs, home: &Path) -> Result<()> {
 }
 
 pub async fn rotate(home: &Path) -> Result<()> {
-    let agent = primary_agent(home)?;
+    let agent = solo_agent(home)?;
     let new_token = local_agent::generate_bearer_token();
     let path = local_agent::bearer_token_path(home, &agent.agent_id);
     write_bearer_token_file(&path, &new_token)?;
@@ -53,18 +52,8 @@ pub async fn rotate(home: &Path) -> Result<()> {
     Ok(())
 }
 
-fn primary_agent(home: &Path) -> Result<local_agent::LocalAgent> {
-    // The host keypair is needed to load the bootstrap agent (whose
-    // ed25519_secret lives under `host/`, not `agents/<id>/`). For
-    // additional agents (post-H5) the per-agent secret is on disk and
-    // the fallback is unused.
-    let host = host_identity::load(home).with_context(|| {
-        format!(
-            "load host identity from {} (run `hermod init` first)",
-            host_identity::host_dir(home).display()
-        )
-    })?;
-    let agents = local_agent::scan_disk(home, Some(Arc::new(host)))
+fn solo_agent(home: &Path) -> Result<local_agent::LocalAgent> {
+    let agents = local_agent::scan_disk(home)
         .with_context(|| format!("scan {}", local_agent::agents_dir(home).display()))?;
     match agents.len() {
         0 => anyhow::bail!(
@@ -80,9 +69,9 @@ fn primary_agent(home: &Path) -> Result<local_agent::LocalAgent> {
     }
 }
 
-/// Atomically replace the on-disk bearer file with `token`. Uses the
-/// same crash-safe rename + 0600 discipline as `local_agent::
-/// provision_new`'s initial write.
+/// Atomically replace the on-disk bearer file with `token`. Same
+/// crash-safe rename + 0600 discipline as `local_agent::create_bootstrap`'s
+/// initial write.
 fn write_bearer_token_file(path: &Path, token: &SecretString) -> Result<()> {
     use std::io::Write;
     #[cfg(unix)]

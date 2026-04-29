@@ -109,9 +109,9 @@ impl FederationServer {
             let me = self.clone();
             tokio::spawn(async move {
                 let _permit = permit; // released when this task ends
-                let agent_id = conn.identity().agent_id.clone();
+                let host_id = conn.identity().host_id.clone();
                 if let Err(e) = me.handle_peer(conn).await {
-                    warn!(peer = %agent_id, error = %e, "inbound peer task ended");
+                    warn!(peer = %host_id, error = %e, "inbound peer task ended");
                 }
             });
         }
@@ -120,65 +120,24 @@ impl FederationServer {
     async fn handle_peer(&self, mut conn: Box<dyn TransportConnection>) -> anyhow::Result<()> {
         let identity = conn.identity().clone();
         info!(
-            agent = %identity.agent_id,
+            host = %identity.host_id,
             tls_fp = ?identity.tls_fingerprint,
-            alias = ?identity.alias,
             "inbound peer authenticated"
         );
 
-        // TOFU register/update on first contact. Peer's self-claimed alias
-        // (from the signed Hello frame) goes into `peer_asserted_alias`; we
-        // never set `local_alias` here — that's reserved for explicit
-        // operator action via `peer add --alias`. `upsert_observed` is
-        // collision-safe so a peer self-claiming an existing local label
-        // is silently downgraded (and audited below) rather than rejecting
-        // the connection.
-        let now = Timestamp::now();
-        let alias_outcome = self
-            .processor
-            .db()
-            .agents()
-            .upsert_observed(&AgentRecord {
-                id: identity.agent_id.clone(),
-                pubkey: identity.agent_pubkey,
-                host_pubkey: None,
-                endpoint: None,
-                local_alias: None,
-                peer_asserted_alias: identity.alias.clone(),
-                trust_level: TrustLevel::Tofu,
-                tls_fingerprint: None,
-                reputation: 0,
-                first_seen: now,
-                last_seen: Some(now),
-            })
-            .await?;
-        if let hermod_storage::AliasOutcome::LocalDropped {
-            proposed,
-            conflicting_id,
-        } = &alias_outcome
-        {
-            // Belt and braces: record the collision in audit so operators
-            // can investigate impersonation attempts. (Never reachable on
-            // this path today since we don't propose a local_alias here,
-            // but kept symmetric with the operator-driven `peer.add`
-            // path.)
-            crate::services::audit_or_warn(
-                &**self.processor.audit_sink(),
-                hermod_storage::AuditEntry {
-                    id: None,
-                    ts: now,
-                    actor: identity.agent_id.clone(),
-                    action: "peer.alias_collision".into(),
-                    target: Some(conflicting_id.to_string()),
-                    details: Some(serde_json::json!({
-                        "proposed": proposed.as_str(),
-                    })),
-                    client_ip: None,
-                    federation: hermod_storage::AuditFederationPolicy::Default,
-                },
-            )
-            .await;
-        }
+        // TOFU register/update on first contact. The handshake
+        // authenticates the *host* (Noise XX static is host_pubkey),
+        // so the agents row created here is the host's. Per-tenant
+        // agents on the remote daemon are learned later, when their
+        // envelopes arrive (`InboundProcessor::upsert_sender_observed`).
+        record_host_peer(
+            self.processor.db(),
+            None,
+            identity.host_pubkey,
+            None,
+            identity.tls_fingerprint.clone(),
+        )
+        .await?;
 
         loop {
             let frame = match conn.recv_frame().await? {
@@ -194,7 +153,7 @@ impl FederationServer {
                     let hops = envelope_frame.hops;
                     match self
                         .processor
-                        .accept_envelope(&identity.agent_id, &envelope_frame.envelope, hops)
+                        .accept_envelope(&identity.host_id, &envelope_frame.envelope, hops)
                         .await
                     {
                         Ok(()) => conn.send_ack(id, AckStatus::Delivered, None).await?,
@@ -239,42 +198,80 @@ impl FederationServer {
     }
 }
 
-/// Register a federated agent (called by `peer.add` RPC and discovery
-/// ingestion). Requires a pubkey — without it Noise XX (or whatever
-/// authenticated handshake the transport runs) can't authenticate the
-/// peer, so an endpoint-only entry would never accept any traffic.
+/// Register a federated peer's *host* row in the agents directory.
 ///
-/// The agent_id is derived deterministically from the pubkey, so existing
-/// directory entries (e.g. ones we've previously DM'd over loopback) get
-/// their `endpoint` populated here without losing operator-set trust.
-/// Atomic peer record. Splits the alias claim into two slots:
-///   * `peer_asserted_alias` — what the peer claimed in their signed Hello /
-///     Presence / mDNS TXT. Stored verbatim, no UNIQUE constraint.
-///   * `local_alias` — operator-set override (only set by `peer.add` paths,
-///     never by inbound discovery). Sacred — collisions with an existing
-///     local label are dropped via [`hermod_storage::AgentRepository::upsert_observed`]
-///     so a malicious / unlucky peer can't take a name the operator already
-///     bound. The returned [`hermod_storage::AliasOutcome`] reports any drop
-///     so the caller can audit.
-pub async fn record_peer(
+/// A federation peer is a *daemon* — the entity authenticated by the
+/// Noise XX handshake. Its agents are learned dynamically (via
+/// envelope-receipt TOFU and, in H7, `peer.advertise`). Used by:
+///
+///   * Inbound handshake TOFU (`endpoint = None`, alias = None)
+///   * Broker config seed (`endpoint = Some(broker_endpoint)`)
+///   * Discovery ingestion (mDNS, static-config peers — alias from beacon)
+///
+/// The host row's `host_pubkey` is self-referential: every entity in
+/// the agents directory carries a host_pubkey, and for hosts that's
+/// their own pubkey.
+pub async fn record_host_peer(
     db: &dyn Database,
-    endpoint: WssEndpoint,
-    pubkey: PubkeyBytes,
+    endpoint: Option<WssEndpoint>,
+    host_pubkey: PubkeyBytes,
     peer_asserted_alias: Option<hermod_core::AgentAlias>,
-    local_alias: Option<hermod_core::AgentAlias>,
+    tls_fingerprint: Option<String>,
 ) -> anyhow::Result<(AgentRecord, hermod_storage::AliasOutcome)> {
     use hermod_crypto::agent_id_from_pubkey;
     let now = Timestamp::now();
-    let agent_id = agent_id_from_pubkey(&pubkey);
+    let host_id = agent_id_from_pubkey(&host_pubkey);
+    let outcome = db
+        .agents()
+        .upsert_observed(&AgentRecord {
+            id: host_id.clone(),
+            pubkey: host_pubkey,
+            host_pubkey: Some(host_pubkey),
+            endpoint: endpoint.map(Endpoint::Wss),
+            local_alias: None,
+            peer_asserted_alias,
+            trust_level: TrustLevel::Tofu,
+            tls_fingerprint,
+            reputation: 0,
+            first_seen: now,
+            last_seen: Some(now),
+        })
+        .await?;
+    let rec = db
+        .agents()
+        .get(&host_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("host peer vanished after upsert: {host_id}"))?;
+    Ok((rec, outcome))
+}
+
+/// Register a federated peer's *agent* row, plus its host row.
+///
+/// Used by `peer.add` (operator-driven) where the operator knows both
+/// pubkeys out of band. Both rows are upserted: the host (so the pool
+/// can pin Noise XX with `host_pubkey`) and the agent (so envelope
+/// addressing by `to.id` resolves to the right host).
+pub async fn record_agent_peer(
+    db: &dyn Database,
+    endpoint: WssEndpoint,
+    host_pubkey: PubkeyBytes,
+    agent_pubkey: PubkeyBytes,
+    local_alias: Option<hermod_core::AgentAlias>,
+) -> anyhow::Result<(AgentRecord, hermod_storage::AliasOutcome)> {
+    use hermod_crypto::agent_id_from_pubkey;
+    record_host_peer(db, Some(endpoint.clone()), host_pubkey, None, None).await?;
+
+    let now = Timestamp::now();
+    let agent_id = agent_id_from_pubkey(&agent_pubkey);
     let outcome = db
         .agents()
         .upsert_observed(&AgentRecord {
             id: agent_id.clone(),
-            pubkey,
-            host_pubkey: None,
+            pubkey: agent_pubkey,
+            host_pubkey: Some(host_pubkey),
             endpoint: Some(Endpoint::Wss(endpoint)),
             local_alias,
-            peer_asserted_alias,
+            peer_asserted_alias: None,
             trust_level: TrustLevel::Tofu,
             tls_fingerprint: None,
             reputation: 0,
@@ -286,6 +283,6 @@ pub async fn record_peer(
         .agents()
         .get(&agent_id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("agent vanished after upsert: {agent_id}"))?;
+        .ok_or_else(|| anyhow::anyhow!("agent peer vanished after upsert: {agent_id}"))?;
     Ok((rec, outcome))
 }

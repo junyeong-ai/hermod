@@ -16,6 +16,7 @@ use tracing::{error, info};
 use hermod_daemon::config::Config;
 use hermod_daemon::local_agent::LocalAgentRegistry;
 use hermod_routing::{AccessPolicy, RemoteDeliverer, spawn_sweeper};
+use hermod_storage::AuditSink;
 
 use crate::dispatcher::Dispatcher;
 use crate::federation::FederationServer;
@@ -24,7 +25,7 @@ use crate::outbox::OutboxWorker;
 use crate::services::{
     AgentService, AuditService, BriefService, BroadcastService, CapabilityService, ChannelService,
     ConfirmationService, KeyRef, McpService, MessageService, PeerService, PermissionService,
-    PresenceService, StatusService, WorkspaceService,
+    PresenceService, RemoteAuditSink, StatusService, WorkspaceService,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -35,7 +36,8 @@ pub async fn serve(
     host_keypair: Arc<Keypair>,
     registry: LocalAgentRegistry,
     tls: TlsMaterial,
-    audit_file_path: Option<PathBuf>,
+    audit_sink: Arc<dyn AuditSink>,
+    remote_audit_sink: Option<RemoteAuditSink>,
     home: PathBuf,
     config: Config,
 ) -> Result<()> {
@@ -49,11 +51,11 @@ pub async fn serve(
     info!(socket = %socket_path.display(), "listening");
 
     // H2 single-tenant dispatch: every service site that needs an
-    // application-level identity uses the primary (single) local
-    // agent. H3 will replace this fan-out with per-call
-    // `caller_agent_id` resolved at the IPC handshake.
-    let primary = registry
-        .primary()
+    // application-level identity uses the lone local agent. H3 will
+    // replace this fan-out with per-call `caller_agent_id` resolved
+    // at the IPC handshake.
+    let solo = registry
+        .solo()
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "multi-tenant dispatch requires phase H3 (host has {} local agents — \
@@ -62,24 +64,12 @@ pub async fn serve(
             )
         })?
         .clone();
-    let self_id = primary.agent_id.clone();
+    let self_id = solo.agent_id.clone();
     let host_id = host_keypair.agent_id();
-    let bearer_token = primary.bearer_token.clone();
+    let bearer_token = solo.bearer_token.clone();
     let agent_signer: Arc<dyn Signer> =
-        Arc::new(hermod_crypto::LocalKeySigner::new(primary.keypair.clone()));
-    let key_ref = KeyRef::from_keypair(&primary.keypair, None);
-
-    // Audit-sink stack. Built in two phases because `RemoteAuditSink`
-    // depends on `MessageService` (to ship federation envelopes), and
-    // `MessageService` consumes the same audit_sink it sits inside.
-    // Phase 1 (here) returns the unified sink + the optional remote
-    // handle; Phase 2 (later, post-MessageService::new) wires the
-    // message reference into the remote handle via
-    // `RemoteAuditSink::set_messages`.
-    let crate::bootstrap::audit_sink::AuditSinkBundle {
-        sink: audit_sink,
-        remote: remote_audit_sink,
-    } = crate::bootstrap::audit_sink::build_audit_sink(db.clone(), audit_file_path, &config.audit)?;
+        Arc::new(hermod_crypto::LocalKeySigner::new(solo.keypair.clone()));
+    let key_ref = KeyRef::from_keypair(&solo.keypair, None);
 
     // Parse `[federation] upstream_broker` once. A malformed value
     // is fatal — the operator should know immediately rather than
@@ -95,9 +85,18 @@ pub async fn serve(
         // Persist the broker as a directory entry so federation auth
         // (TOFU + TLS pin + Noise pubkey check) lights up on first
         // dial — same path `peer add` and the static seeder use.
-        crate::federation::record_peer(db.as_ref(), ub.endpoint.clone(), ub.pubkey, None, None)
-            .await
-            .context("[federation] upstream_broker registration")?;
+        // The broker is identified at the host level: its hosted
+        // agents (if any address envelopes through it) get registered
+        // separately via inbound TOFU on first envelope.
+        crate::federation::record_host_peer(
+            db.as_ref(),
+            Some(ub.endpoint.clone()),
+            ub.pubkey,
+            None,
+            None,
+        )
+        .await
+        .context("[federation] upstream_broker registration")?;
         info!(
             endpoint = %hermod_core::Endpoint::Wss(ub.endpoint.clone()),
             "[federation] upstream_broker registered"
@@ -112,19 +111,13 @@ pub async fn serve(
     let access = AccessController::new(
         db.clone(),
         self_id.clone(),
-        primary.keypair.public_key(),
+        solo.keypair.public_key(),
         AccessPolicy {
             require_capability: config.policy.require_capability,
         },
     );
     let rate_limit = RateLimiter::new(db.clone(), config.policy.rate_limit_per_sender);
     let started = Instant::now();
-
-    let alias = config
-        .identity
-        .alias
-        .as_deref()
-        .and_then(|a| a.parse::<hermod_core::AgentAlias>().ok());
 
     // Federation transport — currently a single `WssNoiseTransport`.
     // Hold it as `Arc<dyn Transport>` so the daemon never references a
@@ -136,7 +129,6 @@ pub async fn serve(
     let transport: Arc<dyn hermod_routing::Transport> =
         Arc::new(hermod_routing::WssNoiseTransport::new(
             host_keypair.clone(),
-            alias.clone(),
             tls.cert_pem.clone().into(),
             tls.key_pem.clone().into(),
         ));
@@ -236,13 +228,12 @@ pub async fn serve(
                 && let Ok(addr) = listen_str.parse::<std::net::SocketAddr>()
             {
                 let host = format!("{}.local.", &host_id.to_string()[..8]);
-                let alias_str = alias.as_ref().map(|a| a.as_str().to_string());
                 let params = hermod_discovery::AnnounceParams {
                     hostname: &host,
                     port: addr.port(),
                     signer: host_signer.clone(),
                     validity_secs: config.federation.mdns_beacon_validity_secs,
-                    alias: alias_str.as_deref(),
+                    alias: None,
                 };
                 if let Err(e) = composite.announce(params).await {
                     tracing::warn!(error = %e, "discoverer announce failed");
@@ -359,8 +350,14 @@ pub async fn serve(
                         continue;
                     };
                     let peer_asserted = peer.alias.clone();
-                    match crate::federation::record_peer(db, endpoint, pubkey, peer_asserted, None)
-                        .await
+                    match crate::federation::record_host_peer(
+                        db,
+                        Some(endpoint),
+                        pubkey,
+                        peer_asserted,
+                        None,
+                    )
+                    .await
                     {
                         Ok(_) => {}
                         Err(e) => {
@@ -500,7 +497,7 @@ pub async fn serve(
             db.clone(),
             audit_sink.clone(),
             self_id.clone(),
-            primary.keypair.to_pubkey_bytes(),
+            solo.keypair.to_pubkey_bytes(),
             messages.clone(),
         ),
         workspace_observability: observability,

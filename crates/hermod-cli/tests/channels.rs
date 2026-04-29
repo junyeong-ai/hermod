@@ -102,12 +102,20 @@ impl Daemon {
             .expect("agent_id")
     }
 
-    fn pubkey_hex(&self) -> String {
+    fn agent_pubkey_hex(&self) -> String {
         self.run(&["identity"])
             .lines()
             .find_map(|l| l.strip_prefix("pubkey_hex:"))
             .map(|s| s.trim().to_string())
             .expect("pubkey_hex")
+    }
+
+    fn host_pubkey_hex(&self) -> String {
+        self.run(&["identity"])
+            .lines()
+            .find_map(|l| l.strip_prefix("host_pubkey:"))
+            .map(|s| s.trim().to_string())
+            .expect("host_pubkey")
     }
 }
 
@@ -156,8 +164,10 @@ fn mcp_channel_emits_on_inbox_delivery() {
     let bob = Daemon::spawn("bob");
     let alice_id = alice.agent_id();
     let bob_id = bob.agent_id();
-    let alice_pk = alice.pubkey_hex();
-    let bob_pk = bob.pubkey_hex();
+    let alice_host_pk = alice.host_pubkey_hex();
+    let bob_host_pk = bob.host_pubkey_hex();
+    let alice_agent_pk = alice.agent_pubkey_hex();
+    let bob_agent_pk = bob.agent_pubkey_hex();
 
     // Bidirectional verified peer.
     alice.run(&[
@@ -165,16 +175,20 @@ fn mcp_channel_emits_on_inbox_delivery() {
         "add",
         "--endpoint",
         &format!("wss://{}", bob.fed_addr),
-        "--pubkey-hex",
-        &bob_pk,
+        "--host-pubkey-hex",
+        &bob_host_pk,
+        "--agent-pubkey-hex",
+        &bob_agent_pk,
     ]);
     bob.run(&[
         "peer",
         "add",
         "--endpoint",
         &format!("wss://{}", alice.fed_addr),
-        "--pubkey-hex",
-        &alice_pk,
+        "--host-pubkey-hex",
+        &alice_host_pk,
+        "--agent-pubkey-hex",
+        &alice_agent_pk,
     ]);
     alice.run(&["peer", "trust", &bob_id, "verified"]);
     bob.run(&["peer", "trust", &alice_id, "verified"]);
@@ -279,8 +293,10 @@ fn mcp_channel_emits_held_confirmation() {
     let bob = Daemon::spawn("bob");
     let alice_id = alice.agent_id();
     let bob_id = bob.agent_id();
-    let alice_pk = alice.pubkey_hex();
-    let bob_pk = bob.pubkey_hex();
+    let alice_host_pk = alice.host_pubkey_hex();
+    let bob_host_pk = bob.host_pubkey_hex();
+    let alice_agent_pk = alice.agent_pubkey_hex();
+    let bob_agent_pk = bob.agent_pubkey_hex();
 
     // Both peers paired but trust stays TOFU (so DM/invite are gated).
     alice.run(&[
@@ -288,16 +304,20 @@ fn mcp_channel_emits_held_confirmation() {
         "add",
         "--endpoint",
         &format!("wss://{}", bob.fed_addr),
-        "--pubkey-hex",
-        &bob_pk,
+        "--host-pubkey-hex",
+        &bob_host_pk,
+        "--agent-pubkey-hex",
+        &bob_agent_pk,
     ]);
     bob.run(&[
         "peer",
         "add",
         "--endpoint",
         &format!("wss://{}", alice.fed_addr),
-        "--pubkey-hex",
-        &alice_pk,
+        "--host-pubkey-hex",
+        &alice_host_pk,
+        "--agent-pubkey-hex",
+        &alice_agent_pk,
     ]);
 
     // Bob creates a workspace and invites alice. WorkspaceInvite is always
@@ -465,24 +485,30 @@ fn mcp_channel_emits_file_delivery() {
     let bob = Daemon::spawn("bob");
     let alice_id = alice.agent_id();
     let bob_id = bob.agent_id();
-    let alice_pk = alice.pubkey_hex();
-    let bob_pk = bob.pubkey_hex();
+    let alice_host_pk = alice.host_pubkey_hex();
+    let bob_host_pk = bob.host_pubkey_hex();
+    let alice_agent_pk = alice.agent_pubkey_hex();
+    let bob_agent_pk = bob.agent_pubkey_hex();
 
     alice.run(&[
         "peer",
         "add",
         "--endpoint",
         &format!("wss://{}", bob.fed_addr),
-        "--pubkey-hex",
-        &bob_pk,
+        "--host-pubkey-hex",
+        &bob_host_pk,
+        "--agent-pubkey-hex",
+        &bob_agent_pk,
     ]);
     bob.run(&[
         "peer",
         "add",
         "--endpoint",
         &format!("wss://{}", alice.fed_addr),
-        "--pubkey-hex",
-        &alice_pk,
+        "--host-pubkey-hex",
+        &alice_host_pk,
+        "--agent-pubkey-hex",
+        &alice_agent_pk,
     ]);
     alice.run(&["peer", "trust", &bob_id, "verified"]);
     bob.run(&["peer", "trust", &alice_id, "verified"]);
@@ -597,8 +623,10 @@ fn federated_permission_relay_round_trip() {
     let damon = Daemon::spawn("damon");
     let olive_id = olive.agent_id();
     let damon_id = damon.agent_id();
-    let olive_pk = olive.pubkey_hex();
-    let damon_pk = damon.pubkey_hex();
+    let olive_host_pk = olive.host_pubkey_hex();
+    let damon_host_pk = damon.host_pubkey_hex();
+    let olive_agent_pk = olive.agent_pubkey_hex();
+    let damon_agent_pk = damon.agent_pubkey_hex();
 
     // Bidirectional verified peering — needed so PermissionPrompt
     // (Sensitivity::Review) reaches Damon without confirmation hold,
@@ -608,16 +636,20 @@ fn federated_permission_relay_round_trip() {
         "add",
         "--endpoint",
         &format!("wss://{}", damon.fed_addr),
-        "--pubkey-hex",
-        &damon_pk,
+        "--host-pubkey-hex",
+        &damon_host_pk,
+        "--agent-pubkey-hex",
+        &damon_agent_pk,
     ]);
     damon.run(&[
         "peer",
         "add",
         "--endpoint",
         &format!("wss://{}", olive.fed_addr),
-        "--pubkey-hex",
-        &olive_pk,
+        "--host-pubkey-hex",
+        &olive_host_pk,
+        "--agent-pubkey-hex",
+        &olive_agent_pk,
     ]);
     olive.run(&["peer", "trust", &damon_id, "verified"]);
     damon.run(&["peer", "trust", &olive_id, "verified"]);

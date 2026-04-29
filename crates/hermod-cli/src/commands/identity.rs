@@ -12,29 +12,32 @@ pub async fn run(home: &Path) -> Result<()> {
         hex::encode(host_kp.to_pubkey_bytes().as_slice())
     );
 
-    let agent_ids = local_agent::scan_disk_ids(home)?;
+    let agents = local_agent::scan_disk(home)?;
     // In the H2 single-tenant shape every host has exactly one local
-    // agent (the bootstrap). Its `agent_id` and pubkey are identical
-    // to the host's — see the `local_agent` module's "bootstrap
-    // shortcut" docs. Surface the values under the legacy
-    // `agent_id:` / `pubkey_hex:` labels so operators (and the e2e
-    // harness) keep their muscle memory.
-    if let [primary_id] = agent_ids.as_slice()
-        && primary_id == &host_kp.agent_id()
-    {
-        println!("agent_id:    {primary_id}");
+    // agent (the bootstrap). Surface its identifiers under the
+    // `agent_id:` / `pubkey_hex:` labels for operators (and the e2e
+    // harness) to address with — these are distinct from the host's
+    // identifiers above. Multi-agent (H5+) drops these single-line
+    // fields and prints the full per-agent table.
+    if let [agent] = agents.as_slice() {
+        println!("agent_id:    {}", agent.agent_id);
         println!(
             "pubkey_hex:  {}",
-            hex::encode(host_kp.to_pubkey_bytes().as_slice())
+            hex::encode(agent.keypair.to_pubkey_bytes().as_slice())
         );
     }
 
-    if agent_ids.is_empty() {
+    if agents.is_empty() {
         println!("local agents: (none — run `hermod init` to provision the bootstrap)");
     } else {
-        println!("local agents ({}):", agent_ids.len());
-        for id in agent_ids {
-            println!("  - {id}");
+        println!("local agents ({}):", agents.len());
+        for agent in agents {
+            let alias = agent
+                .local_alias
+                .as_ref()
+                .map(|a| format!(" ({})", a.as_str()))
+                .unwrap_or_default();
+            println!("  - {}{alias}", agent.agent_id);
         }
     }
     Ok(())

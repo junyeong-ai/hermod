@@ -6,8 +6,6 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
-    pub identity: IdentityConfig,
-    #[serde(default)]
     pub daemon: DaemonConfig,
     #[serde(default)]
     pub storage: StorageConfig,
@@ -203,12 +201,6 @@ impl Default for PolicyConfig {
             audit_retention_secs: defaults::audit_retention(),
         }
     }
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct IdentityConfig {
-    #[serde(default)]
-    pub alias: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -648,9 +640,6 @@ impl Config {
             self.policy.audit_retention_secs = v
                 .parse()
                 .with_context(|| format!("invalid HERMOD_POLICY_AUDIT_RETENTION_SECS = {v:?}"))?;
-        }
-        if let Ok(v) = std::env::var("HERMOD_IDENTITY_ALIAS") {
-            self.identity.alias = Some(v);
         }
         if let Ok(v) = std::env::var("HERMOD_AUDIT_FILE_PATH") {
             self.audit.file_path = Some(v);

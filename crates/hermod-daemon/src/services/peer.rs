@@ -8,7 +8,7 @@ use hermod_storage::{AuditEntry, AuditSink, Database};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::federation::record_peer;
+use crate::federation::record_agent_peer;
 use crate::services::{ServiceError, audit_or_warn, presence::PresenceService};
 
 #[derive(Debug, Clone)]
@@ -46,19 +46,17 @@ impl PeerService {
                 ));
             }
         };
-        let pubkey_hex = params.pubkey_hex.ok_or_else(|| {
-            ServiceError::InvalidParam(
-                "peer.add requires --pubkey-hex; an endpoint without a known \
-                 pubkey can't authenticate via Noise"
-                    .into(),
-            )
-        })?;
-        let pubkey = parse_pubkey(&pubkey_hex)?;
-        // local_alias arrived already validated thanks to AgentAlias's
-        // `try_from` Deserialize impl — no extra parse step here.
-        let (rec, outcome) = record_peer(&*self.db, endpoint, pubkey, None, params.local_alias)
-            .await
-            .map_err(|e| ServiceError::InvalidParam(e.to_string()))?;
+        let host_pubkey = parse_pubkey(&params.host_pubkey_hex)?;
+        let agent_pubkey = parse_pubkey(&params.agent_pubkey_hex)?;
+        let (rec, outcome) = record_agent_peer(
+            &*self.db,
+            endpoint,
+            host_pubkey,
+            agent_pubkey,
+            params.local_alias,
+        )
+        .await
+        .map_err(|e| ServiceError::InvalidParam(e.to_string()))?;
         let fingerprint = hermod_crypto::fingerprint_from_pubkey(&rec.pubkey).to_human_prefix(8);
 
         // Audit a collision *before* the peer.add row so the chain shows

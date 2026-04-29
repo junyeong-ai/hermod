@@ -207,7 +207,7 @@ impl PeerPool {
         let identity = conn.identity().clone();
         debug!(
             backend = self.transport.name(),
-            remote = %identity.agent_id,
+            remote = %identity.host_id,
             "pool: dialed new peer"
         );
 
@@ -218,7 +218,7 @@ impl PeerPool {
         // When both are present, the stored fingerprint must match
         // what the transport observed, or we tear down the connection.
         if let Some(fp) = identity.tls_fingerprint {
-            let peer_id = identity.agent_id.clone();
+            let peer_id = identity.host_id.clone();
             match self
                 .db
                 .agents()

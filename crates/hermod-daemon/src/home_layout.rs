@@ -61,7 +61,8 @@ use crate::host_identity::{
     host_dir, secret_path as host_secret_path, tls_cert_path, tls_key_path,
 };
 use crate::local_agent::{
-    agent_dir, agents_dir, bearer_token_path as agent_bearer_path, secret_path as agent_secret_path,
+    agent_dir, agents_dir, alias_path as agent_alias_path, bearer_token_path as agent_bearer_path,
+    secret_path as agent_secret_path,
 };
 
 /// Set the process umask to `0o077` so every subsequent file create
@@ -255,19 +256,18 @@ pub fn spec(
                 format!("local agent {id} directory"),
                 agent_dir(home, id),
             ));
-            // Per-agent ed25519_secret is *Optional* in H2: the
-            // bootstrap agent shares the host_keypair (file lives at
-            // `host/ed25519_secret`, not under `agents/<id>/`), and
-            // `local_agent::load` recovers via the host fallback. H5+
-            // non-bootstrap agents will materialise their own per-agent
-            // secret file; we'll tighten this entry then.
-            files.push(HomeFile::secret_optional(
+            files.push(HomeFile::secret(
                 format!("local agent {id} secret"),
                 agent_secret_path(home, id),
             ));
             files.push(HomeFile::secret(
                 format!("local agent {id} bearer token"),
                 agent_bearer_path(home, id),
+            ));
+            files.push(HomeFile::operator_managed(
+                format!("local agent {id} alias"),
+                agent_alias_path(home, id),
+                0o644,
             ));
         }
     }
@@ -538,8 +538,7 @@ mod tests {
     /// `Optional` directory created. Provisions one local agent so
     /// the agents/ block is part of the spec.
     fn populate_conformant(home: &Path) -> Vec<AgentId> {
-        let host = std::sync::Arc::new(hermod_crypto::Keypair::generate());
-        let agent = local_agent::ensure_bootstrap(home, host.clone(), None).unwrap();
+        let agent = local_agent::create_bootstrap(home, None).unwrap();
         let ids = vec![agent.agent_id.clone()];
         for file in spec(home, &sqlite_dsn(home), &local_blob_dsn(home), &ids) {
             match (file.kind, file.presence) {
@@ -547,9 +546,6 @@ mod tests {
                     if !file.path.exists() {
                         make_dir(&file.path, file.required_mode);
                     } else {
-                        // local_agent::ensure_bootstrap already
-                        // created the per-agent directory; ensure
-                        // mode matches.
                         fs::set_permissions(
                             &file.path,
                             fs::Permissions::from_mode(file.required_mode),
@@ -698,20 +694,13 @@ mod tests {
         }
     }
 
-    /// Per-agent `ed25519_secret` is Optional in the H2 spec (the
-    /// bootstrap agent shares the host_keypair), but if the file *is*
-    /// present (a post-H5 non-bootstrap agent) and carries a
-    /// permissive mode, enforce must still flag it. Optional
-    /// suppresses Missing, not ModeMismatch.
     #[test]
-    fn enforce_rejects_per_agent_secret_breach_when_present() {
+    fn enforce_rejects_per_agent_secret_breach() {
         let tmp = TempDir::new().unwrap();
         let ids = populate_conformant(tmp.path());
         let id = &ids[0];
-        // Materialise the per-agent secret file (the bootstrap path
-        // doesn't write one) so we can exercise the mode-mismatch branch.
         let secret = local_agent::secret_path(tmp.path(), id);
-        write_file(&secret, 0o644);
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o644)).unwrap();
         match enforce(
             tmp.path(),
             &sqlite_dsn(tmp.path()),
@@ -733,27 +722,6 @@ mod tests {
             }
             other => panic!("expected ModeMismatch, got {other:?}"),
         }
-    }
-
-    /// The bootstrap agent has no per-agent ed25519_secret on disk;
-    /// the spec entry is Optional, so enforce must succeed without
-    /// the file present.
-    #[test]
-    fn enforce_passes_when_bootstrap_secret_missing() {
-        let tmp = TempDir::new().unwrap();
-        let ids = populate_conformant(tmp.path());
-        let secret = local_agent::secret_path(tmp.path(), &ids[0]);
-        assert!(
-            !secret.exists(),
-            "bootstrap shouldn't have a per-agent secret file"
-        );
-        enforce(
-            tmp.path(),
-            &sqlite_dsn(tmp.path()),
-            &local_blob_dsn(tmp.path()),
-            &ids,
-        )
-        .unwrap();
     }
 
     #[test]
@@ -963,8 +931,7 @@ mod tests {
     #[test]
     fn enforce_passes_postgres_with_memory_blob_layout() {
         let tmp = TempDir::new().unwrap();
-        let host = std::sync::Arc::new(hermod_crypto::Keypair::generate());
-        let agent = local_agent::ensure_bootstrap(tmp.path(), host.clone(), None).unwrap();
+        let agent = local_agent::create_bootstrap(tmp.path(), None).unwrap();
         let ids = vec![agent.agent_id.clone()];
         for file in spec(tmp.path(), "postgres://hermod@db/hermod", "memory://", &ids) {
             match (file.kind, file.presence) {

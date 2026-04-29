@@ -146,10 +146,6 @@ impl InboundProcessor {
         &*self.db
     }
 
-    pub fn audit_sink(&self) -> &Arc<dyn AuditSink> {
-        &self.audit_sink
-    }
-
     /// Run the full inbound pipeline: recipient → hops → replay window →
     /// signature (via envelope's self-introduced pubkey) → cap →
     /// confirmation gate → apply.

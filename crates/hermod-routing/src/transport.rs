@@ -23,7 +23,7 @@
 //! `Arc<dyn Transport>`.
 
 use async_trait::async_trait;
-use hermod_core::{AgentAlias, AgentId, Endpoint, MessageId, PubkeyBytes};
+use hermod_core::{AgentId, Endpoint, MessageId, PubkeyBytes};
 use hermod_protocol::wire::{AckStatus, WireFrame};
 use std::net::SocketAddr;
 use thiserror::Error;
@@ -51,17 +51,14 @@ pub enum PeerTransportError {
     Backend(String),
 }
 
-/// Identity + handshake metadata observed during the initial mutual
-/// authentication. Returned alongside every freshly-established
-/// connection so the caller can record peer state without
-/// down-casting.
+/// Host-level identity observed during the initial mutual
+/// authentication. A federation peer is a *daemon* (a host); the
+/// agents it tenants are learned from envelope traffic, not from
+/// the handshake.
 #[derive(Debug, Clone)]
 pub struct PeerIdentity {
-    pub agent_id: AgentId,
-    pub agent_pubkey: PubkeyBytes,
-    /// Self-asserted display name. Advisory only — operators use
-    /// `peer add --alias` to set the routable `local_alias`.
-    pub alias: Option<AgentAlias>,
+    pub host_id: AgentId,
+    pub host_pubkey: PubkeyBytes,
     /// Optional TLS cert fingerprint for backends that wrap TLS
     /// (e.g. WSS+Noise, gRPC over mTLS). `None` for plaintext or
     /// non-TLS backends. Used by the routing layer for TOFU pinning.

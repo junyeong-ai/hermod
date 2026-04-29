@@ -83,6 +83,11 @@ runs it on every PR.
 | --- | --- | --- |
 | `file.delivered` | Inbound `MessageBody::File` was hash-verified, persisted to the BlobStore, and recorded in the inbox. | `id`, `name`, `size`, `location` |
 
+### local_agent.*
+| Action | Trigger | Details |
+| --- | --- | --- |
+| `local_agent.bearer_rotated_on_drift` | Daemon boot detected a divergence between an agent's on-disk `bearer_token` and the `local_agents` row's `bearer_hash` — typically because `hermod bearer rotate` wrote a new file while the daemon was offline — and reconciled the DB to match disk. | `previous_hash_prefix` (first 4 bytes hex), `current_hash_prefix` (first 4 bytes hex) |
+
 ### mcp.*
 | Action | Trigger | Details |
 | --- | --- | --- |

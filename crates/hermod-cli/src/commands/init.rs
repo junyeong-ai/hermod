@@ -1,13 +1,16 @@
 use anyhow::{Context, Result};
 use clap::Args;
 use std::path::Path;
-use std::sync::Arc;
+use std::str::FromStr;
 
+use hermod_core::AgentAlias;
 use hermod_daemon::{config::Config, home_layout, host_identity, local_agent};
 
 #[derive(Args, Debug)]
 pub struct InitArgs {
-    /// Optional human-readable alias for this identity (stored in config.toml).
+    /// Operator label for the bootstrap local agent — peers see it as
+    /// `local_alias` in the agents directory. Stored as the bootstrap
+    /// agent's on-disk `alias` file (operator-managed, mode 0644).
     #[arg(long)]
     pub alias: Option<String>,
 
@@ -24,10 +27,6 @@ pub struct InitArgs {
 }
 
 pub async fn run(args: InitArgs, home: &Path) -> Result<()> {
-    // Bring `$HERMOD_HOME` and `host/` to the canonical 0o700 mode.
-    // Init is the explicit operator-driven bootstrap, so it chmods
-    // existing dirs down (the daemon's strict `ensure_dirs` refuses
-    // to touch existing modes — see `home_layout` docs).
     home_layout::prepare_dirs(home).context("prepare $HERMOD_HOME layout")?;
     let config_path = Config::write_template(home)?;
 
@@ -55,14 +54,15 @@ pub async fn run(args: InitArgs, home: &Path) -> Result<()> {
         archive_existing_state(home)?;
     }
 
+    let alias = args
+        .alias
+        .as_deref()
+        .map(AgentAlias::from_str)
+        .transpose()
+        .context("parse --alias")?;
     let (host_kp, _) = host_identity::ensure_exists(home)?;
-    let host_kp = Arc::new(host_kp);
     let tls = host_identity::ensure_tls(home, &host_kp)?;
-    let bootstrap = local_agent::ensure_bootstrap(home, host_kp.clone(), None)?;
-
-    if let Some(alias) = args.alias {
-        apply_alias(&config_path, &alias)?;
-    }
+    let bootstrap = local_agent::create_bootstrap(home, alias)?;
 
     println!("initialized hermod at {}", home.display());
     println!("  host_id:         {}", host_kp.agent_id());
@@ -82,14 +82,6 @@ pub async fn run(args: InitArgs, home: &Path) -> Result<()> {
     Ok(())
 }
 
-fn apply_alias(config_path: &Path, alias: &str) -> Result<()> {
-    let text = std::fs::read_to_string(config_path)?;
-    let mut cfg: Config = toml::from_str(&text)?;
-    cfg.identity.alias = Some(alias.to_string());
-    std::fs::write(config_path, toml::to_string_pretty(&cfg)?)?;
-    Ok(())
-}
-
 /// Move every piece of state that's tied to the current host or
 /// per-agent identities into a timestamped archive subdirectory.
 /// Items that survive (e.g. config.toml, remote_pins.json) are not
@@ -103,10 +95,6 @@ fn archive_existing_state(home: &Path) -> Result<()> {
     let archive_root = home.join("archive");
     let archive = archive_root.join(&stamp);
     std::fs::create_dir_all(&archive).with_context(|| format!("create {}", archive.display()))?;
-    // Lock the archive root and the timestamped subdir to operator-
-    // only access — they hold former identity material and DB
-    // contents. Matches the rest of the $HERMOD_HOME mode policy
-    // (`hermod_daemon::home_layout`). Fail loud if chmod fails.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -116,19 +104,16 @@ fn archive_existing_state(home: &Path) -> Result<()> {
             .with_context(|| format!("chmod {}", archive.display()))?;
     }
 
-    // Host material (Noise XX static + TLS leaf).
     let host_dir = host_identity::host_dir(home);
     if host_dir.exists() {
         move_path(&host_dir, &archive.join("host"))?;
     }
 
-    // Per-agent material (keypair + bearer per local tenant).
     let agents_dir = local_agent::agents_dir(home);
     if agents_dir.exists() {
         move_path(&agents_dir, &archive.join("agents"))?;
     }
 
-    // SQLite store + WAL/SHM siblings.
     for tail in ["hermod.db", "hermod.db-wal", "hermod.db-shm"] {
         let p = home.join(tail);
         if p.exists() {

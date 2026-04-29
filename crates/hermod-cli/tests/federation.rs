@@ -91,12 +91,20 @@ impl Daemon {
             .expect("agent_id in output")
     }
 
-    fn pubkey_hex(&self) -> String {
+    fn agent_pubkey_hex(&self) -> String {
         let (_, out) = self.run(&["identity"]);
         out.lines()
             .find_map(|l| l.strip_prefix("pubkey_hex:"))
             .map(|s| s.trim().to_string())
             .expect("pubkey_hex in output")
+    }
+
+    fn host_pubkey_hex(&self) -> String {
+        let (_, out) = self.run(&["identity"]);
+        out.lines()
+            .find_map(|l| l.strip_prefix("host_pubkey:"))
+            .map(|s| s.trim().to_string())
+            .expect("host_pubkey in output")
     }
 }
 
@@ -138,8 +146,10 @@ fn federation_end_to_end() {
     let bob = Daemon::spawn("bob", 17924, None);
     let alice_id = alice.agent_id();
     let bob_id = bob.agent_id();
-    let alice_pk = alice.pubkey_hex();
-    let bob_pk = bob.pubkey_hex();
+    let alice_host_pk = alice.host_pubkey_hex();
+    let bob_host_pk = bob.host_pubkey_hex();
+    let alice_agent_pk = alice.agent_pubkey_hex();
+    let bob_agent_pk = bob.agent_pubkey_hex();
 
     // Bidirectional peer add + verified trust.
     let (rc, _) = alice.run(&[
@@ -147,8 +157,10 @@ fn federation_end_to_end() {
         "add",
         "--endpoint",
         &format!("wss://{}", bob.fed_addr),
-        "--pubkey-hex",
-        &bob_pk,
+        "--host-pubkey-hex",
+        &bob_host_pk,
+        "--agent-pubkey-hex",
+        &bob_agent_pk,
         "--alias",
         "bob",
     ]);
@@ -158,8 +170,10 @@ fn federation_end_to_end() {
         "add",
         "--endpoint",
         &format!("wss://{}", alice.fed_addr),
-        "--pubkey-hex",
-        &alice_pk,
+        "--host-pubkey-hex",
+        &alice_host_pk,
+        "--agent-pubkey-hex",
+        &alice_agent_pk,
         "--alias",
         "alice",
     ]);
@@ -273,21 +287,14 @@ fn federation_end_to_end() {
         "bob presence get alice: {pres_out}"
     );
 
-    // Alias federation. Both pathways populate distinct columns:
-    //   * `local_alias` — set by bob's `peer add --alias alice` earlier.
-    //   * `peer_asserted_alias` — set by alice's signed Hello frame
-    //     (carried through Noise handshake) when she connected to bob.
-    // Both happen to be "alice" here because the test uses matching
-    // labels; the assertion verifies both columns are populated, not
-    // just one.
+    // Alias federation: bob's `peer add --alias alice` sets
+    // `local_alias = "alice"` on the agent row. Hello frames carry
+    // host identity only; per-agent peer-asserted aliases land via
+    // H7 `peer.advertise` (out of scope here).
     let (_, getout) = bob.run(&["agent", "get", &alice_id]);
     assert!(
         getout.contains("\"local_alias\": \"alice\""),
         "bob's local_alias for alice (set by peer add --alias): {getout}"
-    );
-    assert!(
-        getout.contains("\"peer_asserted_alias\": \"alice\""),
-        "alice's self-asserted alias from Hello frame: {getout}"
     );
     assert!(
         getout.contains("\"effective_alias\": \"alice\""),
@@ -308,24 +315,30 @@ fn inbound_rate_limit_kicks_in() {
     let bob = Daemon::spawn("bob", 17926, Some(2));
     let alice_id = alice.agent_id();
     let bob_id = bob.agent_id();
-    let alice_pk = alice.pubkey_hex();
-    let bob_pk = bob.pubkey_hex();
+    let alice_host_pk = alice.host_pubkey_hex();
+    let bob_host_pk = bob.host_pubkey_hex();
+    let alice_agent_pk = alice.agent_pubkey_hex();
+    let bob_agent_pk = bob.agent_pubkey_hex();
 
     alice.run(&[
         "peer",
         "add",
         "--endpoint",
         &format!("wss://{}", bob.fed_addr),
-        "--pubkey-hex",
-        &bob_pk,
+        "--host-pubkey-hex",
+        &bob_host_pk,
+        "--agent-pubkey-hex",
+        &bob_agent_pk,
     ]);
     bob.run(&[
         "peer",
         "add",
         "--endpoint",
         &format!("wss://{}", alice.fed_addr),
-        "--pubkey-hex",
-        &alice_pk,
+        "--host-pubkey-hex",
+        &alice_host_pk,
+        "--agent-pubkey-hex",
+        &alice_agent_pk,
     ]);
     alice.run(&["peer", "trust", &bob_id, "verified"]);
     bob.run(&["peer", "trust", &alice_id, "verified"]);
