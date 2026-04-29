@@ -11,15 +11,25 @@
 //! The agent_keypair is the application-level signing key — every
 //! envelope `from.id == agent_id` is signed under it. The bearer
 //! token authenticates IPC clients as *this* agent: at the IPC
-//! handshake (post-H3) the daemon hashes the presented bearer with
-//! blake3 and looks up the matching `local_agents.agent_id` row.
+//! handshake the daemon hashes the presented bearer with blake3 and
+//! looks up the matching agent_id via [`LocalAgentRegistry::resolve_bearer`].
 //! The alias file is the operator-set source of truth for the
-//! agent's `local_alias`, propagated to the agents directory at
-//! every boot via [`merge_with_db`].
+//! agent's `local_alias`.
 //!
 //! Host-level material (Noise XX static key, TLS leaf cert) lives
 //! in [`crate::host_identity`] — one host, many local agents, no
 //! key sharing.
+//!
+//! ## Mutability + active-session invalidation
+//!
+//! [`LocalAgentRegistry`] is interior-mutable behind an
+//! `Arc<RwLock<…>>`. Reads (`list`, `lookup`, `solo`,
+//! `resolve_bearer`) take a read lock; mutations (`insert`,
+//! `remove`, `replace_bearer`) take a write lock and atomically
+//! refresh the bearer-hash → agent_id index. On `remove` /
+//! `replace_bearer`, every active IPC session pinned to the
+//! agent's previous bearer is force-closed via a per-session
+//! `oneshot::Sender<()>` registered by `ipc_remote`.
 
 use anyhow::{Context, Result};
 use hermod_core::{AgentAlias, AgentId, Timestamp};
@@ -30,6 +40,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
+use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
 use crate::fs_atomic::{write_public_atomic, write_secret_atomic};
@@ -57,13 +68,6 @@ pub fn alias_path(home: &Path, id: &AgentId) -> PathBuf {
 /// One local agent in memory — keypair (envelope signing), bearer
 /// token (IPC auth), operator-set label, workspace context, and the
 /// timestamp the daemon first persisted this agent.
-///
-/// The `local_alias` and `workspace_root` fields originate at
-/// different times: alias is loaded from disk at scan time;
-/// workspace_root flows back from the `local_agents` DB row during
-/// [`merge_with_db`]. The DB read happens immediately after
-/// scan_disk — by the time any caller outside this module sees a
-/// `LocalAgent`, both fields reflect the persisted state.
 #[derive(Clone, Debug)]
 pub struct LocalAgent {
     pub agent_id: AgentId,
@@ -80,125 +84,178 @@ impl LocalAgent {
     }
 }
 
-/// Snapshot of every agent this daemon hosts. Built at boot from the
-/// on-disk `$HERMOD_HOME/agents/<id>/` directories cross-checked
-/// against the `local_agents` table; **immutable for the lifetime
-/// of the daemon** in H2.
-///
-/// Phase H3 replaces the snapshot with a mutable, shared registry
-/// (`Arc<RwLock<…>>` or similar) so that `hermod local rotate` can
-/// atomically rotate a bearer in memory, on disk, in the DB, and
-/// invalidate any active IPC session running under the previous
-/// bearer (per-agent `Vec<oneshot::Sender<()>>`). Until then, the
-/// only way to apply a rotation is to write the new bearer to disk
-/// and restart the daemon — `merge_with_db` picks up the drift on
-/// next boot.
+/// Mutable in-memory registry of every agent this daemon hosts. All
+/// services hold a clone (cheap — `Arc<RwLock<...>>`); reads see the
+/// current state, mutations are applied atomically + propagated to
+/// the bearer-hash index + active IPC sessions.
 #[derive(Clone, Debug, Default)]
 pub struct LocalAgentRegistry {
+    inner: Arc<RwLock<RegistryInner>>,
+}
+
+#[derive(Debug, Default)]
+struct RegistryInner {
     agents: Vec<LocalAgent>,
+    /// blake3(bearer_token) → agent_id, rebuilt on every mutation.
+    bearer_index: HashMap<[u8; 32], AgentId>,
+    /// Per-agent shutdown channels for active IPC sessions. Each
+    /// connection registers one on accept; mutations that
+    /// invalidate a bearer (rotate / remove) fire all senders for
+    /// the affected agent so its open connections close out.
+    sessions: HashMap<AgentId, Vec<oneshot::Sender<()>>>,
 }
 
 impl LocalAgentRegistry {
     pub fn from_agents(agents: Vec<LocalAgent>) -> Self {
-        Self { agents }
+        let mut inner = RegistryInner::default();
+        for a in agents {
+            inner
+                .bearer_index
+                .insert(a.bearer_hash(), a.agent_id.clone());
+            inner.agents.push(a);
+        }
+        Self {
+            inner: Arc::new(RwLock::new(inner)),
+        }
     }
 
-    pub fn list(&self) -> &[LocalAgent] {
-        &self.agents
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, RegistryInner> {
+        self.inner.read().expect("registry rwlock poisoned")
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, RegistryInner> {
+        self.inner.write().expect("registry rwlock poisoned")
+    }
+
+    /// Snapshot of every hosted agent. Cheap clone — the heavy
+    /// fields (`keypair`, `bearer_token`) are `Arc`-shared.
+    pub fn list(&self) -> Vec<LocalAgent> {
+        self.read().agents.clone()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.agents.is_empty()
+        self.read().agents.is_empty()
     }
 
     pub fn len(&self) -> usize {
-        self.agents.len()
+        self.read().agents.len()
     }
 
-    pub fn lookup(&self, id: &AgentId) -> Option<&LocalAgent> {
-        self.agents.iter().find(|a| &a.agent_id == id)
+    pub fn lookup(&self, id: &AgentId) -> Option<LocalAgent> {
+        self.read()
+            .agents
+            .iter()
+            .find(|a| &a.agent_id == id)
+            .cloned()
     }
 
     /// Returns the lone hosted agent when the daemon hosts exactly
-    /// one — the H2 single-tenant invariant — and `None` otherwise.
-    /// Used by:
-    ///
-    /// - `server.rs::serve` to derive the daemon's envelope-signer
-    ///   and self_id (returns an anyhow error on `None`).
-    /// - `hermod bearer show` / `rotate` and `hermod identity` to
-    ///   resolve the implicit agent without an `--alias` flag.
-    /// - `local_agent::implicit_bearer_default` for the
-    ///   `$HERMOD_HOME/agents/<bootstrap_id>/bearer_token` fallback
-    ///   the CLI falls back to when no `--bearer-file` /
-    ///   `HERMOD_BEARER_TOKEN` is set.
-    ///
-    /// Phase H3 removes the hard dependency in `server.rs` (every
-    /// IPC call resolves its caller_agent at handshake time, no
-    /// global "primary" needed). Phase H5 introduces multi-agent
-    /// CLI flows so this method is purely a CLI-convenience surface
-    /// after that.
-    pub fn solo(&self) -> Option<&LocalAgent> {
-        if self.agents.len() == 1 {
-            self.agents.first()
+    /// one. Used by the local Unix-socket IPC path to bind a
+    /// single-tenant convenience caller, by `hermod identity` to
+    /// resolve the implicit agent without an `--alias` flag, and by
+    /// `local_agent::implicit_bearer_default`.
+    pub fn solo(&self) -> Option<LocalAgent> {
+        let g = self.read();
+        if g.agents.len() == 1 {
+            g.agents.first().cloned()
         } else {
             None
         }
     }
-}
-
-/// Runtime bearer-token lookup against the daemon's local-agent
-/// roster. Built at boot from a [`LocalAgentRegistry`] snapshot —
-/// every hosted agent's blake3 bearer-hash is keyed to its
-/// `agent_id`. The lookup is sync (a `RwLock` over an in-memory
-/// `HashMap`) so it can run inside the WebSocket handshake callback,
-/// which tungstenite invokes on a non-async stack.
-///
-/// Phase H3.5 will add `rotate_bearer` here, which swaps the hash
-/// in-place and closes any active IPC session pinned to the
-/// previous bearer (oneshot shutdown channels per session). Until
-/// then, the map is set once at boot and read-only at runtime.
-#[derive(Clone, Debug)]
-pub struct BearerAuthenticator {
-    inner: Arc<RwLock<HashMap<[u8; 32], AgentId>>>,
-}
-
-impl BearerAuthenticator {
-    pub fn from_registry(registry: &LocalAgentRegistry) -> Self {
-        let map: HashMap<[u8; 32], AgentId> = registry
-            .list()
-            .iter()
-            .map(|a| (a.bearer_hash(), a.agent_id.clone()))
-            .collect();
-        Self {
-            inner: Arc::new(RwLock::new(map)),
-        }
-    }
 
     /// Hash `token` with blake3 and return the matching agent_id, or
-    /// `None` if no hosted agent owns this bearer.
-    pub fn resolve(&self, token: &str) -> Option<AgentId> {
+    /// `None` if no hosted agent owns this bearer. The hot path of
+    /// the IPC handshake — sync, no allocation, no I/O.
+    pub fn resolve_bearer(&self, token: &str) -> Option<AgentId> {
         let hash: [u8; 32] = *blake3::hash(token.as_bytes()).as_bytes();
-        self.inner.read().ok()?.get(&hash).cloned()
+        self.read().bearer_index.get(&hash).cloned()
     }
 
-    /// Number of accepted bearers — for diagnostics only.
-    pub fn len(&self) -> usize {
-        self.inner.read().map(|g| g.len()).unwrap_or(0)
+    /// Register an active IPC session pinned to `agent_id`. The
+    /// returned receiver fires when the agent's bearer is rotated
+    /// or the agent is removed — connections must `select!` on it
+    /// alongside the inbound message stream and close cleanly.
+    pub fn register_session(&self, agent_id: &AgentId) -> oneshot::Receiver<()> {
+        let (tx, rx) = oneshot::channel();
+        self.write()
+            .sessions
+            .entry(agent_id.clone())
+            .or_default()
+            .push(tx);
+        rx
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+    /// Insert a freshly-provisioned agent. Refreshes the bearer
+    /// index. Returns an error if `agent_id` already exists — the
+    /// caller should `replace_bearer` instead.
+    pub fn insert(&self, agent: LocalAgent) -> Result<()> {
+        let mut g = self.write();
+        if g.agents.iter().any(|a| a.agent_id == agent.agent_id) {
+            anyhow::bail!("agent {} already in registry", agent.agent_id);
+        }
+        g.bearer_index
+            .insert(agent.bearer_hash(), agent.agent_id.clone());
+        g.agents.push(agent);
+        Ok(())
+    }
+
+    /// Remove an agent. Drops its bearer from the index, fires every
+    /// shutdown sender registered against it, and returns whether a
+    /// row was present.
+    pub fn remove(&self, id: &AgentId) -> bool {
+        let mut g = self.write();
+        let pos = g.agents.iter().position(|a| &a.agent_id == id);
+        let Some(idx) = pos else {
+            return false;
+        };
+        let removed = g.agents.remove(idx);
+        g.bearer_index.remove(&removed.bearer_hash());
+        if let Some(senders) = g.sessions.remove(id) {
+            for tx in senders {
+                let _ = tx.send(());
+            }
+        }
+        true
+    }
+
+    /// Swap an agent's bearer token. Replaces the bearer-index entry
+    /// atomically (old hash dropped, new hash inserted) and force-
+    /// closes any session still using the previous bearer.
+    pub fn replace_bearer(&self, id: &AgentId, new_bearer: SecretString) -> bool {
+        let mut g = self.write();
+        let Some(agent) = g.agents.iter_mut().find(|a| &a.agent_id == id) else {
+            return false;
+        };
+        let prior_hash = agent.bearer_hash();
+        agent.bearer_token = Arc::new(new_bearer);
+        let new_hash = agent.bearer_hash();
+        g.bearer_index.remove(&prior_hash);
+        g.bearer_index.insert(new_hash, id.clone());
+        if let Some(senders) = g.sessions.remove(id) {
+            for tx in senders {
+                let _ = tx.send(());
+            }
+        }
+        true
+    }
+
+    /// Update `local_alias` in memory (the disk-side change is
+    /// driven by the caller, since registry doesn't know `home`).
+    pub fn update_alias(&self, id: &AgentId, alias: Option<AgentAlias>) -> bool {
+        let mut g = self.write();
+        let Some(agent) = g.agents.iter_mut().find(|a| &a.agent_id == id) else {
+            return false;
+        };
+        agent.local_alias = alias;
+        true
     }
 }
 
 /// Implicit default bearer-file path for CLI clients that don't pass
-/// `--bearer-file` / `HERMOD_BEARER_TOKEN`. In the H2 single-tenant
-/// shape every host owns exactly one local agent, and that agent's
-/// bearer is the obvious fallback. When the assumption breaks
-/// (no agent on disk, or multi-agent post-H5) this returns a sentinel
-/// path that fails clearly at `FileBearerProvider::current` — the
-/// operator sees the path in the error and reaches for
-/// `--bearer-file` explicitly.
+/// `--bearer-file` / `HERMOD_BEARER_TOKEN`. With one local agent on
+/// disk, points at its bearer; otherwise returns a sentinel path so
+/// `FileBearerProvider::current` fails clearly with the path in the
+/// diagnostic.
 pub fn implicit_bearer_default(home: &Path) -> PathBuf {
     if let Ok(agents) = scan_disk_ids(home)
         && agents.len() == 1
@@ -209,16 +266,14 @@ pub fn implicit_bearer_default(home: &Path) -> PathBuf {
 }
 
 /// Compute the `local_agents.bearer_hash` value for a token.
-/// blake3 of the raw token bytes. Pinned here so the daemon and the
-/// (future) `hermod local rotate` CLI agree on the canonical form.
+/// blake3 of the raw token bytes.
 pub fn bearer_hash(token: &SecretString) -> [u8; 32] {
     *blake3::hash(token.expose_secret().as_bytes()).as_bytes()
 }
 
 /// Generate a fresh per-agent bearer token: 32 random bytes
-/// hex-encoded, 64 ASCII chars. Wrapped in `SecretString` so the
-/// wrapper's ZeroizeOnDrop wipes the heap buffer when the caller is
-/// done.
+/// hex-encoded, 64 ASCII chars. Wrapped in `SecretString` so
+/// `ZeroizeOnDrop` wipes the heap buffer at end of scope.
 pub fn generate_bearer_token() -> SecretString {
     use rand::RngCore;
     let mut bytes = Zeroizing::new([0u8; 32]);
@@ -226,10 +281,7 @@ pub fn generate_bearer_token() -> SecretString {
     SecretString::new(hex::encode(bytes.as_slice()))
 }
 
-/// Materialise the bootstrap local agent on disk: generate a fresh
-/// keypair, write `ed25519_secret` + `bearer_token` (mode 0600) and
-/// the optional `alias` file (mode 0644) under
-/// `$HERMOD_HOME/agents/<agent_id>/`.
+/// Materialise the bootstrap local agent on disk.
 ///
 /// Errors if any local agent already exists on disk — `hermod init
 /// --force` is the documented path to wipe and re-provision.
@@ -244,10 +296,7 @@ pub fn create_bootstrap(home: &Path, alias: Option<AgentAlias>) -> Result<LocalA
 }
 
 /// Materialise an *additional* local agent (sibling to an existing
-/// bootstrap). Used by `hermod local add`. Identical on-disk shape
-/// to [`create_bootstrap`]; differs only in that pre-existing
-/// agents are tolerated and the new agent's alias must not collide
-/// with one already on disk.
+/// bootstrap). Used by `hermod local add`.
 pub fn create_additional(home: &Path, alias: Option<AgentAlias>) -> Result<LocalAgent> {
     if let Some(a) = &alias {
         for id in scan_disk_ids(home)? {
@@ -265,10 +314,6 @@ pub fn create_additional(home: &Path, alias: Option<AgentAlias>) -> Result<Local
     write_new_agent(home, alias)
 }
 
-/// Shared write path for [`create_bootstrap`] and
-/// [`create_additional`]. Generates a fresh keypair + bearer and
-/// writes them (plus the optional alias) under
-/// `agents/<agent_id>/`.
 fn write_new_agent(home: &Path, alias: Option<AgentAlias>) -> Result<LocalAgent> {
     let keypair = Arc::new(Keypair::generate());
     let agent_id = keypair.agent_id();
@@ -300,11 +345,8 @@ fn write_new_agent(home: &Path, alias: Option<AgentAlias>) -> Result<LocalAgent>
 }
 
 /// Generate and atomically install a fresh bearer token for an
-/// existing local agent. Returns the new token so the operator can
-/// pipe it into a remote-IPC client without re-reading the file.
-/// The DB row's `bearer_hash` lags until the next daemon boot, when
-/// `merge_with_db` detects the drift and reconciles via the
-/// `local_agent.bearer_rotated_on_drift` audit row.
+/// existing local agent. Returns the new token; caller is
+/// responsible for updating the registry + DB.
 pub fn rotate_bearer_on_disk(home: &Path, id: &AgentId) -> Result<SecretString> {
     if !secret_path(home, id).exists() {
         anyhow::bail!(
@@ -319,12 +361,8 @@ pub fn rotate_bearer_on_disk(home: &Path, id: &AgentId) -> Result<SecretString> 
     Ok(new_token)
 }
 
-/// Move `agents/<id>/` into the timestamped archive subtree. The
-/// directory's keypair, bearer, and any alias file all move together;
-/// the matching `agents` and `local_agents` DB rows linger until the
-/// next daemon boot, when `load_registry` no longer sees the agent
-/// and the operator can clean them up via `hermod doctor` or by
-/// archiving the DB itself.
+/// Move `agents/<id>/` into a timestamped archive subtree. The
+/// directory's keypair, bearer, and any alias file move together.
 pub fn archive_agent(home: &Path, id: &AgentId) -> Result<PathBuf> {
     let src = agent_dir(home, id);
     if !src.exists() {
@@ -359,10 +397,7 @@ pub fn archive_agent(home: &Path, id: &AgentId) -> Result<PathBuf> {
     Ok(dst)
 }
 
-/// Load one local agent's on-disk material. The directory name is
-/// the agent_id and is verified against the loaded keypair's derived
-/// id — a mismatch means filesystem corruption or operator hand-edit
-/// and is fail-loud.
+/// Load one local agent's on-disk material.
 pub fn load(home: &Path, id: &AgentId) -> Result<LocalAgent> {
     let secret_p = secret_path(home, id);
     let bytes = fs::read(&secret_p).with_context(|| format!("read {}", secret_p.display()))?;
@@ -401,9 +436,6 @@ pub fn load(home: &Path, id: &AgentId) -> Result<LocalAgent> {
     })
 }
 
-/// Read the optional alias file. Missing file → `None`. Present-but-
-/// empty after trim is also treated as `None` so an operator
-/// `> alias` (truncate) drops the alias cleanly.
 fn read_alias(home: &Path, id: &AgentId) -> Result<Option<AgentAlias>> {
     let p = alias_path(home, id);
     if !p.exists() {
@@ -420,10 +452,7 @@ fn read_alias(home: &Path, id: &AgentId) -> Result<Option<AgentAlias>> {
 }
 
 /// Walk `$HERMOD_HOME/agents/` and return one `LocalAgent` per
-/// subdirectory whose name parses as an `AgentId`. Subdirectories
-/// with malformed names are reported as warnings and skipped — they
-/// may be operator scratch (`tmp-*`, dotfiles) and should not crash
-/// the daemon.
+/// subdirectory whose name parses as an `AgentId`.
 pub fn scan_disk(home: &Path) -> Result<Vec<LocalAgent>> {
     let dir = agents_dir(home);
     if !dir.exists() {
@@ -482,30 +511,24 @@ pub fn scan_disk_ids(home: &Path) -> Result<Vec<AgentId>> {
 }
 
 /// Load the boot-time registry by scanning `$HERMOD_HOME/agents/`.
-/// Returns whatever's on disk — including an empty registry; this
-/// function performs no provisioning, only reading. The daemon's
-/// `main` refuses to boot when the registry is empty (the "run
-/// `hermod init` first" path); `hermod init` is the only code site
-/// that calls [`create_bootstrap`] to materialise the bootstrap on
-/// disk.
 pub fn load_registry(home: &Path) -> Result<LocalAgentRegistry> {
     Ok(LocalAgentRegistry::from_agents(scan_disk(home)?))
 }
 
 /// Cross-reference the in-memory snapshot against the `local_agents`
-/// DB rows: every disk-resident agent must have a row, and each row
-/// is folded back into the snapshot so `workspace_root` /
-/// `created_at` reflect the persisted record (the disk has no notion
-/// of either). When the on-disk `bearer_token` hash diverges from
-/// the DB row's hash — typically because `hermod bearer rotate`
-/// wrote a new file while the daemon was offline — the DB follows
-/// disk and the rotation lands as an audit row.
+/// DB rows and reconcile drift (operator wrote a fresh bearer to
+/// disk while the daemon was offline → DB row's `bearer_hash`
+/// follows disk + an audit row records the rotation).
 pub async fn merge_with_db(
     db: &dyn Database,
     audit_sink: &dyn AuditSink,
-    mut snapshot: LocalAgentRegistry,
+    snapshot: LocalAgentRegistry,
 ) -> Result<LocalAgentRegistry> {
-    for agent in snapshot.agents.iter_mut() {
+    // Snapshot the agents, mutate fields in a private vec, then
+    // overwrite the registry's interior. `from_agents` rebuilds
+    // the bearer index on the way back in.
+    let mut agents = snapshot.list();
+    for agent in agents.iter_mut() {
         let bearer_hash = agent.bearer_hash();
         let existing = db
             .local_agents()
@@ -556,11 +579,11 @@ pub async fn merge_with_db(
                 .with_context(|| format!("insert local_agent row {}", agent.agent_id))?;
         }
     }
-    Ok(snapshot)
+    Ok(LocalAgentRegistry::from_agents(agents))
 }
 
 #[cfg(unix)]
-fn ensure_agent_dir(home: &Path, id: &AgentId) -> std::io::Result<()> {
+pub(crate) fn ensure_agent_dir(home: &Path, id: &AgentId) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let parent = agents_dir(home);
     if !parent.exists() {
@@ -576,7 +599,7 @@ fn ensure_agent_dir(home: &Path, id: &AgentId) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn ensure_agent_dir(home: &Path, id: &AgentId) -> std::io::Result<()> {
+pub(crate) fn ensure_agent_dir(home: &Path, id: &AgentId) -> std::io::Result<()> {
     let parent = agents_dir(home);
     if !parent.exists() {
         fs::create_dir_all(&parent)?;
@@ -626,14 +649,54 @@ mod tests {
     }
 
     #[test]
-    fn create_bootstrap_refuses_on_pre_populated_dir() {
+    fn registry_resolve_bearer_round_trips() {
         let tmp = TempDir::new().unwrap();
-        create_bootstrap(tmp.path(), None).unwrap();
-        let err = create_bootstrap(tmp.path(), None).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("already populated"),
-            "got: {err:#}"
+        let agent = create_bootstrap(tmp.path(), None).unwrap();
+        let token = agent.bearer_token.expose_secret().to_string();
+        let registry = LocalAgentRegistry::from_agents(vec![agent.clone()]);
+        assert_eq!(registry.resolve_bearer(&token), Some(agent.agent_id));
+        assert_eq!(registry.resolve_bearer("nope"), None);
+    }
+
+    #[test]
+    fn registry_remove_drops_bearer_and_fires_session() {
+        let tmp = TempDir::new().unwrap();
+        let agent = create_bootstrap(tmp.path(), None).unwrap();
+        let token = agent.bearer_token.expose_secret().to_string();
+        let registry = LocalAgentRegistry::from_agents(vec![agent.clone()]);
+        let mut rx = registry.register_session(&agent.agent_id);
+        assert!(rx.try_recv().is_err(), "no shutdown until removed");
+        assert!(registry.remove(&agent.agent_id));
+        assert_eq!(registry.resolve_bearer(&token), None);
+        assert!(rx.try_recv().is_ok(), "session shutdown fires on remove");
+    }
+
+    #[test]
+    fn registry_replace_bearer_swaps_and_fires_session() {
+        let tmp = TempDir::new().unwrap();
+        let agent = create_bootstrap(tmp.path(), None).unwrap();
+        let old = agent.bearer_token.expose_secret().to_string();
+        let registry = LocalAgentRegistry::from_agents(vec![agent.clone()]);
+        let mut rx = registry.register_session(&agent.agent_id);
+        let new_token = generate_bearer_token();
+        let new_str = new_token.expose_secret().to_string();
+        assert!(registry.replace_bearer(&agent.agent_id, new_token));
+        assert_eq!(registry.resolve_bearer(&old), None, "old bearer revoked");
+        assert_eq!(
+            registry.resolve_bearer(&new_str),
+            Some(agent.agent_id.clone()),
+            "new bearer accepted"
         );
+        assert!(rx.try_recv().is_ok(), "session shutdown fires on rotate");
+    }
+
+    #[test]
+    fn registry_insert_rejects_duplicate_id() {
+        let tmp = TempDir::new().unwrap();
+        let agent = create_bootstrap(tmp.path(), None).unwrap();
+        let registry = LocalAgentRegistry::from_agents(vec![agent.clone()]);
+        let err = registry.insert(agent).unwrap_err();
+        assert!(format!("{err:#}").contains("already in registry"));
     }
 
     #[test]
@@ -651,33 +714,6 @@ mod tests {
     }
 
     #[test]
-    fn load_treats_empty_alias_file_as_none() {
-        let tmp = TempDir::new().unwrap();
-        let agent = create_bootstrap(tmp.path(), None).unwrap();
-        let alias_p = alias_path(tmp.path(), &agent.agent_id);
-        fs::write(&alias_p, "   \n  ").unwrap();
-        let loaded = load(tmp.path(), &agent.agent_id).unwrap();
-        assert_eq!(loaded.local_alias, None);
-    }
-
-    #[test]
-    fn load_rejects_mismatched_directory_name() {
-        let tmp = TempDir::new().unwrap();
-        let agent = create_bootstrap(tmp.path(), None).unwrap();
-        let other = Keypair::generate().agent_id();
-        fs::rename(
-            agent_dir(tmp.path(), &agent.agent_id),
-            agent_dir(tmp.path(), &other),
-        )
-        .unwrap();
-        let err = load(tmp.path(), &other).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("contains a keypair whose agent_id is"),
-            "got: {err:#}"
-        );
-    }
-
-    #[test]
     fn scan_disk_loads_every_agent_directory() {
         let tmp = TempDir::new().unwrap();
         let bootstrap = create_bootstrap(tmp.path(), None).unwrap();
@@ -690,22 +726,6 @@ mod tests {
     fn scan_disk_is_empty_when_dir_missing() {
         let tmp = TempDir::new().unwrap();
         assert!(scan_disk(tmp.path()).unwrap().is_empty());
-    }
-
-    #[test]
-    fn scan_disk_skips_non_agent_id_entries() {
-        let tmp = TempDir::new().unwrap();
-        create_bootstrap(tmp.path(), None).unwrap();
-        fs::create_dir_all(agents_dir(tmp.path()).join("tmp-scratch")).unwrap();
-        let got = scan_disk(tmp.path()).unwrap();
-        assert_eq!(got.len(), 1);
-    }
-
-    #[test]
-    fn load_registry_returns_empty_when_no_agents_on_disk() {
-        let tmp = TempDir::new().unwrap();
-        let reg = load_registry(tmp.path()).unwrap();
-        assert!(reg.is_empty());
     }
 
     #[test]

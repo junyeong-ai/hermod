@@ -84,8 +84,28 @@ impl MultiAgentDaemon {
             .expect("hermod init");
         assert!(init_status.success(), "hermod init failed");
 
-        // Second local agent provisioned on disk before the daemon
-        // boots so the registry sees both at boot — no restart dance.
+        // Spawn the daemon — at this point only the bootstrap agent is
+        // in its registry.
+        let ws_port = pick_free_port();
+        let ws_addr: SocketAddr = format!("127.0.0.1:{ws_port}").parse().unwrap();
+        let socket = home.path().join("sock");
+        let stderr_file =
+            std::fs::File::create(home.path().join("daemon.stderr")).expect("daemon stderr");
+        let child = Command::new(&bin_hermodd)
+            .env("HERMOD_HOME", home.path())
+            .env("HERMOD_DAEMON_SOCKET_PATH", &socket)
+            .env("HERMOD_DAEMON_IPC_LISTEN_WS", ws_addr.to_string())
+            .env("HERMOD_DAEMON_LOG", "warn")
+            .stdout(Stdio::null())
+            .stderr(stderr_file)
+            .spawn()
+            .expect("spawn hermodd");
+        wait_for_port(ws_addr, Duration::from_secs(15));
+        wait_for_socket(&socket, Duration::from_secs(5));
+
+        // Provision the second agent over IPC — exercises the live
+        // `local.add` path: daemon writes disk + DB + registry +
+        // bearer index in lockstep, no restart needed.
         let add_status = Command::new(&bin_hermod)
             .env("HERMOD_HOME", home.path())
             .args(["local", "add", "--alias", "projB"])
@@ -114,23 +134,6 @@ impl MultiAgentDaemon {
                 (id, bearer)
             })
             .collect();
-
-        let ws_port = pick_free_port();
-        let ws_addr: SocketAddr = format!("127.0.0.1:{ws_port}").parse().unwrap();
-        let socket = home.path().join("sock");
-        let stderr_file =
-            std::fs::File::create(home.path().join("daemon.stderr")).expect("daemon stderr");
-        let child = Command::new(&bin_hermodd)
-            .env("HERMOD_HOME", home.path())
-            .env("HERMOD_DAEMON_SOCKET_PATH", &socket)
-            .env("HERMOD_DAEMON_IPC_LISTEN_WS", ws_addr.to_string())
-            .env("HERMOD_DAEMON_LOG", "warn")
-            .stdout(Stdio::null())
-            .stderr(stderr_file)
-            .spawn()
-            .expect("spawn hermodd");
-        wait_for_port(ws_addr, Duration::from_secs(15));
-        wait_for_socket(&socket, Duration::from_secs(5));
 
         Self {
             child,
@@ -219,6 +222,106 @@ fn each_local_agent_resolves_to_its_own_identity() {
             bearer_path.display(),
         );
     }
+}
+
+/// `local rotate` over IPC must:
+///   1. write a fresh bearer to disk + DB,
+///   2. swap the bearer-index entry in the live registry, and
+///   3. force-close any active session pinned to the prior bearer.
+///
+/// Pins the H3.5 contract: between (a) the operator running
+/// `hermod local rotate` and (b) a stale-bearer client failing with
+/// 401 / a live client losing its connection, no manual restart of
+/// the daemon is required.
+#[test]
+fn local_rotate_revokes_old_bearer_immediately() {
+    let daemon = MultiAgentDaemon::spawn();
+    // Pick the bootstrap (`projA`) — index 0 after sort. Either works.
+    let (target_id, bearer_path) = daemon.agents[0].clone();
+    let old_bearer = std::fs::read_to_string(&bearer_path)
+        .expect("read original bearer")
+        .trim()
+        .to_string();
+
+    // Sanity: the old bearer authenticates before the rotation.
+    let pre = daemon.cli_identity(&bearer_path);
+    assert!(
+        pre.status.success(),
+        "old bearer must work pre-rotation; got: {:?}",
+        String::from_utf8_lossy(&pre.stderr),
+    );
+
+    // Run `hermod local rotate <agent_id>` — IPC path materialises
+    // a fresh bearer in disk + DB + registry.
+    let bin_hermod = release_bin("hermod");
+    let rotate_out = Command::new(&bin_hermod)
+        .env("HERMOD_HOME", daemon.home.path())
+        .args(["local", "rotate", &target_id])
+        .output()
+        .expect("hermod local rotate");
+    let rotate_stderr = String::from_utf8_lossy(&rotate_out.stderr);
+    assert!(
+        rotate_out.status.success(),
+        "rotate failed: stderr={rotate_stderr}",
+    );
+
+    // Old bearer must now fail. Write the captured pre-rotation
+    // value to a side file so the rotated `bearer_token` file
+    // doesn't shadow it.
+    let stale_path = daemon.home.path().join("stale_bearer");
+    std::fs::write(&stale_path, &old_bearer).unwrap();
+    let post_old = daemon.cli_identity(&stale_path);
+    assert!(
+        !post_old.status.success(),
+        "stale bearer must be rejected after rotate; got success",
+    );
+
+    // The newly-written bearer file authenticates the same agent.
+    let post_new = daemon.cli_identity(&bearer_path);
+    let stdout = String::from_utf8_lossy(&post_new.stdout);
+    assert!(
+        post_new.status.success(),
+        "rotated bearer must authenticate; stderr={:?}",
+        String::from_utf8_lossy(&post_new.stderr),
+    );
+    let observed = extract_agent_id(&stdout)
+        .unwrap_or_else(|| panic!("no agent_id: line in post-rotate status: {stdout}"));
+    assert_eq!(
+        observed, target_id,
+        "post-rotate identity should still resolve to the same agent_id",
+    );
+}
+
+/// `local remove` over IPC archives the agent's directory and drops
+/// the bearer from the registry — subsequent connect attempts with
+/// that bearer must fail.
+#[test]
+fn local_remove_revokes_bearer_immediately() {
+    let daemon = MultiAgentDaemon::spawn();
+    // Remove the second agent (`projB`) — keeping the bootstrap
+    // around so the daemon stays usable for the post-remove probe.
+    let (target_id, bearer_path) = daemon.agents[1].clone();
+    let stale_path = daemon.home.path().join("removed_bearer");
+    std::fs::copy(&bearer_path, &stale_path).expect("snapshot bearer");
+
+    let bin_hermod = release_bin("hermod");
+    let remove_out = Command::new(&bin_hermod)
+        .env("HERMOD_HOME", daemon.home.path())
+        .args(["local", "rm", "--force", &target_id])
+        .output()
+        .expect("hermod local rm");
+    assert!(
+        remove_out.status.success(),
+        "remove failed: {}",
+        String::from_utf8_lossy(&remove_out.stderr),
+    );
+
+    // The removed agent's bearer must no longer authenticate.
+    let post = daemon.cli_identity(&stale_path);
+    assert!(
+        !post.status.success(),
+        "removed agent's bearer must be rejected; got success",
+    );
 }
 
 /// A bearer file that doesn't correspond to any hosted agent's

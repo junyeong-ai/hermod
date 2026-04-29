@@ -33,6 +33,15 @@ pub mod method {
     pub const AGENT_REGISTER: &str = "agent.register";
 
     // Peers
+    // Local agents — daemon-side mutation of the live registry. The
+    // operator runs `hermod local add` etc. while the daemon is
+    // running; the registry's bearer index updates in-place and any
+    // session pinned to a removed/rotated bearer is force-closed.
+    pub const LOCAL_LIST: &str = "local.list";
+    pub const LOCAL_ADD: &str = "local.add";
+    pub const LOCAL_REMOVE: &str = "local.remove";
+    pub const LOCAL_ROTATE: &str = "local.rotate";
+
     pub const PEER_ADD: &str = "peer.add";
     pub const PEER_LIST: &str = "peer.list";
     pub const PEER_TRUST: &str = "peer.trust";
@@ -354,6 +363,75 @@ pub struct AgentRegisterParams {
 pub struct AgentRegisterResult {
     pub id: AgentId,
     pub alias_outcome: AliasOutcomeView,
+}
+
+// ---------- local.* ----------
+
+/// Summary of one locally-hosted agent. Used by `local.list` and
+/// returned from `local.add` so the operator immediately sees the
+/// freshly-provisioned agent.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalAgentSummary {
+    pub agent_id: AgentId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<AgentAlias>,
+    /// Path to the bearer file on disk. Operators piping into MCP
+    /// `.mcp.json` (`HERMOD_BEARER_FILE`) reference this directly.
+    pub bearer_file: String,
+    /// Path to the ed25519 secret on disk.
+    pub secret_file: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalListResult {
+    pub agents: Vec<LocalAgentSummary>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LocalAddParams {
+    /// Operator-set label, mirrored to the on-disk `alias` file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<AgentAlias>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalAddResult {
+    pub agent: LocalAgentSummary,
+    /// Plaintext bearer token for the freshly-provisioned agent.
+    /// Returned once at creation; subsequent reads must come from
+    /// `bearer_file`. CLI commands surface this so the operator can
+    /// pipe it into a remote-IPC client immediately.
+    pub bearer_token: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalRemoveParams {
+    /// Either `agent_id` or `@<alias>`.
+    pub reference: String,
+    /// Required confirmation — the agent's keypair is unrecoverable
+    /// once archived. Without this, the call is rejected.
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalRemoveResult {
+    pub agent_id: AgentId,
+    /// Filesystem path to the archived directory.
+    pub archive_path: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalRotateParams {
+    pub reference: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalRotateResult {
+    pub agent_id: AgentId,
+    /// New plaintext bearer. Surfaced once at rotation time;
+    /// subsequent reads must come from `bearer_file`.
+    pub bearer_token: String,
 }
 
 // ---------- peer.* ----------

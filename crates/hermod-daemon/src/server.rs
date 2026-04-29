@@ -57,13 +57,16 @@ pub async fn serve(
     let host_id = host_keypair.agent_id();
     let host_public_key = host_keypair.public_key();
 
-    // Bearer authentication map for the remote-IPC listeners. Built
-    // once from the registry snapshot — a presented bearer's blake3
-    // hash resolves to the matching local agent_id (or 401 if no
-    // hosted agent owns it). The handshake binds that agent_id as
-    // the connection's `CALLER_AGENT` task_local, which audit_or_warn
-    // overlays onto every emitted row's `actor` field.
-    let bearer_auth = hermod_daemon::local_agent::BearerAuthenticator::from_registry(&registry);
+    // The remote-IPC listener authenticates by hashing the presented
+    // bearer with blake3 and looking the result up in `registry`.
+    // The handshake binds the resolved agent_id as the connection's
+    // `CALLER_AGENT` task_local, which audit_or_warn overlays onto
+    // every emitted row's `actor` field.
+    //
+    // The registry is interior-mutable: `local.add` / `local.rotate` /
+    // `local.remove` IPC paths take a write lock to update the
+    // bearer index in-place + force-close any active session pinned
+    // to a removed/rotated bearer.
 
     // Parse `[federation] upstream_broker` once. A malformed value
     // is fatal — the operator should know immediately rather than
@@ -551,6 +554,14 @@ pub async fn serve(
         permissions,
         audit: AuditService::new(db.clone(), config.policy.audit_retention_secs),
         capabilities,
+        local_agents: crate::services::LocalAgentService::new(
+            db.clone(),
+            audit_sink.clone(),
+            host_id.clone(),
+            host_keypair.to_pubkey_bytes(),
+            registry.clone(),
+            home.clone(),
+        ),
     };
 
     // Janitor: periodic cleanup of expired briefs / stale confirmations /
@@ -604,11 +615,11 @@ pub async fn serve(
     if let Some(addr) = parse_listen_addr(&config.daemon.ipc_listen_wss, "ipc_listen_wss") {
         let dispatcher_for_ipc = dispatcher.clone();
         let tls_for_ipc = tls.clone();
-        let auth = bearer_auth.clone();
+        let reg = registry.clone();
         let trusted = trusted_proxies.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                crate::ipc_remote::serve_wss(addr, tls_for_ipc, auth, trusted, dispatcher_for_ipc)
+                crate::ipc_remote::serve_wss(addr, tls_for_ipc, reg, trusted, dispatcher_for_ipc)
                     .await
             {
                 tracing::error!(error = %e, "remote IPC (WSS) listener exited");
@@ -618,11 +629,11 @@ pub async fn serve(
     if let Some(addr) = parse_listen_addr(&config.daemon.ipc_listen_ws, "ipc_listen_ws") {
         warn_if_plaintext_exposed(addr);
         let dispatcher_for_ipc = dispatcher.clone();
-        let auth = bearer_auth.clone();
+        let reg = registry.clone();
         let trusted = trusted_proxies.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                crate::ipc_remote::serve_ws(addr, auth, trusted, dispatcher_for_ipc).await
+                crate::ipc_remote::serve_ws(addr, reg, trusted, dispatcher_for_ipc).await
             {
                 tracing::error!(error = %e, "remote IPC (WS) listener exited");
             }

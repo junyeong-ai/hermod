@@ -28,7 +28,7 @@ use anyhow::{Context, Result, anyhow};
 use futures::{SinkExt, StreamExt};
 use hermod_core::AgentId;
 use hermod_crypto::TlsMaterial;
-use hermod_daemon::local_agent::BearerAuthenticator;
+use hermod_daemon::local_agent::LocalAgentRegistry;
 use hermod_protocol::ipc::{Request, Response, message::Id};
 use ipnet::IpNet;
 use rustls::ServerConfig;
@@ -80,17 +80,17 @@ impl AcceptStrategy {
         &self,
         sock: tokio::net::TcpStream,
         peer: SocketAddr,
-        authenticator: BearerAuthenticator,
+        registry: LocalAgentRegistry,
         trusted_proxies: Arc<Vec<IpNet>>,
         dispatcher: Dispatcher,
     ) -> Result<()> {
         match self {
             AcceptStrategy::Plain => {
-                handshake_and_serve(sock, peer, authenticator, trusted_proxies, dispatcher).await
+                handshake_and_serve(sock, peer, registry, trusted_proxies, dispatcher).await
             }
             AcceptStrategy::Tls(acceptor) => {
                 let stream = acceptor.accept(sock).await.context("TLS handshake")?;
-                handshake_and_serve(stream, peer, authenticator, trusted_proxies, dispatcher).await
+                handshake_and_serve(stream, peer, registry, trusted_proxies, dispatcher).await
             }
         }
     }
@@ -102,7 +102,7 @@ impl AcceptStrategy {
 pub async fn serve_wss(
     addr: SocketAddr,
     tls: TlsMaterial,
-    authenticator: BearerAuthenticator,
+    registry: LocalAgentRegistry,
     trusted_proxies: Arc<Vec<IpNet>>,
     dispatcher: Dispatcher,
 ) -> Result<()> {
@@ -113,7 +113,7 @@ pub async fn serve_wss(
     accept_loop(
         listener,
         AcceptStrategy::Tls(acceptor),
-        authenticator,
+        registry,
         trusted_proxies,
         dispatcher,
     )
@@ -128,7 +128,7 @@ pub async fn serve_wss(
 /// the proxy guarantees confidentiality.
 pub async fn serve_ws(
     addr: SocketAddr,
-    authenticator: BearerAuthenticator,
+    registry: LocalAgentRegistry,
     trusted_proxies: Arc<Vec<IpNet>>,
     dispatcher: Dispatcher,
 ) -> Result<()> {
@@ -138,7 +138,7 @@ pub async fn serve_ws(
     accept_loop(
         listener,
         AcceptStrategy::Plain,
-        authenticator,
+        registry,
         trusted_proxies,
         dispatcher,
     )
@@ -151,7 +151,7 @@ pub async fn serve_ws(
 async fn accept_loop(
     listener: TcpListener,
     strategy: AcceptStrategy,
-    authenticator: BearerAuthenticator,
+    registry: LocalAgentRegistry,
     trusted_proxies: Arc<Vec<IpNet>>,
     dispatcher: Dispatcher,
 ) -> Result<()> {
@@ -166,11 +166,11 @@ async fn accept_loop(
             }
         };
         let strategy = strategy.clone();
-        let auth = authenticator.clone();
+        let reg = registry.clone();
         let trusted = trusted_proxies.clone();
         let dispatcher = dispatcher.clone();
         tokio::spawn(async move {
-            if let Err(e) = strategy.wrap(sock, peer, auth, trusted, dispatcher).await {
+            if let Err(e) = strategy.wrap(sock, peer, reg, trusted, dispatcher).await {
                 debug!(peer = %peer, error = %e, "remote IPC connection ended");
             }
         });
@@ -203,7 +203,7 @@ fn build_tls_acceptor(tls: &TlsMaterial) -> Result<TlsAcceptor> {
 async fn handshake_and_serve<S>(
     stream: S,
     peer: SocketAddr,
-    authenticator: BearerAuthenticator,
+    registry: LocalAgentRegistry,
     trusted_proxies: Arc<Vec<IpNet>>,
     dispatcher: Dispatcher,
 ) -> Result<()>
@@ -228,7 +228,7 @@ where
     let xff_value: std::sync::Arc<std::sync::OnceLock<String>> =
         std::sync::Arc::new(std::sync::OnceLock::new());
     let xff_for_callback = xff_value.clone();
-    let auth = authenticator.clone();
+    let auth_registry = registry.clone();
 
     let ws_config = WebSocketConfig::default()
         .max_message_size(Some(MAX_REMOTE_IPC_BYTES))
@@ -250,7 +250,7 @@ where
                 .and_then(|v| v.to_str().ok());
             let presented = header.and_then(|h| h.strip_prefix(EXPECTED_BEARER_PREFIX));
             if let Some(token) = presented
-                && let Some(agent_id) = auth.resolve(token)
+                && let Some(agent_id) = auth_registry.resolve_bearer(token)
             {
                 let _ = caller_for_callback.set(agent_id);
                 return Ok(resp);
@@ -279,29 +279,48 @@ where
     let _enter = span.enter();
     debug!("remote IPC client authenticated");
 
+    // Register this connection with the registry so a `local rotate`
+    // / `local rm` of the caller's bearer can force-close us. The
+    // returned receiver fires exactly once, and the inner loop
+    // `select!`s on it alongside the inbound frame stream.
+    let mut shutdown_rx = registry.register_session(&caller_agent);
+
     // Bind both ambient context values for every task-local read
     // inside the message loop. `audit_or_warn` overlays them onto
     // each emitted `AuditEntry`: client_ip onto the `client_ip`
-    // field, caller_agent onto the `actor` field. Services don't
-    // receive either as parameters.
+    // field, caller_agent onto the `actor` field.
     let inner = crate::audit_context::with_client_ip(Some(client), async move {
         let (mut tx, mut rx) = ws.split();
-        while let Some(frame) = rx.next().await {
-            let frame = frame?;
-            match frame {
-                Message::Text(body) => {
-                    let resp = handle_rpc(&dispatcher, &body).await;
-                    tx.send(Message::Text(resp.into())).await?;
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown_rx => {
+                    // Bearer rotated or agent removed. Tear the
+                    // connection down cleanly so the client gets a
+                    // clean disconnect rather than a stale-bearer
+                    // error on the next request.
+                    let _ = tx.send(Message::Close(None)).await;
+                    break;
                 }
-                Message::Binary(body) => {
-                    let s = std::str::from_utf8(&body)
-                        .map_err(|_| anyhow!("binary frame not utf-8"))?;
-                    let resp = handle_rpc(&dispatcher, s).await;
-                    tx.send(Message::Text(resp.into())).await?;
+                frame = rx.next() => {
+                    let Some(frame) = frame else { break };
+                    let frame = frame?;
+                    match frame {
+                        Message::Text(body) => {
+                            let resp = handle_rpc(&dispatcher, &body).await;
+                            tx.send(Message::Text(resp.into())).await?;
+                        }
+                        Message::Binary(body) => {
+                            let s = std::str::from_utf8(&body)
+                                .map_err(|_| anyhow!("binary frame not utf-8"))?;
+                            let resp = handle_rpc(&dispatcher, s).await;
+                            tx.send(Message::Text(resp.into())).await?;
+                        }
+                        Message::Ping(p) => tx.send(Message::Pong(p)).await?,
+                        Message::Close(_) => break,
+                        _ => {}
+                    }
                 }
-                Message::Ping(p) => tx.send(Message::Pong(p)).await?,
-                Message::Close(_) => break,
-                _ => {}
             }
         }
         Ok::<_, anyhow::Error>(())

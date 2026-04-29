@@ -1,13 +1,15 @@
 //! `hermod local` — operator commands for the daemon's hosted local
 //! agents.
 //!
+//! All mutating commands (`add`, `rm`, `rotate`) call into the
+//! daemon via IPC: the daemon writes the on-disk state, updates the
+//! `local_agents` + `agents` DB rows, swaps the in-memory registry
+//! entry, and force-closes any active session pinned to a removed
+//! or rotated bearer. The daemon must be running.
+//!
 //! Read commands (`list`, `show`) work directly off the on-disk
-//! `$HERMOD_HOME/agents/<id>/` material, no daemon required. Mutating
-//! commands (`add`, `rm`, `rotate`) write the on-disk authoritative
-//! state and prompt the operator to restart the daemon so the new
-//! state is picked up — H3.5 will replace the prompt with a live IPC
-//! handler that updates the registry, DB row, bearer authenticator,
-//! and active sessions atomically.
+//! `$HERMOD_HOME/agents/<id>/` material — no daemon required, useful
+//! for offline troubleshooting.
 //!
 //! `setup-mcp` writes a `.mcp.json` next to a project root pointing
 //! at the agent's bearer file, so Claude Code launching from that
@@ -17,8 +19,11 @@ use anyhow::{Context, Result};
 use clap::Args;
 use hermod_core::{AgentAlias, AgentId};
 use hermod_daemon::local_agent;
+use hermod_protocol::ipc::methods::{LocalAddParams, LocalRemoveParams, LocalRotateParams};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+
+use crate::client::ClientTarget;
 
 #[derive(Args, Debug)]
 pub struct AddArgs {
@@ -116,56 +121,53 @@ pub async fn show(args: ShowArgs, home: &Path) -> Result<()> {
     Ok(())
 }
 
-pub async fn add(args: AddArgs, home: &Path) -> Result<()> {
+pub async fn add(args: AddArgs, target: &ClientTarget) -> Result<()> {
     let alias = args
         .alias
         .as_deref()
         .map(AgentAlias::from_str)
         .transpose()
         .context("parse --alias")?;
-    let agent = local_agent::create_additional(home, alias)?;
+    let mut client = target.connect().await?;
+    let res = client.local_add(LocalAddParams { alias }).await?;
     println!("provisioned local agent");
-    println!("  agent_id:     {}", agent.agent_id);
+    println!("  agent_id:     {}", res.agent.agent_id);
     println!(
         "  alias:        {}",
-        agent
-            .local_alias
+        res.agent
+            .alias
             .as_ref()
             .map(|a| a.as_str())
-            .unwrap_or("(unset)")
+            .unwrap_or("(unset)"),
     );
-    println!(
-        "  bearer_token: {}",
-        local_agent::bearer_token_path(home, &agent.agent_id).display()
-    );
-    println!();
-    println!("restart hermodd so the new agent enters the registry.");
+    println!("  bearer_file:  {}", res.agent.bearer_file);
+    println!("  secret_file:  {}", res.agent.secret_file);
+    println!("  bearer_token: {}", res.bearer_token);
     Ok(())
 }
 
-pub async fn remove(args: RemoveArgs, home: &Path) -> Result<()> {
-    let agent = resolve(home, &args.reference)?;
-    if !args.force {
-        anyhow::bail!(
-            "refusing to remove agent {} without --force; the keypair is unrecoverable once archived",
-            agent.agent_id
-        );
-    }
-    let archive = local_agent::archive_agent(home, &agent.agent_id)?;
-    println!("archived local agent {}", agent.agent_id);
-    println!("  archive: {}", archive.display());
-    println!();
-    println!("restart hermodd so the registry forgets this agent.");
+pub async fn remove(args: RemoveArgs, target: &ClientTarget) -> Result<()> {
+    let mut client = target.connect().await?;
+    let res = client
+        .local_remove(LocalRemoveParams {
+            reference: args.reference,
+            force: args.force,
+        })
+        .await?;
+    println!("archived local agent {}", res.agent_id);
+    println!("  archive: {}", res.archive_path);
     Ok(())
 }
 
-pub async fn rotate(args: RotateArgs, home: &Path) -> Result<()> {
-    let agent = resolve(home, &args.reference)?;
-    let new_token = local_agent::rotate_bearer_on_disk(home, &agent.agent_id)?;
-    println!("rotated bearer for {}", agent.agent_id);
-    println!("  new token: {}", new_token.expose_secret());
-    println!();
-    println!("restart hermodd so the registry picks up the new bearer hash.");
+pub async fn rotate(args: RotateArgs, target: &ClientTarget) -> Result<()> {
+    let mut client = target.connect().await?;
+    let res = client
+        .local_rotate(LocalRotateParams {
+            reference: args.reference,
+        })
+        .await?;
+    println!("rotated bearer for {}", res.agent_id);
+    println!("  new token: {}", res.bearer_token);
     Ok(())
 }
 

@@ -459,9 +459,9 @@ async fn main() -> anyhow::Result<()> {
         Command::Local(sub) => match sub {
             LocalCmd::List => commands::local::list(&home).await,
             LocalCmd::Show(a) => commands::local::show(a, &home).await,
-            LocalCmd::Add(a) => commands::local::add(a, &home).await,
-            LocalCmd::Rm(a) => commands::local::remove(a, &home).await,
-            LocalCmd::Rotate(a) => commands::local::rotate(a, &home).await,
+            LocalCmd::Add(a) => commands::local::add(a, &target).await,
+            LocalCmd::Rm(a) => commands::local::remove(a, &target).await,
+            LocalCmd::Rotate(a) => commands::local::rotate(a, &target).await,
             LocalCmd::SetupMcp(a) => commands::local::setup_mcp(a, &home).await,
         },
         Command::Audit(sub) => match sub {

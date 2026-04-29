@@ -8,8 +8,9 @@ use tracing::{debug, warn};
 
 use crate::services::{
     AgentService, AuditService, BriefService, BroadcastService, CapabilityService, ChannelService,
-    ConfirmationService, McpService, MessageService, PeerService, PermissionService,
-    PresenceService, ServiceError, StatusService, WorkspaceObservabilityService, WorkspaceService,
+    ConfirmationService, LocalAgentService, McpService, MessageService, PeerService,
+    PermissionService, PresenceService, ServiceError, StatusService, WorkspaceObservabilityService,
+    WorkspaceService,
 };
 
 #[derive(Clone)]
@@ -29,6 +30,7 @@ pub struct Dispatcher {
     pub permissions: PermissionService,
     pub audit: AuditService,
     pub capabilities: CapabilityService,
+    pub local_agents: LocalAgentService,
 }
 
 impl Dispatcher {
@@ -215,6 +217,20 @@ impl Dispatcher {
             method::PEER_ADVERTISE => {
                 let p = parse_params_or_default(params)?;
                 to_value(self.peers.advertise(p).await)
+            }
+
+            method::LOCAL_LIST => to_value(self.local_agents.list().await),
+            method::LOCAL_ADD => {
+                let p = parse_params_or_default(params)?;
+                to_value(self.local_agents.add(p).await)
+            }
+            method::LOCAL_REMOVE => {
+                let p = parse_params(params)?;
+                to_value(self.local_agents.remove(p).await)
+            }
+            method::LOCAL_ROTATE => {
+                let p = parse_params(params)?;
+                to_value(self.local_agents.rotate(p).await)
             }
 
             method::AUDIT_QUERY => {

@@ -434,6 +434,32 @@ impl DaemonClient {
         self.call(methods::method::PEER_ADVERTISE, params).await
     }
 
+    #[allow(dead_code)]
+    pub async fn local_list(&mut self) -> Result<methods::LocalListResult> {
+        self.call_noparams(methods::method::LOCAL_LIST).await
+    }
+
+    pub async fn local_add(
+        &mut self,
+        params: methods::LocalAddParams,
+    ) -> Result<methods::LocalAddResult> {
+        self.call(methods::method::LOCAL_ADD, params).await
+    }
+
+    pub async fn local_remove(
+        &mut self,
+        params: methods::LocalRemoveParams,
+    ) -> Result<methods::LocalRemoveResult> {
+        self.call(methods::method::LOCAL_REMOVE, params).await
+    }
+
+    pub async fn local_rotate(
+        &mut self,
+        params: methods::LocalRotateParams,
+    ) -> Result<methods::LocalRotateResult> {
+        self.call(methods::method::LOCAL_ROTATE, params).await
+    }
+
     pub async fn audit_query(
         &mut self,
         params: methods::AuditQueryParams,

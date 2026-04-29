@@ -120,6 +120,19 @@ runs it on every PR.
 | `peer.advertise` | Operator pushed a `PeerAdvertise` (or `peer.add` auto-trigger). | `fanout`, `agents` |
 | `peer.advertise.received` | Inbound `PeerAdvertise` from a peer. | `agents_advertised`, `agents_upserted`, `rejected_self_cert`, `rejected_host_conflict` |
 
+### local.*
+
+Live-registry mutation. Each row records the operator action; the
+on-disk + DB + in-memory registry update happens atomically and any
+session pinned to a removed/rotated bearer is force-closed.
+
+| Action | Trigger | Details |
+| --- | --- | --- |
+| `local.add` | Operator `local add` (IPC). New agent provisioned on disk + DB + registry. | `alias` |
+| `local.remove` | Operator `local remove` (IPC). Agent archived from disk + dropped from DB + registry; active sessions force-closed. | `archive` |
+| `local.rotate` | Operator `local rotate` (IPC). Bearer regenerated; active sessions on the previous bearer force-closed. | none |
+| `local_agent.bearer_rotated_on_drift` | Boot-time `merge_with_db` reconciliation: on-disk bearer hash differs from DB row (e.g. operator wrote a fresh token while the daemon was offline). | `previous_hash_prefix`, `current_hash_prefix` |
+
 ### permission.*
 
 Audit trail for the Claude Code Channels permission relay
