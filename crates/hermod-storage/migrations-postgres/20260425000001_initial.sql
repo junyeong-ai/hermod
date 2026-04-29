@@ -141,12 +141,14 @@ CREATE TABLE agent_presence (
 
 CREATE TABLE mcp_sessions (
     session_id          TEXT NOT NULL PRIMARY KEY,
+    agent_id            TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     attached_at         BIGINT NOT NULL,
     last_heartbeat_at   BIGINT NOT NULL,
     client_name         TEXT,
     client_version      TEXT
 );
 CREATE INDEX idx_mcp_sessions_heartbeat ON mcp_sessions(last_heartbeat_at);
+CREATE INDEX idx_mcp_sessions_agent ON mcp_sessions(agent_id, last_heartbeat_at);
 
 CREATE TABLE workspaces (
     id              TEXT NOT NULL PRIMARY KEY,

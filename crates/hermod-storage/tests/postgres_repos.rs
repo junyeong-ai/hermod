@@ -356,8 +356,13 @@ async fn mcp_attach_detach_track_liveness_correctly() {
     let now = Timestamp::now();
     let ttl_ms: i64 = 60_000;
 
+    // mcp_sessions FKs to agents — seed an agent before attaching.
+    let agent = fake_agent(20);
+    seed_agent(&pool, agent.clone()).await;
+
     let s1 = McpSession {
         session_id: "sess-1".into(),
+        agent_id: agent.clone(),
         attached_at: now,
         last_heartbeat_at: now,
         client_name: Some("claude".into()),
@@ -377,6 +382,14 @@ async fn mcp_attach_detach_track_liveness_correctly() {
     );
 
     assert_eq!(mcp.count_live(now, ttl_ms).await.unwrap(), 2);
+    assert_eq!(mcp.count_live_for(&agent, now, ttl_ms).await.unwrap(), 2);
+    let other = fake_agent(21);
+    seed_agent(&pool, other.clone()).await;
+    assert_eq!(
+        mcp.count_live_for(&other, now, ttl_ms).await.unwrap(),
+        0,
+        "agent without sessions reads as not-live regardless of host activity"
+    );
 
     // Heartbeat keeps the session live.
     let later = Timestamp::from_unix_ms(now.unix_ms() + 30_000).unwrap();
@@ -403,10 +416,13 @@ async fn mcp_prune_with_transition_drops_stale_and_reports_was_live_correctly() 
 
     let attached = Timestamp::now();
     let ttl_ms: i64 = 60_000;
+    let agent = fake_agent(22);
+    seed_agent(&pool, agent.clone()).await;
 
     mcp.attach_atomic(
         &McpSession {
             session_id: "stale".into(),
+            agent_id: agent,
             attached_at: attached,
             last_heartbeat_at: attached,
             client_name: None,

@@ -82,6 +82,7 @@ impl McpService {
             .attach_atomic(
                 &McpSession {
                     session_id: session_id.clone(),
+                    agent_id: caller.clone(),
                     attached_at: now,
                     last_heartbeat_at: now,
                     client_name: params.client_name.clone(),

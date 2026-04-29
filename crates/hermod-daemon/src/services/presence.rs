@@ -1,12 +1,13 @@
 //! Manual hint + derived liveness, scoped per locally-hosted agent.
 //!
 //! The two facets are *combined* on read into the effective `PresenceStatus`.
-//! Liveness for a locally-hosted agent is derived from `Database::mcp_sessions()`
-//! on every call — never cached in `agent_presence` — so a daemon restart
-//! with no attached Claude Code session immediately reads as offline without
-//! storage cleanup. (Until the `mcp_sessions` schema gains an `agent_id`
-//! column, liveness is host-wide: any live session lights up every locally-
-//! hosted agent. Multi-agent split lands with that schema change.)
+//! Liveness for a locally-hosted agent is derived from
+//! `Database::mcp_sessions()` keyed on `agent_id` — never cached in
+//! `agent_presence` — so a daemon restart with no attached Claude Code
+//! session immediately reads as offline without storage cleanup. Two
+//! locally-hosted agents are independently live: agent A having an MCP
+//! session attached does not make agent B "online" by virtue of sharing
+//! a host.
 //!
 //! Whenever local state changes (manual hint set, MCP session attaches /
 //! detaches / decays), the service publishes a Presence envelope to
@@ -170,7 +171,7 @@ impl PresenceService {
             .await?
             .is_some();
         let live = if is_local {
-            self.host_live(now).await?
+            self.agent_live(agent_id, now).await?
         } else {
             rec.as_ref()
                 .and_then(|r| r.active_peer_live(now))
@@ -209,13 +210,22 @@ impl PresenceService {
         })
     }
 
-    /// Whether this daemon currently has at least one attached MCP session.
-    /// Until `mcp_sessions` carries an `agent_id` column, this is a
-    /// host-wide signal — every locally-hosted agent reads as live when
-    /// any one of them has an attached session.
-    pub async fn host_live(&self, now: Timestamp) -> Result<bool, ServiceError> {
+    /// Whether `agent_id` (a locally-hosted agent) currently has at
+    /// least one attached MCP session. Each session row carries the
+    /// `agent_id` it authenticated as, so distinct hosted agents
+    /// have independent liveness.
+    pub async fn agent_live(
+        &self,
+        agent_id: &AgentId,
+        now: Timestamp,
+    ) -> Result<bool, ServiceError> {
         let ttl_ms = (SESSION_TTL_SECS * 1_000) as i64;
-        Ok(self.db.mcp_sessions().count_live(now, ttl_ms).await? > 0)
+        Ok(self
+            .db
+            .mcp_sessions()
+            .count_live_for(agent_id, now, ttl_ms)
+            .await?
+            > 0)
     }
 
     /// Publish current state for `agent_id` to its workspace members.
@@ -231,7 +241,7 @@ impl PresenceService {
         let now = Timestamp::now();
         let rec = self.db.presences().get(agent_id).await?;
         let manual_status = rec.as_ref().and_then(|r| r.active_manual_status(now));
-        let live = self.host_live(now).await?;
+        let live = self.agent_live(agent_id, now).await?;
         let body = MessageBody::Presence {
             manual_status,
             live,

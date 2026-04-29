@@ -132,10 +132,11 @@ impl McpSessionRepository for SqliteMcpSessionRepository {
         let prior: i64 = row.try_get("n")?;
         sqlx::query(
             r#"INSERT INTO mcp_sessions
-                  (session_id, attached_at, last_heartbeat_at, client_name, client_version)
-               VALUES (?, ?, ?, ?, ?)"#,
+                  (session_id, agent_id, attached_at, last_heartbeat_at, client_name, client_version)
+               VALUES (?, ?, ?, ?, ?, ?)"#,
         )
         .bind(&session.session_id)
+        .bind(session.agent_id.as_str())
         .bind(session.attached_at.unix_ms())
         .bind(session.last_heartbeat_at.unix_ms())
         .bind(session.client_name.as_deref())
@@ -197,6 +198,20 @@ impl McpSessionRepository for SqliteMcpSessionRepository {
                 .bind(cutoff)
                 .fetch_one(&self.pool)
                 .await?;
+        let n: i64 = row.try_get("n")?;
+        Ok(n.max(0) as u64)
+    }
+
+    async fn count_live_for(&self, agent_id: &AgentId, now: Timestamp, ttl_ms: i64) -> Result<u64> {
+        let cutoff = now.unix_ms() - ttl_ms;
+        let row = sqlx::query(
+            r#"SELECT COUNT(*) AS n FROM mcp_sessions
+               WHERE agent_id = ? AND last_heartbeat_at > ?"#,
+        )
+        .bind(agent_id.as_str())
+        .bind(cutoff)
+        .fetch_one(&self.pool)
+        .await?;
         let n: i64 = row.try_get("n")?;
         Ok(n.max(0) as u64)
     }

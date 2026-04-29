@@ -71,6 +71,10 @@ pub struct ObservedPresence {
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpSession {
     pub session_id: String,
+    /// Locally-hosted agent the bearer authenticated as on
+    /// `mcp.attach`. Liveness for that agent is "any active session
+    /// row with this `agent_id`".
+    pub agent_id: AgentId,
     pub attached_at: Timestamp,
     pub last_heartbeat_at: Timestamp,
     pub client_name: Option<String>,
@@ -127,6 +131,12 @@ pub trait McpSessionRepository: Send + Sync + std::fmt::Debug {
     ) -> Result<DetachOutcome>;
 
     async fn count_live(&self, now: Timestamp, ttl_ms: i64) -> Result<u64>;
+
+    /// Live-session count for one specific locally-hosted agent.
+    /// Used by `PresenceService::view_for` to decide whether *that
+    /// agent* (not the host as a whole) is online — distinct
+    /// addressable identities mean distinct liveness.
+    async fn count_live_for(&self, agent_id: &AgentId, now: Timestamp, ttl_ms: i64) -> Result<u64>;
 
     /// Prune stale rows and report the liveness transition.
     async fn prune_with_transition(&self, now: Timestamp, ttl_ms: i64) -> Result<PruneOutcome>;

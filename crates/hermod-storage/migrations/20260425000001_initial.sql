@@ -220,19 +220,27 @@ CREATE TABLE agent_presence (
     peer_live_expires_at      INTEGER
 );
 
--- MCP stdio sessions currently attached to this daemon. Liveness for SELF
--- is derived from this table: an agent is "live" iff at least one row has
+-- MCP stdio sessions currently attached to this daemon. Liveness for a
+-- locally-hosted agent is derived from this table: an agent is "live"
+-- iff at least one row has `agent_id = <its id>` AND
 -- `last_heartbeat_at > now - SESSION_TTL`. Stale rows are pruned by the
--- janitor; sudden process death therefore decays to offline cleanly without
--- requiring a clean detach.
+-- janitor; sudden process death therefore decays to offline cleanly
+-- without requiring a clean detach.
+--
+-- `agent_id` binds the session to the locally-hosted agent the
+-- bearer authenticated as on `mcp.attach`. References `agents(id)`
+-- for FK integrity; cascade-delete fires if the agent is removed
+-- via `local rm`.
 CREATE TABLE mcp_sessions (
     session_id          TEXT NOT NULL PRIMARY KEY,
+    agent_id            TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     attached_at         INTEGER NOT NULL,
     last_heartbeat_at   INTEGER NOT NULL,
     client_name         TEXT,
     client_version      TEXT
 );
 CREATE INDEX idx_mcp_sessions_heartbeat ON mcp_sessions(last_heartbeat_at);
+CREATE INDEX idx_mcp_sessions_agent ON mcp_sessions(agent_id, last_heartbeat_at);
 
 -- Workspaces: a logical group container. Either:
 --   private — secret = 32-byte PSK; workspace_id and channel keys are
