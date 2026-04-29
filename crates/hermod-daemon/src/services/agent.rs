@@ -134,6 +134,7 @@ impl AgentService {
                         "proposed": proposed.as_str(),
                         "for_id": id.to_string(),
                     })),
+                    client_ip: None,
                     federation: hermod_storage::AuditFederationPolicy::Default,
                 },
             )
@@ -157,6 +158,7 @@ impl AgentService {
                         AliasOutcome::LocalDropped { .. } => "local_dropped",
                     },
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )

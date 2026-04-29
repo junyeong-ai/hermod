@@ -92,6 +92,7 @@ impl McpService {
                     "client_name": params.client_name,
                     "client_version": params.client_version,
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )
@@ -143,6 +144,7 @@ impl McpService {
                 action: "mcp.detach".into(),
                 target: Some(params.session_id.clone()),
                 details: None,
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )

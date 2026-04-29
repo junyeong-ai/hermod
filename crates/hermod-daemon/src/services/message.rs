@@ -374,6 +374,7 @@ impl MessageService {
                 // for every aggregator-bound envelope. Skipping breaks
                 // the recursion at the source — without this, every
                 // federated row would re-trigger N more federations.
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Skip,
             },
         )
@@ -395,6 +396,7 @@ impl MessageService {
                 details: Some(serde_json::json!({
                     "ids": ids.iter().map(|i| i.to_string()).collect::<Vec<_>>(),
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )

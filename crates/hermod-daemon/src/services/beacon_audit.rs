@@ -51,6 +51,7 @@ impl BeaconAuditor for AuditSinkBeaconAuditor {
                 "port": port,
                 "validity_secs": validity_secs,
             })),
+            client_ip: None,
             federation: AuditFederationPolicy::Default,
         });
     }
@@ -65,6 +66,7 @@ impl BeaconAuditor for AuditSinkBeaconAuditor {
             details: Some(serde_json::json!({
                 "endpoint": endpoint.to_string(),
             })),
+            client_ip: None,
             federation: AuditFederationPolicy::Default,
         });
     }
@@ -79,6 +81,7 @@ impl BeaconAuditor for AuditSinkBeaconAuditor {
             details: Some(serde_json::json!({
                 "reason": reason,
             })),
+            client_ip: None,
             federation: AuditFederationPolicy::Default,
         });
     }

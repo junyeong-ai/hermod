@@ -330,6 +330,7 @@ impl PermissionService {
                     "tool_name": params.tool_name,
                     "description": params.description,
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )
@@ -371,6 +372,7 @@ impl PermissionService {
                             details: Some(serde_json::json!({
                                 "delegates": reach,
                             })),
+                            client_ip: None,
                             federation: hermod_storage::AuditFederationPolicy::Default,
                         },
                     )
@@ -393,6 +395,7 @@ impl PermissionService {
                             details: Some(serde_json::json!({
                                 "error": e.to_string(),
                             })),
+                            client_ip: None,
                             federation: hermod_storage::AuditFederationPolicy::Default,
                         },
                     )
@@ -459,6 +462,7 @@ impl PermissionService {
                             "via": "federated_relay",
                         })
                     }),
+                    client_ip: None,
                     federation: hermod_storage::AuditFederationPolicy::Default,
                 },
             )
@@ -586,6 +590,7 @@ impl PermissionService {
                         "to": from.to_string(),
                         "error": e.to_string(),
                     })),
+                    client_ip: None,
                     federation: hermod_storage::AuditFederationPolicy::Default,
                 },
             )
@@ -608,6 +613,7 @@ impl PermissionService {
                             "description": r.description,
                         })
                     }),
+                    client_ip: None,
                     federation: hermod_storage::AuditFederationPolicy::Default,
                 },
             )
@@ -700,6 +706,7 @@ impl PermissionService {
                         "tool_name": req.tool_name,
                         "description": req.description,
                     })),
+                    client_ip: None,
                     federation: hermod_storage::AuditFederationPolicy::Default,
                 },
             )

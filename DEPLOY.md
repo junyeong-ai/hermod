@@ -221,11 +221,15 @@ The bearer token still authenticates each request in both shapes.
 
 When the daemon sits behind a reverse proxy (Cloud Run, IAP, ALB,
 ingress-nginx, …) the TCP `peer` it sees is the proxy IP, not the
-end user's. The proxy injects `X-Forwarded-For`, but trusting that
-header unconditionally would let an attacker who can reach the
-daemon directly forge audit IPs. Configure `daemon.trusted_proxies`
-to opt in, listing the **proxy networks** (never public-internet
-ranges):
+end user's. The proxy injects `X-Forwarded-For`, and the daemon
+uses it to record the originating client IP in `audit_log.client_ip`
+for every operator-meaningful event triggered through that
+connection (peer.add, capability.attach, message.send, …).
+
+Trusting XFF unconditionally would let an attacker who can reach
+the daemon directly forge audit IPs. Configure
+`daemon.trusted_proxies` to opt in, listing the **proxy networks**
+(never public-internet ranges):
 
 ```toml
 [daemon]
@@ -250,6 +254,17 @@ Default: empty list. XFF is ignored, peer IP is used as-is.
 
 The env-var equivalent is `HERMOD_DAEMON_TRUSTED_PROXIES`
 (comma-separated CIDRs).
+
+Audit forensics:
+
+```sql
+-- Pull every event from a specific client IP across the audit log.
+SELECT id, ts, action, target FROM audit_log WHERE client_ip = ?;
+```
+
+The `client_ip` column carries the resolved value (post-XFF) for
+every row triggered by a remote IPC connection; `NULL` for rows from
+daemon-internal tasks (outbox, janitor) or federation accept.
 
 ### Behind an SSO reverse proxy (IAP / oauth2-proxy / Cloudflare Access)
 

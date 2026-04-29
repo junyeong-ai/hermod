@@ -101,6 +101,7 @@ impl InboundProcessor {
                     "workspace_id": channel.workspace_id.to_hex(),
                     "len": text.len(),
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )
@@ -178,6 +179,7 @@ impl InboundProcessor {
                     "envelope_id": envelope.id.to_string(),
                     "name": name,
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )
@@ -264,6 +266,7 @@ impl InboundProcessor {
                     "workspace_id": workspace_id.to_hex(),
                     "channel_name": channel_name,
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )

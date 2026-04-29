@@ -47,13 +47,27 @@ pub enum ServiceError {
     NotFound,
 }
 
-/// Thin shim over [`AuditSink::record`] kept for callsite ergonomics —
-/// `audit_or_warn(&*self.audit_sink, entry)` reads more naturally than
-/// `self.audit_sink.record(entry)` when the entry is a multi-line literal.
+/// Append an audit entry, overlaying the ambient client IP from
+/// [`crate::audit_context`] when the call site left the field as
+/// `None`. Every emission goes through this helper so the client-IP
+/// resolution at the IPC entry point reaches every audit row inside
+/// the connection's task tree without threading a parameter through
+/// every service method.
+///
+/// Sites that already have a more specific IP (e.g. federation
+/// inbound that records the cryptographically-verified peer) set
+/// `client_ip: Some(_)` directly and the enrichment is a no-op.
+/// Daemon-internal sites (outbox, janitor) leave `client_ip: None`;
+/// running outside any connection scope, the lookup also returns
+/// `None`, and the row records "no remote client".
+///
 /// Failure handling lives inside the sink impl (`StorageAuditSink`
 /// converts append errors to a `tracing::warn`); this helper just
-/// forwards.
-pub async fn audit_or_warn(sink: &dyn AuditSink, entry: AuditEntry) {
+/// enriches and forwards.
+pub async fn audit_or_warn(sink: &dyn AuditSink, mut entry: AuditEntry) {
+    if entry.client_ip.is_none() {
+        entry.client_ip = crate::audit_context::current_client_ip();
+    }
     sink.record(entry).await;
 }
 

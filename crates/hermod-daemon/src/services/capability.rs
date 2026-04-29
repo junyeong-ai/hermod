@@ -109,6 +109,7 @@ impl CapabilityService {
                     "scope_target": claim.target,
                     "exp": claim.exp,
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )
@@ -174,6 +175,7 @@ impl CapabilityService {
                     "jti": issue_result.id,
                     "envelope_id": send.id.to_string(),
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )
@@ -201,6 +203,7 @@ impl CapabilityService {
                     action: "capability.revoke".into(),
                     target: Some(params.token_id.clone()),
                     details: None,
+                    client_ip: None,
                     federation: hermod_storage::AuditFederationPolicy::Default,
                 },
             )

@@ -69,12 +69,14 @@ impl PostgresAuditRepository {
             _ => ZERO32.to_vec(),
         };
 
+        let client_ip_str = entry.client_ip.map(|ip| ip.to_string());
         let row_hash = compute_row_hash(
             entry.ts.unix_ms(),
             entry.actor.as_str(),
             &entry.action,
             entry.target.as_deref(),
             details,
+            client_ip_str.as_deref(),
             &prev_hash,
         );
         let sig = self
@@ -85,8 +87,8 @@ impl PostgresAuditRepository {
 
         let new_id: i64 = sqlx::query_scalar(
             r#"INSERT INTO audit_log
-                  (ts, actor, action, target, details_json, prev_hash, row_hash, sig)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                  (ts, actor, action, target, details_json, client_ip, prev_hash, row_hash, sig)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                RETURNING id"#,
         )
         .bind(entry.ts.unix_ms())
@@ -94,6 +96,7 @@ impl PostgresAuditRepository {
         .bind(&entry.action)
         .bind(&entry.target)
         .bind(details)
+        .bind(client_ip_str.as_deref())
         .bind(&prev_hash)
         .bind(row_hash.to_vec())
         .bind(sig.as_slice().to_vec())
@@ -137,7 +140,7 @@ impl AuditRepository for PostgresAuditRepository {
     ) -> Result<Vec<AuditEntry>> {
         use std::fmt::Write;
         let mut sql = String::from(
-            r#"SELECT id, ts, actor, action, target, details_json
+            r#"SELECT id, ts, actor, action, target, details_json, client_ip
                FROM audit_log WHERE 1=1"#,
         );
         let mut next_param: u32 = 1;
@@ -201,7 +204,7 @@ impl AuditRepository for PostgresAuditRepository {
         }
 
         let rows = sqlx::query(
-            r#"SELECT id, ts, actor, action, target, details_json,
+            r#"SELECT id, ts, actor, action, target, details_json, client_ip,
                       prev_hash, row_hash, sig
                FROM audit_log ORDER BY id ASC"#,
         )
@@ -224,12 +227,14 @@ impl AuditRepository for PostgresAuditRepository {
             let action: String = row.try_get("action")?;
             let target: Option<String> = row.try_get("target")?;
             let details: Option<String> = row.try_get("details_json")?;
+            let client_ip: Option<String> = row.try_get("client_ip")?;
             let computed = compute_row_hash(
                 ts,
                 &actor,
                 &action,
                 target.as_deref(),
                 details.as_deref(),
+                client_ip.as_deref(),
                 &prev_hash,
             );
             if computed.as_slice() != row_hash.as_slice() {
@@ -254,7 +259,7 @@ impl AuditRepository for PostgresAuditRepository {
         epoch_end_ms: i64,
     ) -> Result<Option<ArchiveSummary>> {
         let rows = sqlx::query(
-            r#"SELECT id, ts, actor, action, target, details_json,
+            r#"SELECT id, ts, actor, action, target, details_json, client_ip,
                       prev_hash, row_hash, sig
                FROM audit_log
                WHERE ts >= $1 AND ts < $2
@@ -318,6 +323,10 @@ impl AuditRepository for PostgresAuditRepository {
                     .map(|s| serde_json::from_str(&s))
                     .transpose()
                     .map_err(StorageError::Json)?,
+                client_ip: row
+                    .try_get::<Option<String>, _>("client_ip")?
+                    .as_deref()
+                    .and_then(|s| s.parse::<std::net::IpAddr>().ok()),
                 federation: crate::AuditFederationPolicy::Default,
             };
             let archived = ArchivedRow::from_entry(
@@ -507,6 +516,7 @@ impl AuditRepository for PostgresAuditRepository {
                     .as_ref()
                     .map(|v| serde_json::to_string(v).unwrap_or_default())
                     .as_deref(),
+                archived.client_ip.as_deref(),
                 &prev,
             );
             if computed.as_slice() != claimed_row_hash.as_slice() {
@@ -552,6 +562,7 @@ fn compute_row_hash(
     action: &str,
     target: Option<&str>,
     details_json: Option<&str>,
+    client_ip: Option<&str>,
     prev_hash: &[u8],
 ) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
@@ -560,6 +571,7 @@ fn compute_row_hash(
     write_lp(&mut h, action.as_bytes());
     write_lp_opt(&mut h, target.map(|s| s.as_bytes()));
     write_lp_opt(&mut h, details_json.map(|s| s.as_bytes()));
+    write_lp_opt(&mut h, client_ip.map(|s| s.as_bytes()));
     write_lp(&mut h, prev_hash);
     *h.finalize().as_bytes()
 }
@@ -592,6 +604,10 @@ fn row_to_entry(row: sqlx::postgres::PgRow) -> Result<AuditEntry> {
     let details = details_str
         .map(|s| serde_json::from_str::<serde_json::Value>(&s))
         .transpose()?;
+    let client_ip = row
+        .try_get::<Option<String>, _>("client_ip")?
+        .as_deref()
+        .and_then(|s| s.parse::<std::net::IpAddr>().ok());
     Ok(AuditEntry {
         id: Some(id),
         ts,
@@ -599,6 +615,7 @@ fn row_to_entry(row: sqlx::postgres::PgRow) -> Result<AuditEntry> {
         action,
         target,
         details,
+        client_ip,
         // Hydrated rows are read-only; the federation flag isn't
         // persisted (it's a one-shot routing decision at emission
         // time). Default is the safe stand-in for surfaces that

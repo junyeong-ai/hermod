@@ -54,6 +54,8 @@ zeroize            = { workspace = true }
 
 [dev-dependencies]
 tempfile           = { workspace = true }
+hermod-storage     = { workspace = true }
+sqlx               = { workspace = true, features = ["sqlite", "runtime-tokio"] }
 
 [lints]
 workspace = true

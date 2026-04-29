@@ -44,6 +44,21 @@ Every other emission is `Default`. **Never** add string-prefix
 filtering to `RemoteAuditSink::record` — the typed flag is the only
 control surface.
 
+## Client IP is ambient
+
+Every `AuditEntry { ... }` literal sets `client_ip: None`. The
+`audit_or_warn` helper overlays `audit_context::current_client_ip()`
+at append time, picking up the client IP that
+`ipc_remote::handshake_and_serve` bound for the duration of the
+connection's task tree (after `daemon.trusted_proxies` /
+X-Forwarded-For resolution).
+
+This keeps every emission site uniform — sites don't need to know
+whether they're running inside a remote-IPC scope or a daemon-
+internal one (outbox / janitor / federation accept). Outside any
+scope, `current_client_ip()` returns `None` and the row records "no
+remote client".
+
 ## Naming shape
 
 - `<namespace>.<event>` — primary state events / operator commands.

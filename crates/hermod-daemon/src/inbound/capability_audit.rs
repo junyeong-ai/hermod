@@ -61,6 +61,7 @@ impl InboundProcessor {
                     "scope": scope,
                     "jti": claim.jti,
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )
@@ -122,6 +123,7 @@ impl InboundProcessor {
             // to the originator, which would loop back here, ad
             // infinitum. The originating daemon already committed the
             // pre-folded row to its own hash-chain.
+            client_ip: None,
             federation: hermod_storage::AuditFederationPolicy::Skip,
         };
         // Best-effort by `AuditSink` contract — a hash-chain failure
@@ -147,6 +149,7 @@ impl InboundProcessor {
                 })),
                 // Aggregator-local meta-row. Stays inside this daemon;
                 // re-shipping it would just describe the description.
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Skip,
             },
         )

@@ -105,10 +105,17 @@ CREATE TABLE capabilities (
 );
 
 -- Hash-chained signed audit log. Each row's `row_hash` is blake3 over
--- (ts || actor || action || target || details_json || prev_hash) with
--- explicit length prefixes (see hermod_storage::audit::compute_row_hash).
--- `sig` is ed25519 over `row_hash` by the daemon's keypair. `prev_hash`
--- of the first row is 32 zero bytes.
+-- (ts || actor || action || target || details_json || client_ip ||
+-- prev_hash) with explicit length prefixes (see
+-- hermod_storage::audit::compute_row_hash). `sig` is ed25519 over
+-- `row_hash` by the daemon's keypair. `prev_hash` of the first row
+-- is 32 zero bytes.
+--
+-- `client_ip` is the resolved originating IP for events that flow in
+-- from a remote IPC connection (after `daemon.trusted_proxies` /
+-- X-Forwarded-For resolution). NULL for events that have no remote
+-- client (outbox worker, janitor, daemon-internal periodic tasks,
+-- local Unix socket IPC).
 CREATE TABLE audit_log (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     ts            INTEGER NOT NULL,
@@ -116,6 +123,7 @@ CREATE TABLE audit_log (
     action        TEXT NOT NULL,
     target        TEXT,
     details_json  TEXT,
+    client_ip     TEXT,
     prev_hash     BLOB NOT NULL,
     row_hash      BLOB NOT NULL,
     sig           BLOB NOT NULL

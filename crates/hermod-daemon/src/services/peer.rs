@@ -81,6 +81,7 @@ impl PeerService {
                         "proposed": proposed.as_str(),
                         "for_id": rec.id.to_string(),
                     })),
+                    client_ip: None,
                     federation: hermod_storage::AuditFederationPolicy::Default,
                 },
             )
@@ -103,6 +104,7 @@ impl PeerService {
                         hermod_storage::AliasOutcome::LocalDropped { .. } => "local_dropped",
                     },
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )
@@ -176,6 +178,7 @@ impl PeerService {
                     details: Some(serde_json::json!({
                         "messages_failed": failed,
                     })),
+                    client_ip: None,
                     federation: hermod_storage::AuditFederationPolicy::Default,
                 },
             )
@@ -229,6 +232,7 @@ impl PeerService {
                     "previous": previous,
                     "new": params.fingerprint,
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )
@@ -269,6 +273,7 @@ impl PeerService {
                 details: Some(serde_json::json!({
                     "level": params.level.as_str(),
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )

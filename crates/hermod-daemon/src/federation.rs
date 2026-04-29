@@ -172,6 +172,7 @@ impl FederationServer {
                     details: Some(serde_json::json!({
                         "proposed": proposed.as_str(),
                     })),
+                    client_ip: None,
                     federation: hermod_storage::AuditFederationPolicy::Default,
                 },
             )

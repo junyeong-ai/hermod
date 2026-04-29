@@ -197,6 +197,7 @@ impl WorkspaceObservabilityService {
                 action: "workspace.roster.request".into(),
                 target: Some(workspace_id.to_hex()),
                 details: None,
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )
@@ -296,6 +297,7 @@ impl WorkspaceObservabilityService {
                 action: "workspace.channels.request".into(),
                 target: Some(workspace_id.to_hex()),
                 details: None,
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )

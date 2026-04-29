@@ -340,6 +340,7 @@ impl BrokerService {
                 action,
                 target: Some(envelope.to.id.to_string()),
                 details: Some(details),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )

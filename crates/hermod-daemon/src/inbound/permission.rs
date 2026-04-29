@@ -58,6 +58,7 @@ impl InboundProcessor {
                     "input_preview": input_preview,
                     "expires_at": expires_at,
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )
@@ -113,6 +114,7 @@ impl InboundProcessor {
                     "behavior": behavior,
                     "matched": matched,
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )

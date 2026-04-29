@@ -83,6 +83,7 @@ impl ChannelService {
                     "workspace_id": params.workspace_id,
                     "name": params.name,
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )
@@ -143,6 +144,7 @@ impl ChannelService {
                 action: "channel.delete".into(),
                 target: Some(id.to_hex()),
                 details: None,
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )
@@ -214,6 +216,7 @@ impl ChannelService {
                     "workspace_id": channel.workspace_id.to_hex(),
                     "fanout": fanout,
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )
@@ -302,6 +305,7 @@ impl ChannelService {
                     "workspace_id": workspace.id.to_hex(),
                     "name": discovered.channel_name,
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )
@@ -329,6 +333,7 @@ impl ChannelService {
                 action: "channel.mute".into(),
                 target: Some(id.to_hex()),
                 details: Some(serde_json::json!({ "muted": params.muted })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )

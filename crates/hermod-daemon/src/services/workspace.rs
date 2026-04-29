@@ -97,6 +97,7 @@ impl WorkspaceService {
                     "name": params.name,
                     "visibility": visibility.as_str(),
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )
@@ -147,6 +148,7 @@ impl WorkspaceService {
                 action: "workspace.join".into(),
                 target: Some(id.to_hex()),
                 details: Some(serde_json::json!({ "name": params.name })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )
@@ -191,6 +193,7 @@ impl WorkspaceService {
                 action: "workspace.delete".into(),
                 target: Some(id.to_hex()),
                 details: None,
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )
@@ -268,6 +271,7 @@ impl WorkspaceService {
                     "envelope_id": send.id.to_string(),
                     "recipient": params.target,
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )
@@ -325,6 +329,7 @@ impl WorkspaceService {
                 action: "workspace.mute".into(),
                 target: Some(id.to_hex()),
                 details: Some(serde_json::json!({ "muted": params.muted })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )

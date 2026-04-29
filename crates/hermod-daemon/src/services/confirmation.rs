@@ -143,6 +143,7 @@ impl ConfirmationService {
                     "from": row.actor.to_string(),
                     "held_intent": row.intent.as_str(),
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )
@@ -192,6 +193,7 @@ impl ConfirmationService {
                     "from": row.actor.to_string(),
                     "held_intent": row.intent.as_str(),
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )

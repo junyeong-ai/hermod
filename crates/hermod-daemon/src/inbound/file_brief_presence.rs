@@ -61,6 +61,7 @@ impl InboundProcessor {
                     "size": data.len(),
                     "location": location,
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )
@@ -112,6 +113,7 @@ impl InboundProcessor {
                     "topic": topic,
                     "len": summary.len(),
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )
@@ -161,6 +163,7 @@ impl InboundProcessor {
                     "manual_status": manual_status.map(|s| s.as_str()),
                     "live": live,
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )

@@ -51,12 +51,14 @@ impl SqliteAuditRepository {
             _ => ZERO32.to_vec(),
         };
 
+        let client_ip_str = entry.client_ip.map(|ip| ip.to_string());
         let row_hash = compute_row_hash(
             entry.ts.unix_ms(),
             entry.actor.as_str(),
             &entry.action,
             entry.target.as_deref(),
             details,
+            client_ip_str.as_deref(),
             &prev_hash,
         );
         let sig = self
@@ -67,14 +69,15 @@ impl SqliteAuditRepository {
 
         let res = sqlx::query(
             r#"INSERT INTO audit_log
-               (ts, actor, action, target, details_json, prev_hash, row_hash, sig)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)"#,
+               (ts, actor, action, target, details_json, client_ip, prev_hash, row_hash, sig)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
         )
         .bind(entry.ts.unix_ms())
         .bind(entry.actor.as_str())
         .bind(&entry.action)
         .bind(&entry.target)
         .bind(details)
+        .bind(client_ip_str.as_deref())
         .bind(&prev_hash)
         .bind(row_hash.to_vec())
         .bind(sig.as_slice().to_vec())
@@ -124,7 +127,7 @@ impl AuditRepository for SqliteAuditRepository {
         limit: u32,
     ) -> Result<Vec<AuditEntry>> {
         let mut sql = String::from(
-            r#"SELECT id, ts, actor, action, target, details_json
+            r#"SELECT id, ts, actor, action, target, details_json, client_ip
                FROM audit_log WHERE 1=1"#,
         );
         if actor.is_some() {
@@ -184,7 +187,7 @@ impl AuditRepository for SqliteAuditRepository {
         }
 
         let rows = sqlx::query(
-            r#"SELECT id, ts, actor, action, target, details_json,
+            r#"SELECT id, ts, actor, action, target, details_json, client_ip,
                       prev_hash, row_hash, sig
                FROM audit_log ORDER BY id ASC"#,
         )
@@ -207,12 +210,14 @@ impl AuditRepository for SqliteAuditRepository {
             let action: String = row.try_get("action")?;
             let target: Option<String> = row.try_get("target")?;
             let details: Option<String> = row.try_get("details_json")?;
+            let client_ip: Option<String> = row.try_get("client_ip")?;
             let computed = compute_row_hash(
                 ts,
                 &actor,
                 &action,
                 target.as_deref(),
                 details.as_deref(),
+                client_ip.as_deref(),
                 &prev_hash,
             );
             if computed.as_slice() != row_hash.as_slice() {
@@ -237,7 +242,7 @@ impl AuditRepository for SqliteAuditRepository {
         epoch_end_ms: i64,
     ) -> Result<Option<ArchiveSummary>> {
         let rows = sqlx::query(
-            r#"SELECT id, ts, actor, action, target, details_json,
+            r#"SELECT id, ts, actor, action, target, details_json, client_ip,
                       prev_hash, row_hash, sig
                FROM audit_log
                WHERE ts >= ? AND ts < ?
@@ -301,6 +306,10 @@ impl AuditRepository for SqliteAuditRepository {
                     .map(|s| serde_json::from_str(&s))
                     .transpose()
                     .map_err(StorageError::Json)?,
+                client_ip: row
+                    .try_get::<Option<String>, _>("client_ip")?
+                    .as_deref()
+                    .and_then(|s| s.parse::<std::net::IpAddr>().ok()),
                 federation: crate::AuditFederationPolicy::Default,
             };
             let archived = ArchivedRow::from_entry(
@@ -490,6 +499,7 @@ impl AuditRepository for SqliteAuditRepository {
                     .as_ref()
                     .map(|v| serde_json::to_string(v).unwrap_or_default())
                     .as_deref(),
+                archived.client_ip.as_deref(),
                 &prev,
             );
             if computed.as_slice() != claimed_row_hash.as_slice() {
@@ -524,13 +534,17 @@ fn iso_day_key(epoch_ms: i64) -> String {
 
 /// Canonical row hash. Length prefixes on every variable-length field so
 /// `"abc" | "def"` can't collide with `"ab" | "cdef"`. Numbers are encoded
-/// little-endian for cross-platform determinism.
+/// little-endian for cross-platform determinism. `client_ip` is folded
+/// after `details_json` (rendered as the IP's canonical string form,
+/// matching what the row stores) so audit forensics can pin the
+/// originating IP cryptographically.
 pub fn compute_row_hash(
     ts_ms: i64,
     actor: &str,
     action: &str,
     target: Option<&str>,
     details_json: Option<&str>,
+    client_ip: Option<&str>,
     prev_hash: &[u8],
 ) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
@@ -539,6 +553,7 @@ pub fn compute_row_hash(
     write_lp(&mut h, action.as_bytes());
     write_lp_opt(&mut h, target.map(|s| s.as_bytes()));
     write_lp_opt(&mut h, details_json.map(|s| s.as_bytes()));
+    write_lp_opt(&mut h, client_ip.map(|s| s.as_bytes()));
     write_lp(&mut h, prev_hash);
     *h.finalize().as_bytes()
 }
@@ -571,6 +586,10 @@ fn row_to_entry(row: sqlx::sqlite::SqliteRow) -> Result<AuditEntry> {
     let details = details_str
         .map(|s| serde_json::from_str::<serde_json::Value>(&s))
         .transpose()?;
+    let client_ip = row
+        .try_get::<Option<String>, _>("client_ip")?
+        .as_deref()
+        .and_then(|s| s.parse::<std::net::IpAddr>().ok());
     Ok(AuditEntry {
         id: Some(id),
         ts,
@@ -578,6 +597,7 @@ fn row_to_entry(row: sqlx::sqlite::SqliteRow) -> Result<AuditEntry> {
         action,
         target,
         details,
+        client_ip,
         // Hydrated rows are read-only; the federation flag was decided
         // at original emission and isn't persisted in the row schema
         // (federation is a one-shot decision, not a queryable
@@ -623,6 +643,7 @@ mod tests {
                     action: format!("test.{i}"),
                     target: Some(format!("t{i}")),
                     details: Some(serde_json::json!({"i": i})),
+                    client_ip: None,
                     federation: crate::AuditFederationPolicy::Default,
                 })
                 .await
@@ -645,6 +666,7 @@ mod tests {
                 action: "honest".into(),
                 target: None,
                 details: None,
+                client_ip: None,
                 federation: crate::AuditFederationPolicy::Default,
             })
             .await
@@ -675,6 +697,7 @@ mod tests {
                         action: format!("race.{i}"),
                         target: None,
                         details: None,
+                        client_ip: None,
                         federation: crate::AuditFederationPolicy::Default,
                     })
                     .await
@@ -701,6 +724,7 @@ mod tests {
                     action: format!("step.{i}"),
                     target: None,
                     details: None,
+                    client_ip: None,
                     federation: crate::AuditFederationPolicy::Default,
                 })
                 .await

@@ -161,6 +161,7 @@ impl BroadcastService {
                     "len": params.text.len(),
                     "fanout": fanout,
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )

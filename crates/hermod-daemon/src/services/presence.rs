@@ -93,6 +93,7 @@ impl PresenceService {
                     "skipped": outcome.skipped,
                     "truncated_at": outcome.truncated_at,
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )
@@ -124,6 +125,7 @@ impl PresenceService {
                     "skipped": outcome.skipped,
                     "truncated_at": outcome.truncated_at,
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )

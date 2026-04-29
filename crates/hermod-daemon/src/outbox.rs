@@ -181,6 +181,7 @@ impl OutboxWorker {
                     "detail": detail,
                     "attempts": msg.attempts,
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )

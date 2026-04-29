@@ -252,6 +252,7 @@ impl JanitorWorker {
                                     "archives": audit_archives_created,
                                     "rows": res.rows_archived,
                                 })),
+                                client_ip: None,
                                 federation: hermod_storage::AuditFederationPolicy::Default,
                             },
                         )
@@ -272,6 +273,7 @@ impl JanitorWorker {
                                 "outcome": "failure",
                                 "reason": e.to_string(),
                             })),
+                            client_ip: None,
                             federation: hermod_storage::AuditFederationPolicy::Default,
                         },
                     )

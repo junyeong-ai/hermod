@@ -7,6 +7,7 @@ use clap::Parser;
 use std::path::PathBuf;
 use tracing::info;
 
+mod audit_context;
 mod bootstrap;
 mod client_ip;
 mod dispatcher;

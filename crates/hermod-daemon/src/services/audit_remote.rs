@@ -186,6 +186,7 @@ mod tests {
             action: action.to_string(),
             target: None,
             details: None,
+            client_ip: None,
             federation,
         }
     }

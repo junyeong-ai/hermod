@@ -28,6 +28,17 @@ pub struct AuditEntry {
     pub action: String,
     pub target: Option<String>,
     pub details: Option<JsonValue>,
+    /// Originating client IP for events that flow in from a remote
+    /// IPC connection (after `daemon.trusted_proxies` /
+    /// `X-Forwarded-For` resolution). `None` for events that have no
+    /// remote client (outbox worker, janitor, daemon-internal periodic
+    /// tasks, local Unix socket IPC).
+    ///
+    /// Emission sites pass `None`; the daemon's `audit_or_warn`
+    /// helper overlays the ambient `audit_context::current_client_ip()`
+    /// at append time, so each call site stays uniform regardless of
+    /// whether it's running inside a remote-IPC scope.
+    pub client_ip: Option<std::net::IpAddr>,
     pub federation: AuditFederationPolicy,
 }
 

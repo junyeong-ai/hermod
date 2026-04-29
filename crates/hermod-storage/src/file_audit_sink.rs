@@ -162,6 +162,7 @@ mod tests {
             action: action.into(),
             target: Some("ttt".into()),
             details: Some(serde_json::json!({"k": "v"})),
+            client_ip: None,
             federation: crate::AuditFederationPolicy::Default,
         }
     }

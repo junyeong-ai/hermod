@@ -117,6 +117,7 @@ impl BriefService {
                     "skipped": outcome.skipped,
                     "truncated_at": outcome.truncated_at,
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )

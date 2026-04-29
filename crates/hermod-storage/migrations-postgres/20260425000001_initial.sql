@@ -94,6 +94,7 @@ CREATE TABLE audit_log (
     action        TEXT NOT NULL,
     target        TEXT,
     details_json  TEXT,
+    client_ip     TEXT,
     prev_hash     BYTEA NOT NULL,
     row_hash      BYTEA NOT NULL,
     sig           BYTEA NOT NULL

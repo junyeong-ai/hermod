@@ -349,6 +349,7 @@ impl InboundProcessor {
                                 "sensitivity": sensitivity.as_str(),
                                 "trust_level": trust.as_str(),
                             })),
+                            client_ip: None,
                             federation: hermod_storage::AuditFederationPolicy::Default,
                         },
                     )
@@ -583,6 +584,7 @@ impl InboundProcessor {
                     "id": envelope.id.to_string(),
                     "kind": envelope.kind.as_str(),
                 })),
+                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             },
         )

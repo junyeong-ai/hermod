@@ -273,32 +273,45 @@ where
 
     let xff_seen = xff_value.get().cloned();
     let client = resolve_client_ip(peer.ip(), xff_seen.as_deref(), &trusted_proxies);
-    debug!(
-        peer = %peer,
-        client = %client,
-        "remote IPC client authenticated"
-    );
-    let (mut tx, mut rx) = ws.split();
-    while let Some(frame) = rx.next().await {
-        let frame = frame?;
-        match frame {
-            Message::Text(body) => {
-                let resp = handle_rpc(&dispatcher, &body).await;
-                tx.send(Message::Text(resp.into())).await?;
+
+    // Per-connection tracing span — every event the dispatcher /
+    // services / audit pipeline emits inside the message loop carries
+    // `peer` + `client` automatically, so a single connection's full
+    // story is greppable in aggregated logs without manual field
+    // threading.
+    let span = tracing::info_span!("ipc_conn", peer = %peer, client = %client);
+    let _enter = span.enter();
+    debug!("remote IPC client authenticated");
+
+    // Bind `client` as the ambient audit context for every task-local
+    // read inside the message loop. `audit_or_warn` overlays this on
+    // every `AuditEntry { client_ip: None, ... }` literal, so audit
+    // rows record the resolved client without each service method
+    // having to receive it explicitly.
+    crate::audit_context::with_client_ip(Some(client), async move {
+        let (mut tx, mut rx) = ws.split();
+        while let Some(frame) = rx.next().await {
+            let frame = frame?;
+            match frame {
+                Message::Text(body) => {
+                    let resp = handle_rpc(&dispatcher, &body).await;
+                    tx.send(Message::Text(resp.into())).await?;
+                }
+                Message::Binary(body) => {
+                    // Tolerate clients that send JSON as binary frames.
+                    let s = std::str::from_utf8(&body)
+                        .map_err(|_| anyhow!("binary frame not utf-8"))?;
+                    let resp = handle_rpc(&dispatcher, s).await;
+                    tx.send(Message::Text(resp.into())).await?;
+                }
+                Message::Ping(p) => tx.send(Message::Pong(p)).await?,
+                Message::Close(_) => break,
+                _ => {}
             }
-            Message::Binary(body) => {
-                // Tolerate clients that send JSON as binary frames.
-                let s =
-                    std::str::from_utf8(&body).map_err(|_| anyhow!("binary frame not utf-8"))?;
-                let resp = handle_rpc(&dispatcher, s).await;
-                tx.send(Message::Text(resp.into())).await?;
-            }
-            Message::Ping(p) => tx.send(Message::Pong(p)).await?,
-            Message::Close(_) => break,
-            _ => {}
         }
-    }
-    Ok(())
+        Ok(())
+    })
+    .await
 }
 
 async fn handle_rpc(dispatcher: &Dispatcher, body: &str) -> String {

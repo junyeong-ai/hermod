@@ -78,6 +78,13 @@ struct PlainWsDaemon {
 
 impl PlainWsDaemon {
     fn spawn() -> Self {
+        Self::spawn_with_env(&[])
+    }
+
+    /// Spawn with extra env vars layered on top of the standard
+    /// IPC-listen-ws fixture. Used by tests that exercise additional
+    /// daemon config knobs (e.g. `HERMOD_DAEMON_TRUSTED_PROXIES`).
+    fn spawn_with_env(extra_env: &[(&str, &str)]) -> Self {
         let home = tempfile::tempdir().expect("tempdir");
         let bin_hermod = release_bin("hermod");
         let bin_hermodd = release_bin("hermodd");
@@ -96,8 +103,8 @@ impl PlainWsDaemon {
         let socket = home.path().join("sock");
         let stderr_file =
             std::fs::File::create(home.path().join("daemon.stderr")).expect("daemon stderr");
-        let child = Command::new(&bin_hermodd)
-            .env("HERMOD_HOME", home.path())
+        let mut cmd = Command::new(&bin_hermodd);
+        cmd.env("HERMOD_HOME", home.path())
             .env("HERMOD_DAEMON_SOCKET_PATH", &socket)
             // Plaintext WS — the path under test. Mutually exclusive
             // with HERMOD_DAEMON_IPC_LISTEN_WSS; the daemon's config
@@ -106,9 +113,11 @@ impl PlainWsDaemon {
             .env("HERMOD_DAEMON_IPC_LISTEN_WS", ws_addr.to_string())
             .env("HERMOD_DAEMON_LOG", "warn")
             .stdout(Stdio::null())
-            .stderr(stderr_file)
-            .spawn()
-            .expect("spawn hermodd");
+            .stderr(stderr_file);
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
+        let child = cmd.spawn().expect("spawn hermodd");
         wait_for_port(ws_addr, Duration::from_secs(15));
         wait_for_socket(&socket, Duration::from_secs(5));
         Self {
@@ -172,6 +181,162 @@ fn status_succeeds_over_plain_ws_with_real_bearer() {
     assert!(
         stdout.contains("agent_id:"),
         "expected `agent_id:` line in status output; got:\n{stdout}",
+    );
+}
+
+/// Open the daemon's SQLite audit_log directly and pull out the
+/// `client_ip` of the most recent row matching `action`. Used to
+/// verify end-to-end client-IP propagation: from the WebSocket
+/// upgrade headers, through `audit_context::with_client_ip`, into
+/// the `audit_or_warn` enrichment, into the persisted row.
+async fn last_audit_client_ip(home: &std::path::Path, action: &str) -> Option<String> {
+    use sqlx::Row;
+    let dsn = format!("sqlite://{}/hermod.db", home.display());
+    let pool = sqlx::SqlitePool::connect(&dsn)
+        .await
+        .expect("open audit db");
+    let row =
+        sqlx::query("SELECT client_ip FROM audit_log WHERE action = ? ORDER BY id DESC LIMIT 1")
+            .bind(action)
+            .fetch_one(&pool)
+            .await
+            .expect("audit row missing");
+    pool.close().await;
+    row.try_get::<Option<String>, _>("client_ip").unwrap()
+}
+
+/// Send one JSON-RPC request through a raw plaintext WebSocket
+/// connection with a custom `X-Forwarded-For` header. Bypasses the
+/// `hermod` CLI (which doesn't expose XFF) so the test can pin the
+/// trusted-proxy resolution path against the actual handshake
+/// callback, not a CLI wrapper.
+async fn rpc_with_xff(
+    url: &str,
+    bearer: &str,
+    xff: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let mut req = url.into_client_request().expect("ws request");
+    req.headers_mut()
+        .insert("Authorization", format!("Bearer {bearer}").parse().unwrap());
+    req.headers_mut()
+        .insert("X-Forwarded-For", xff.parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req)
+        .await
+        .expect("ws connect");
+    let frame = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "test-1",
+        "method": method,
+        "params": params,
+    });
+    ws.send(Message::Text(frame.to_string().into()))
+        .await
+        .expect("send");
+    let resp = loop {
+        match ws.next().await.expect("recv").expect("ws frame") {
+            Message::Text(t) => break t,
+            _ => continue,
+        }
+    };
+    ws.close(None).await.ok();
+    serde_json::from_str(resp.as_str()).expect("decode response")
+}
+
+/// XFF-resolved client IP from a trusted proxy must land in the
+/// audit row's `client_ip`. Boots a daemon with
+/// `HERMOD_DAEMON_TRUSTED_PROXIES` covering loopback, then sends a
+/// raw WebSocket handshake whose `X-Forwarded-For` claims a public
+/// IP. The auditable RPC (peer.add) records its row; the row's
+/// `client_ip` must be the XFF-claimed IP, not the loopback peer.
+///
+/// Pins the full chain: WS upgrade header → handshake callback →
+/// `xff_value` OnceLock → `client_ip::resolve_client_ip` →
+/// `audit_context::CLIENT_IP` → `audit_or_warn` enrichment →
+/// `AuditEntry.client_ip` → SQLite `audit_log.client_ip` column.
+#[tokio::test(flavor = "multi_thread")]
+async fn xff_resolved_client_ip_lands_in_audit_row() {
+    let daemon = PlainWsDaemon::spawn_with_env(&[(
+        "HERMOD_DAEMON_TRUSTED_PROXIES",
+        // Loopback covers the test peer; the daemon trusts our XFF.
+        "127.0.0.0/8",
+    )]);
+    let bearer = std::fs::read_to_string(&daemon.bearer_path)
+        .expect("bearer")
+        .trim()
+        .to_string();
+
+    // Use a different fake peer endpoint+pubkey for each invocation so
+    // the test never collides with state left by an earlier run on a
+    // shared tempdir (we don't have one, but cheap insurance).
+    let pubkey_hex = "ab".repeat(32);
+    let response = rpc_with_xff(
+        &daemon.url(),
+        &bearer,
+        "203.0.113.42",
+        "peer.add",
+        serde_json::json!({
+            "endpoint": {"scheme": "wss", "host": "fake-peer.example", "port": 7823},
+            "pubkey_hex": pubkey_hex,
+        }),
+    )
+    .await;
+    assert!(
+        response.get("result").is_some(),
+        "peer.add did not succeed: {response}"
+    );
+
+    let recorded = last_audit_client_ip(daemon.home.path(), "peer.add").await;
+    assert_eq!(
+        recorded.as_deref(),
+        Some("203.0.113.42"),
+        "audit row did not record the XFF-resolved client IP"
+    );
+}
+
+/// Untrusted peer (no `trusted_proxies` set) must NOT believe the
+/// XFF header — forgery defence. The daemon falls back to the TCP
+/// peer IP (loopback in this test). Pins the security-critical
+/// branch: an attacker who can hit the daemon directly cannot stamp
+/// a fake originating IP into audit by sending a crafted XFF.
+#[tokio::test(flavor = "multi_thread")]
+async fn xff_from_untrusted_peer_is_ignored_in_audit() {
+    // No HERMOD_DAEMON_TRUSTED_PROXIES — empty set means XFF is
+    // ignored regardless of header content.
+    let daemon = PlainWsDaemon::spawn();
+    let bearer = std::fs::read_to_string(&daemon.bearer_path)
+        .expect("bearer")
+        .trim()
+        .to_string();
+
+    let pubkey_hex = "cd".repeat(32);
+    let response = rpc_with_xff(
+        &daemon.url(),
+        &bearer,
+        "198.51.100.13", // attacker-claimed IP — must be ignored
+        "peer.add",
+        serde_json::json!({
+            "endpoint": {"scheme": "wss", "host": "fake-peer-2.example", "port": 7823},
+            "pubkey_hex": pubkey_hex,
+        }),
+    )
+    .await;
+    assert!(
+        response.get("result").is_some(),
+        "peer.add did not succeed: {response}"
+    );
+
+    let recorded = last_audit_client_ip(daemon.home.path(), "peer.add").await;
+    // The XFF claim is ignored; client_ip falls back to the TCP peer,
+    // which is loopback for this test fixture.
+    assert!(
+        matches!(recorded.as_deref(), Some(s) if s == "127.0.0.1" || s == "::1"),
+        "audit row should record TCP peer (loopback), not XFF; got {recorded:?}"
     );
 }
 

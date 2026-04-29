@@ -69,6 +69,8 @@ pub struct ArchivedRow {
     pub target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_ip: Option<String>,
     pub prev_hash_hex: String,
     pub row_hash_hex: String,
     pub sig_hex: String,
@@ -83,6 +85,7 @@ impl ArchivedRow {
             action: entry.action.clone(),
             target: entry.target.clone(),
             details: entry.details.clone(),
+            client_ip: entry.client_ip.map(|ip| ip.to_string()),
             prev_hash_hex: hex::encode(prev_hash),
             row_hash_hex: hex::encode(row_hash),
             sig_hex: hex::encode(sig),

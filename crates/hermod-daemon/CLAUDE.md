@@ -108,6 +108,28 @@ as the daemon's own actions.
 Doc-coverage test in this crate pins each variant to
 `docs/audit_actions.md`.
 
+## Audit context — ambient client IP
+
+`audit_context::with_client_ip(Some(client), fut)` binds the resolved
+client IP for the duration of `fut`'s tokio task tree. `audit_or_warn`
+reads it via `current_client_ip()` and overlays the value onto every
+`AuditEntry { client_ip: None, ... }` literal. Sites stay uniform
+regardless of whether they're running inside a remote-IPC scope.
+
+Two entry points scope the context today:
+
+- `ipc_remote::handshake_and_serve` — wraps the WebSocket message
+  loop with `with_client_ip(Some(resolve_client_ip(peer, xff,
+  trusted)))`. Every audit row triggered by an IPC remote request
+  records the originating client IP (after trusted-proxy resolution).
+- Local Unix socket IPC, federation accept, outbox worker, janitor —
+  no scope; rows record `client_ip: None` ("no remote client").
+
+`tokio::spawn` does NOT inherit task-local; per-RPC tasks within a
+connection inherit naturally because they run inside the same task
+tree (`with_client_ip(...).await`), but a bare `tokio::spawn` from
+inside the loop would lose context. Pin via `audit_context::tests`.
+
 ## Configuration via env
 
 Every `[section] field` has a matching `HERMOD_<SECTION>_<FIELD>` env
