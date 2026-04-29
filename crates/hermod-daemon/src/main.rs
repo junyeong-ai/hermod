@@ -122,8 +122,8 @@ async fn main() -> anyhow::Result<()> {
     // pin — fail-loud is the safer default. The bootstrap agent's
     // keypair is shared with the host (see `local_agent` module
     // docs), so `host_keypair` is needed for the load fallback.
-    let registry = local_agent::build_registry(&home, host_keypair.clone())
-        .context("build local agent registry")?;
+    let registry = local_agent::load_registry(&home, host_keypair.clone())
+        .context("load local agent registry")?;
     if registry.is_empty() {
         anyhow::bail!("no local agents found at $HERMOD_HOME/agents/ — run `hermod init` first");
     }

@@ -539,7 +539,7 @@ mod tests {
     /// the agents/ block is part of the spec.
     fn populate_conformant(home: &Path) -> Vec<AgentId> {
         let host = std::sync::Arc::new(hermod_crypto::Keypair::generate());
-        let agent = local_agent::provision_bootstrap(home, host.clone(), None).unwrap();
+        let agent = local_agent::ensure_bootstrap(home, host.clone(), None).unwrap();
         let ids = vec![agent.agent_id.clone()];
         for file in spec(home, &sqlite_dsn(home), &local_blob_dsn(home), &ids) {
             match (file.kind, file.presence) {
@@ -547,7 +547,7 @@ mod tests {
                     if !file.path.exists() {
                         make_dir(&file.path, file.required_mode);
                     } else {
-                        // local_agent::provision_bootstrap already
+                        // local_agent::ensure_bootstrap already
                         // created the per-agent directory; ensure
                         // mode matches.
                         fs::set_permissions(
@@ -964,7 +964,7 @@ mod tests {
     fn enforce_passes_postgres_with_memory_blob_layout() {
         let tmp = TempDir::new().unwrap();
         let host = std::sync::Arc::new(hermod_crypto::Keypair::generate());
-        let agent = local_agent::provision_bootstrap(tmp.path(), host.clone(), None).unwrap();
+        let agent = local_agent::ensure_bootstrap(tmp.path(), host.clone(), None).unwrap();
         let ids = vec![agent.agent_id.clone()];
         for file in spec(tmp.path(), "postgres://hermod@db/hermod", "memory://", &ids) {
             match (file.kind, file.presence) {

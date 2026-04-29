@@ -98,11 +98,14 @@ use hermod_storage::{AgentRecord, Database};
 /// `host_pubkey = Some(host_pubkey)` so federation peers can resolve
 /// "which daemon hosts this agent_id" without a separate lookup.
 ///
-/// The operator-set `[identity] alias` is attached to the *primary*
-/// agent only — the registry's first entry, which `local_agent::
-/// build_registry` provisions when the disk is empty. Additional
-/// agents added via `hermod local add` (Phase H5) carry their own
-/// per-agent aliases; those land in the registry in a later phase.
+/// The operator-set `[identity] alias` is attached to the *bootstrap*
+/// agent — identified by `agent.keypair.pubkey == host_pubkey`, which
+/// is the H2 single-tenant invariant (the bootstrap re-uses the host
+/// keypair). Selecting by that match instead of by registry index
+/// keeps the assignment stable regardless of filesystem ordering;
+/// when H5 introduces non-bootstrap agents whose keypairs diverge
+/// from `host_pubkey`, those agents correctly receive `None` here
+/// and rely on per-agent aliases from `hermod local add --alias`.
 ///
 /// On return the registry's `workspace_root` / `created_at` fields
 /// reflect the persisted `local_agents` rows (see
@@ -114,8 +117,9 @@ pub async fn ensure_local_agents(
     primary_alias: Option<hermod_core::AgentAlias>,
 ) -> anyhow::Result<crate::local_agent::LocalAgentRegistry> {
     let now = hermod_core::Timestamp::now();
-    for (idx, agent) in registry.list().iter().enumerate() {
-        let alias = if idx == 0 {
+    for agent in registry.list().iter() {
+        let agent_pubkey = agent.keypair.to_pubkey_bytes();
+        let alias = if agent_pubkey == host_pubkey {
             primary_alias.clone()
         } else {
             None
@@ -123,7 +127,7 @@ pub async fn ensure_local_agents(
         db.agents()
             .upsert(&AgentRecord {
                 id: agent.agent_id.clone(),
-                pubkey: agent.keypair.to_pubkey_bytes(),
+                pubkey: agent_pubkey,
                 host_pubkey: Some(host_pubkey),
                 endpoint: None,
                 local_alias: alias,

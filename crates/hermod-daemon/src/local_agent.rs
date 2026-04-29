@@ -82,10 +82,17 @@ impl LocalAgent {
 
 /// Snapshot of every agent this daemon hosts. Built at boot from the
 /// on-disk `$HERMOD_HOME/agents/<id>/` directories cross-checked
-/// against the `local_agents` table; immutable for the lifetime of
-/// the daemon. Phase H3 will replace the snapshot with a mutable
-/// registry that hot-rotates bearer tokens and force-closes active
-/// IPC sessions on rotate.
+/// against the `local_agents` table; **immutable for the lifetime
+/// of the daemon** in H2.
+///
+/// Phase H3 replaces this snapshot with a mutable, shared registry
+/// (`Arc<RwLock<…>>` or similar) so that `hermod local rotate` can
+/// atomically rotate a bearer in memory, on disk, in the DB, and
+/// invalidate any active IPC session running under the previous
+/// bearer (per-agent `Vec<oneshot::Sender<()>>`). Until then, the
+/// only way to apply a rotation is to write the new bearer to disk
+/// and restart the daemon — `merge_with_db` picks up the drift on
+/// next boot.
 #[derive(Clone, Debug, Default)]
 pub struct LocalAgentRegistry {
     agents: Vec<LocalAgent>,
@@ -112,11 +119,25 @@ impl LocalAgentRegistry {
         self.agents.iter().find(|a| &a.agent_id == id)
     }
 
-    /// Convenience for single-tenant flows (`hermod bearer show`,
-    /// `hermod identity`, the `$HERMOD_HOME/agents/<id>/bearer_token`
-    /// default the BearerProvider falls back to). Returns `Some` only
-    /// when the daemon hosts exactly one agent — multi-agent
-    /// callers must dispatch by agent_id explicitly.
+    /// **H2-only single-tenant scaffolding.** Returns the lone
+    /// hosted agent when the daemon hosts exactly one — the H2
+    /// invariant — and `None` otherwise. Used by:
+    ///
+    /// - `server.rs::serve` to derive the daemon's envelope-signer
+    ///   and self_id (bails on `None`).
+    /// - `hermod bearer show` / `rotate` and `hermod identity` to
+    ///   resolve the implicit agent without an `--alias` flag.
+    /// - `local_agent::implicit_bearer_default` for the
+    ///   `$HERMOD_HOME/agents/<bootstrap_id>/bearer_token` fallback
+    ///   the CLI falls back to when no `--bearer-file` /
+    ///   `HERMOD_BEARER_TOKEN` is set.
+    ///
+    /// Phase H3 removes the bail in `server.rs` (every IPC call
+    /// resolves its caller_agent at handshake time, with no global
+    /// "primary" needed). Phase H5 introduces `--alias` on the CLI
+    /// so multi-agent hosts dispatch explicitly. After H5 this
+    /// method is intended for the convenience CLI surface only;
+    /// `server.rs` should not depend on it.
     pub fn primary(&self) -> Option<&LocalAgent> {
         if self.agents.len() == 1 {
             self.agents.first()
@@ -160,17 +181,19 @@ pub fn generate_bearer_token() -> SecretString {
     SecretString::new(hex::encode(bytes.as_slice()))
 }
 
-/// Provision the *bootstrap* local agent: agent_id == host_id, the
-/// keypair is shared with [`crate::host_identity`], and the only new
-/// file written under `agents/<host_id>/` is the bearer token. The
-/// caller has already ensured `host/ed25519_secret` exists (via
+/// Ensure the *bootstrap* local agent's on-disk bearer file exists,
+/// generating one if missing and reading the existing one otherwise.
+/// `agent_id == host_id`, and the keypair is shared with
+/// [`crate::host_identity`] (the bootstrap shortcut documented in
+/// the module header) — so the only file this function ever writes
+/// under `agents/<host_id>/` is the bearer token. The caller has
+/// already ensured `host/ed25519_secret` exists (via
 /// `host_identity::ensure_exists`).
 ///
-/// Idempotent on the bearer-token presence: if a bearer file already
-/// exists at the canonical path (an interrupted earlier `hermod init`,
-/// or the operator re-running `init` without `--force`), it's loaded
-/// rather than overwritten.
-pub fn provision_bootstrap(
+/// Idempotent: re-running `hermod init` without `--force` reads the
+/// existing bearer rather than minting a new one. Mirrors
+/// [`crate::host_identity::ensure_exists`] / `ensure_tls`.
+pub fn ensure_bootstrap(
     home: &Path,
     host_keypair: Arc<Keypair>,
     workspace_root: Option<String>,
@@ -339,17 +362,19 @@ pub fn scan_disk_ids(home: &Path) -> Result<Vec<AgentId>> {
     Ok(out)
 }
 
-/// Build the boot-time registry by scanning `$HERMOD_HOME/agents/`.
-/// Returns whatever's on disk — including an empty registry. The
-/// daemon's `main` refuses to boot when the registry is empty (the
-/// "run `hermod init` first" path); `hermod init` is the only code
-/// site that calls [`provision_bootstrap`] to create the bootstrap.
+/// Load the boot-time registry by scanning `$HERMOD_HOME/agents/`.
+/// Returns whatever's on disk — including an empty registry; this
+/// function performs no provisioning, only reading. The daemon's
+/// `main` refuses to boot when the registry is empty (the "run
+/// `hermod init` first" path); `hermod init` is the only code site
+/// that calls [`ensure_bootstrap`] to materialise the bootstrap on
+/// disk.
 ///
-/// This split avoids a footgun: if `agents/` were silently
+/// This separation avoids a footgun: if `agents/` were silently
 /// re-populated on daemon boot, an operator who accidentally deletes
 /// the directory would wake up to a daemon happily running under a
 /// brand-new agent_id and every federation peer's pin failing.
-pub fn build_registry(home: &Path, host_keypair: Arc<Keypair>) -> Result<LocalAgentRegistry> {
+pub fn load_registry(home: &Path, host_keypair: Arc<Keypair>) -> Result<LocalAgentRegistry> {
     let agents = scan_disk(home, Some(host_keypair))?;
     Ok(LocalAgentRegistry::from_agents(agents))
 }
@@ -377,10 +402,22 @@ pub async fn merge_with_db(
         if let Some(rec) = existing {
             agent.workspace_root = rec.workspace_root;
             agent.created_at = rec.created_at;
-            // Disk bearer reflects ground truth; if the DB row drifted
-            // (operator edited the file directly) recover by rotating
-            // the hash. Same path `hermod local rotate` will use later.
+            // Disk bearer is ground truth: when the on-disk file's
+            // hash diverges from the DB row's hash, the DB follows
+            // disk. This is how `hermod bearer rotate` (which only
+            // writes the file) takes effect on the next daemon
+            // boot. The drift event is logged at info level so it
+            // shows up in the operator's startup log — silent
+            // rotation would mask both intended rotations and
+            // accidental edits. (H3 will replace this with an
+            // atomic in-process rotate that updates the registry,
+            // DB, filesystem, and active sessions together.)
             if rec.bearer_hash != bearer_hash {
+                tracing::info!(
+                    agent_id = %agent.agent_id,
+                    "bearer hash on disk differs from DB row — rotating DB to match disk \
+                     (e.g. after `hermod bearer rotate` or an operator edit)"
+                );
                 let updated = db
                     .local_agents()
                     .rotate_bearer(&agent.agent_id, bearer_hash)
@@ -452,14 +489,13 @@ mod tests {
     }
 
     #[test]
-    fn provision_bootstrap_writes_only_bearer_under_agent_dir() {
+    fn ensure_bootstrap_writes_only_bearer_under_agent_dir() {
         #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = TempDir::new().unwrap();
         let host = fresh_host_keypair();
-        let agent =
-            provision_bootstrap(tmp.path(), host.clone(), Some("/tmp/proj".into())).unwrap();
+        let agent = ensure_bootstrap(tmp.path(), host.clone(), Some("/tmp/proj".into())).unwrap();
         assert_eq!(agent.agent_id, host.agent_id());
         let secret_p = secret_path(tmp.path(), &agent.agent_id);
         let bearer_p = bearer_token_path(tmp.path(), &agent.agent_id);
@@ -494,15 +530,15 @@ mod tests {
     }
 
     #[test]
-    fn provision_bootstrap_is_idempotent_on_bearer() {
+    fn ensure_bootstrap_is_idempotent_on_bearer() {
         let tmp = TempDir::new().unwrap();
         let host = fresh_host_keypair();
-        let first = provision_bootstrap(tmp.path(), host.clone(), None).unwrap();
-        let second = provision_bootstrap(tmp.path(), host, None).unwrap();
+        let first = ensure_bootstrap(tmp.path(), host.clone(), None).unwrap();
+        let second = ensure_bootstrap(tmp.path(), host, None).unwrap();
         assert_eq!(
             first.bearer_token.expose_secret(),
             second.bearer_token.expose_secret(),
-            "second provision_bootstrap must reuse the existing bearer file"
+            "second ensure_bootstrap must reuse the existing bearer file"
         );
     }
 
@@ -510,7 +546,7 @@ mod tests {
     fn load_uses_host_fallback_for_bootstrap() {
         let tmp = TempDir::new().unwrap();
         let host = fresh_host_keypair();
-        let provisioned = provision_bootstrap(tmp.path(), host.clone(), None).unwrap();
+        let provisioned = ensure_bootstrap(tmp.path(), host.clone(), None).unwrap();
         let loaded = load(tmp.path(), &provisioned.agent_id, Some(host.clone())).unwrap();
         assert_eq!(loaded.agent_id, host.agent_id());
         assert_eq!(
@@ -546,7 +582,7 @@ mod tests {
     fn scan_disk_loads_bootstrap_via_host_fallback() {
         let tmp = TempDir::new().unwrap();
         let host = fresh_host_keypair();
-        provision_bootstrap(tmp.path(), host.clone(), None).unwrap();
+        ensure_bootstrap(tmp.path(), host.clone(), None).unwrap();
         let agents = scan_disk(tmp.path(), Some(host.clone())).unwrap();
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].agent_id, host.agent_id());
@@ -563,7 +599,7 @@ mod tests {
     fn scan_disk_skips_non_agent_id_entries() {
         let tmp = TempDir::new().unwrap();
         let host = fresh_host_keypair();
-        provision_bootstrap(tmp.path(), host.clone(), None).unwrap();
+        ensure_bootstrap(tmp.path(), host.clone(), None).unwrap();
         fs::create_dir_all(agents_dir(tmp.path()).join("tmp-scratch")).unwrap();
         let agents = scan_disk(tmp.path(), Some(host.clone())).unwrap();
         assert_eq!(agents.len(), 1);
@@ -571,19 +607,19 @@ mod tests {
     }
 
     #[test]
-    fn build_registry_returns_empty_when_no_agents_on_disk() {
+    fn load_registry_returns_empty_when_no_agents_on_disk() {
         let tmp = TempDir::new().unwrap();
         let host = fresh_host_keypair();
-        let reg = build_registry(tmp.path(), host).unwrap();
+        let reg = load_registry(tmp.path(), host).unwrap();
         assert!(reg.is_empty());
     }
 
     #[test]
-    fn build_registry_returns_provisioned_bootstrap() {
+    fn load_registry_returns_provisioned_bootstrap() {
         let tmp = TempDir::new().unwrap();
         let host = fresh_host_keypair();
-        provision_bootstrap(tmp.path(), host.clone(), None).unwrap();
-        let reg = build_registry(tmp.path(), host.clone()).unwrap();
+        ensure_bootstrap(tmp.path(), host.clone(), None).unwrap();
+        let reg = load_registry(tmp.path(), host.clone()).unwrap();
         assert_eq!(reg.len(), 1);
         assert_eq!(reg.primary().unwrap().agent_id, host.agent_id());
     }
@@ -599,7 +635,7 @@ mod tests {
     fn implicit_bearer_default_points_at_lone_agent() {
         let tmp = TempDir::new().unwrap();
         let host = fresh_host_keypair();
-        let agent = provision_bootstrap(tmp.path(), host.clone(), None).unwrap();
+        let agent = ensure_bootstrap(tmp.path(), host.clone(), None).unwrap();
         let path = implicit_bearer_default(tmp.path());
         assert_eq!(path, bearer_token_path(tmp.path(), &agent.agent_id));
     }

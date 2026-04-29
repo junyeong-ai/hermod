@@ -58,7 +58,7 @@ pub async fn run(args: InitArgs, home: &Path) -> Result<()> {
     let (host_kp, _) = host_identity::ensure_exists(home)?;
     let host_kp = Arc::new(host_kp);
     let tls = host_identity::ensure_tls(home, &host_kp)?;
-    let bootstrap = local_agent::provision_bootstrap(home, host_kp.clone(), None)?;
+    let bootstrap = local_agent::ensure_bootstrap(home, host_kp.clone(), None)?;
 
     if let Some(alias) = args.alias {
         apply_alias(&config_path, &alias)?;
