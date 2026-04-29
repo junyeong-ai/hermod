@@ -35,6 +35,7 @@ pub async fn serve(
     db: Arc<dyn Database>,
     started: Instant,
     version: &'static str,
+    local_agents_total: u64,
 ) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(addr = %listener.local_addr()?, "metrics listener up");
@@ -49,7 +50,7 @@ pub async fn serve(
         };
         let db = db.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(sock, db, started, version).await {
+            if let Err(e) = handle(sock, db, started, version, local_agents_total).await {
                 debug!(peer = %peer, error = %e, "metrics connection ended");
             }
         });
@@ -61,6 +62,7 @@ async fn handle(
     db: Arc<dyn Database>,
     started: Instant,
     version: &'static str,
+    local_agents_total: u64,
 ) -> anyhow::Result<()> {
     let mut buf = vec![0u8; READ_BUF];
     let n = sock.read(&mut buf).await?;
@@ -85,7 +87,7 @@ async fn handle(
             }
         },
         Some("/metrics") => {
-            let body = render_metrics(&*db, started, version).await;
+            let body = render_metrics(&*db, started, version, local_agents_total).await;
             format_response(200, "text/plain; version=0.0.4; charset=utf-8", &body)
         }
         _ => format_response(404, "text/plain; charset=utf-8", "not found\n"),
@@ -124,7 +126,12 @@ fn format_response(status: u16, content_type: &str, body: &str) -> String {
     )
 }
 
-async fn render_metrics(db: &dyn Database, started: Instant, version: &'static str) -> String {
+async fn render_metrics(
+    db: &dyn Database,
+    started: Instant,
+    version: &'static str,
+    local_agents_total: u64,
+) -> String {
     let uptime_s = started.elapsed().as_secs_f64();
     let now_ms = Timestamp::now().unix_ms();
 
@@ -225,6 +232,12 @@ async fn render_metrics(db: &dyn Database, started: Instant, version: &'static s
         "hermod_capabilities_active",
         "Capability rows that are unrevoked and unexpired — i.e. presently authoritative.",
         snapshot.as_ref().map(|s| s.capabilities_active),
+    );
+    push_gauge(
+        &mut out,
+        "hermod_local_agents_total",
+        "Locally-hosted agents this daemon's registry knows about. Multi-tenant deployments bump as the operator adds projects.",
+        Some(local_agents_total as i64),
     );
 
     out.push_str("# HELP hermod_metric_query_errors_total Best-effort failure counter for the metric collection itself. Distinguishes \"scrape returned nothing\" from \"a gauge could not be computed\".\n");

@@ -437,12 +437,14 @@ pub async fn serve(
         match addr_str.parse::<std::net::SocketAddr>() {
             Ok(addr) => {
                 let metrics_db = db.clone();
+                let metrics_local_agents = registry.len() as u64;
                 tokio::spawn(async move {
                     if let Err(e) = crate::observability::serve(
                         addr,
                         metrics_db,
                         started,
                         env!("CARGO_PKG_VERSION"),
+                        metrics_local_agents,
                     )
                     .await
                     {
