@@ -229,6 +229,11 @@ pub struct PendingConfirmation {
     pub id: String,
     pub requested_at: Timestamp,
     pub actor: AgentId,
+    /// Locally-hosted agent the held envelope was addressed to.
+    /// Multi-tenant isolation: list/accept/reject all gate on
+    /// `caller == recipient` so distinct hosted agents have
+    /// independent confirmation queues.
+    pub recipient: AgentId,
     pub intent: HoldedIntent,
     pub sensitivity: String,
     pub trust_level: TrustLevel,
@@ -244,6 +249,8 @@ pub struct PendingConfirmation {
 pub struct HoldRequest<'a> {
     pub envelope_id: &'a MessageId,
     pub actor: &'a AgentId,
+    /// Locally-hosted agent the envelope was addressed to (`envelope.to.id`).
+    pub recipient: &'a AgentId,
     pub intent: HoldedIntent,
     pub sensitivity: &'a str,
     pub trust_level: TrustLevel,
@@ -260,8 +267,13 @@ pub trait ConfirmationRepository: Send + Sync + std::fmt::Debug {
     async fn enqueue(&self, req: HoldRequest<'_>) -> Result<Option<String>>;
 
     /// `after_id` is a ULID cursor — only rows with `id > after_id`.
+    /// `recipient = Some(...)` filters to one locally-hosted agent's
+    /// queue (the multi-tenant isolation surface used by every IPC
+    /// path); `None` returns the host-wide queue (used by janitor /
+    /// `hermod doctor` + diagnostic tooling that cuts across agents).
     async fn list_pending(
         &self,
+        recipient: Option<&AgentId>,
         limit: u32,
         after_id: Option<&str>,
     ) -> Result<Vec<PendingConfirmation>>;

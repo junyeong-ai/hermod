@@ -67,6 +67,12 @@ impl ConfirmationService {
         &self,
         params: ConfirmationListParams,
     ) -> Result<ConfirmationListResult, ServiceError> {
+        // Per-agent isolation: only the recipient's own confirmation
+        // queue is visible to a given IPC caller. Without this filter
+        // bearer A could enumerate (and accept!) bearer B's held
+        // envelopes — a privilege escalation in multi-tenant
+        // deployments.
+        let caller = self.caller()?;
         let limit = params
             .limit
             .unwrap_or(DEFAULT_LIST_LIMIT)
@@ -74,7 +80,7 @@ impl ConfirmationService {
         let rows = self
             .db
             .confirmations()
-            .list_pending(limit, params.after_id.as_deref())
+            .list_pending(Some(&caller), limit, params.after_id.as_deref())
             .await?;
         let mut sender_cache: std::collections::HashMap<
             hermod_core::AgentId,
@@ -119,6 +125,13 @@ impl ConfirmationService {
             .get(&params.confirmation_id)
             .await?
             .ok_or(ServiceError::NotFound)?;
+        // Multi-tenant isolation: the caller must be the held
+        // envelope's recipient. NotFound (not Unauthorized) so
+        // we don't leak the existence of another agent's queued
+        // items.
+        if row.recipient != caller {
+            return Err(ServiceError::NotFound);
+        }
         if row.status != ConfirmationStatus::Pending {
             return Err(ServiceError::InvalidParam(format!(
                 "confirmation {} is already {}",
@@ -187,6 +200,9 @@ impl ConfirmationService {
             .get(&params.confirmation_id)
             .await?
             .ok_or(ServiceError::NotFound)?;
+        if row.recipient != caller {
+            return Err(ServiceError::NotFound);
+        }
         if row.status != ConfirmationStatus::Pending {
             return Err(ServiceError::InvalidParam(format!(
                 "confirmation {} is already {}",

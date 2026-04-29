@@ -199,6 +199,7 @@ CREATE TABLE pending_confirmations (
     envelope_id   TEXT NOT NULL,
     requested_at  BIGINT NOT NULL,
     actor         TEXT NOT NULL,
+    recipient     TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     intent        TEXT NOT NULL,
     sensitivity   TEXT NOT NULL
                   CHECK (sensitivity IN ('routine','review','sensitive')),
@@ -213,6 +214,8 @@ CREATE TABLE pending_confirmations (
 );
 CREATE INDEX idx_pending_confirmations_status
     ON pending_confirmations(status, requested_at);
+CREATE INDEX idx_pending_confirmations_recipient
+    ON pending_confirmations(recipient, status, requested_at);
 CREATE UNIQUE INDEX idx_pending_confirmations_envelope_pending
     ON pending_confirmations(envelope_id) WHERE status = 'pending';
 

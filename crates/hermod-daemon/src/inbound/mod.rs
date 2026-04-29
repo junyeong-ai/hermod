@@ -340,6 +340,7 @@ impl InboundProcessor {
                     .enqueue(hermod_storage::HoldRequest {
                         envelope_id: &envelope.id,
                         actor: &envelope.from.id,
+                        recipient: &envelope.to.id,
                         intent: intent_for(envelope),
                         sensitivity: sensitivity.as_str(),
                         trust_level: trust,

@@ -50,15 +50,16 @@ impl SqliteConfirmationRepository {
         let res = sqlx::query(
             r#"
             INSERT OR IGNORE INTO pending_confirmations
-              (id, envelope_id, requested_at, actor, intent, sensitivity,
-               trust_level, summary, envelope_cbor, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+              (id, envelope_id, requested_at, actor, recipient, intent,
+               sensitivity, trust_level, summary, envelope_cbor, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
             "#,
         )
         .bind(id)
         .bind(req.envelope_id.to_string())
         .bind(now.unix_ms())
         .bind(req.actor.as_str())
+        .bind(req.recipient.as_str())
         .bind(req.intent.as_str())
         .bind(req.sensitivity)
         .bind(req.trust_level.as_str())
@@ -97,24 +98,34 @@ impl ConfirmationRepository for SqliteConfirmationRepository {
 
     async fn list_pending(
         &self,
+        recipient: Option<&AgentId>,
         limit: u32,
         after_id: Option<&str>,
     ) -> Result<Vec<PendingConfirmation>> {
+        let recipient_filter = if recipient.is_some() {
+            " AND recipient = ? "
+        } else {
+            ""
+        };
         let cursor_filter = if after_id.is_some() {
             " AND id > ? "
         } else {
             ""
         };
         let sql = format!(
-            r#"SELECT id, requested_at, actor, intent, sensitivity, trust_level,
+            r#"SELECT id, requested_at, actor, recipient, intent, sensitivity, trust_level,
                       summary, envelope_cbor, status, decided_at, decided_by
                FROM pending_confirmations
                WHERE status = 'pending'
+               {recipient_filter}
                {cursor_filter}
                ORDER BY id ASC
                LIMIT ?"#
         );
         let mut q = sqlx::query(&sql);
+        if let Some(r) = recipient {
+            q = q.bind(r.as_str());
+        }
         if let Some(after) = after_id {
             q = q.bind(after);
         }
@@ -125,7 +136,7 @@ impl ConfirmationRepository for SqliteConfirmationRepository {
 
     async fn get(&self, id: &str) -> Result<Option<PendingConfirmation>> {
         let row = sqlx::query(
-            r#"SELECT id, requested_at, actor, intent, sensitivity, trust_level,
+            r#"SELECT id, requested_at, actor, recipient, intent, sensitivity, trust_level,
                       summary, envelope_cbor, status, decided_at, decided_by
                FROM pending_confirmations
                WHERE id = ?"#,
@@ -177,6 +188,8 @@ fn row_to_pending(row: sqlx::sqlite::SqliteRow) -> Result<PendingConfirmation> {
         Timestamp::from_unix_ms(row.try_get("requested_at")?).map_err(StorageError::Core)?;
     let actor_str: String = row.try_get("actor")?;
     let actor = AgentId::from_str(&actor_str).map_err(StorageError::Core)?;
+    let recipient_str: String = row.try_get("recipient")?;
+    let recipient = AgentId::from_str(&recipient_str).map_err(StorageError::Core)?;
     let intent_s: String = row.try_get("intent")?;
     let intent =
         crate::HoldedIntent::from_str(&intent_s).map_err(crate::error::StorageError::Core)?;
@@ -201,6 +214,7 @@ fn row_to_pending(row: sqlx::sqlite::SqliteRow) -> Result<PendingConfirmation> {
         id,
         requested_at,
         actor,
+        recipient,
         intent,
         sensitivity,
         trust_level,
@@ -238,29 +252,33 @@ mod tests {
     async fn duplicate_pending_envelope_dedupes() {
         let db = fresh_db().await;
         let actor = hermod_crypto::agent_id_from_pubkey(&PubkeyBytes([1u8; 32]));
+        let recipient = hermod_crypto::agent_id_from_pubkey(&PubkeyBytes([2u8; 32]));
         let now = Timestamp::now();
-        db.agents()
-            .upsert(&AgentRecord {
-                id: actor.clone(),
-                pubkey: PubkeyBytes([1u8; 32]),
-                host_pubkey: None,
-                endpoint: None,
-                local_alias: None,
-                peer_asserted_alias: None,
-                trust_level: TrustLevel::Tofu,
-                tls_fingerprint: None,
-                reputation: 0,
-                first_seen: now,
-                last_seen: Some(now),
-            })
-            .await
-            .unwrap();
+        for (id, pk) in &[(&actor, [1u8; 32]), (&recipient, [2u8; 32])] {
+            db.agents()
+                .upsert(&AgentRecord {
+                    id: (*id).clone(),
+                    pubkey: PubkeyBytes(*pk),
+                    host_pubkey: None,
+                    endpoint: None,
+                    local_alias: None,
+                    peer_asserted_alias: None,
+                    trust_level: TrustLevel::Tofu,
+                    tls_fingerprint: None,
+                    reputation: 0,
+                    first_seen: now,
+                    last_seen: Some(now),
+                })
+                .await
+                .unwrap();
+        }
 
         let env_id = MessageId::new();
 
         let req = |summary: &'static str| HoldRequest {
             envelope_id: &env_id,
             actor: &actor,
+            recipient: &recipient,
             intent: crate::HoldedIntent::DirectMessage,
             sensitivity: "review",
             trust_level: TrustLevel::Tofu,
@@ -272,8 +290,31 @@ mod tests {
         assert!(first.is_some(), "first call must insert");
         assert!(second.is_none(), "duplicate must dedupe to None");
 
-        let pending = db.confirmations().list_pending(10, None).await.unwrap();
+        let pending = db
+            .confirmations()
+            .list_pending(None, 10, None)
+            .await
+            .unwrap();
         assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].recipient, recipient);
+
+        // Per-agent isolation: a different recipient sees an empty queue.
+        let other = hermod_crypto::agent_id_from_pubkey(&PubkeyBytes([3u8; 32]));
+        let scoped = db
+            .confirmations()
+            .list_pending(Some(&other), 10, None)
+            .await
+            .unwrap();
+        assert!(
+            scoped.is_empty(),
+            "list_pending must filter by recipient when scoped",
+        );
+        let scoped_self = db
+            .confirmations()
+            .list_pending(Some(&recipient), 10, None)
+            .await
+            .unwrap();
+        assert_eq!(scoped_self.len(), 1);
 
         db.confirmations()
             .decide(

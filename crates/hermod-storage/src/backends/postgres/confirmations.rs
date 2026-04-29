@@ -64,9 +64,9 @@ impl PostgresConfirmationRepository {
         let inserted = sqlx::query_scalar::<_, String>(
             r#"
             INSERT INTO pending_confirmations
-              (id, envelope_id, requested_at, actor, intent, sensitivity,
-               trust_level, summary, envelope_cbor, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending')
+              (id, envelope_id, requested_at, actor, recipient, intent,
+               sensitivity, trust_level, summary, envelope_cbor, status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending')
             ON CONFLICT (envelope_id) WHERE status = 'pending'
             DO NOTHING
             RETURNING id
@@ -76,6 +76,7 @@ impl PostgresConfirmationRepository {
         .bind(req.envelope_id.to_string())
         .bind(now.unix_ms())
         .bind(req.actor.as_str())
+        .bind(req.recipient.as_str())
         .bind(req.intent.as_str())
         .bind(req.sensitivity)
         .bind(req.trust_level.as_str())
@@ -109,46 +110,46 @@ impl ConfirmationRepository for PostgresConfirmationRepository {
 
     async fn list_pending(
         &self,
+        recipient: Option<&AgentId>,
         limit: u32,
         after_id: Option<&str>,
     ) -> Result<Vec<PendingConfirmation>> {
-        // Two SQL forms because the parameter index of LIMIT differs
-        // depending on whether the cursor filter is present.
-        let rows = match after_id {
-            Some(after) => {
-                sqlx::query(
-                    r#"SELECT id, requested_at, actor, intent, sensitivity, trust_level,
-                              summary, envelope_cbor, status, decided_at, decided_by
-                       FROM pending_confirmations
-                       WHERE status = 'pending' AND id > $1
-                       ORDER BY id ASC
-                       LIMIT $2"#,
-                )
-                .bind(after)
-                .bind(limit as i64)
-                .fetch_all(&self.pool)
-                .await?
-            }
-            None => {
-                sqlx::query(
-                    r#"SELECT id, requested_at, actor, intent, sensitivity, trust_level,
-                              summary, envelope_cbor, status, decided_at, decided_by
-                       FROM pending_confirmations
-                       WHERE status = 'pending'
-                       ORDER BY id ASC
-                       LIMIT $1"#,
-                )
-                .bind(limit as i64)
-                .fetch_all(&self.pool)
-                .await?
-            }
-        };
+        // Build the WHERE + parameter list dynamically since we
+        // have two optional filters (recipient, after_id) and
+        // postgres `$N` placeholders are positional.
+        let mut sql = String::from(
+            "SELECT id, requested_at, actor, recipient, intent, sensitivity, trust_level, \
+                    summary, envelope_cbor, status, decided_at, decided_by \
+             FROM pending_confirmations \
+             WHERE status = 'pending'",
+        );
+        let mut idx: u32 = 0;
+        if recipient.is_some() {
+            idx += 1;
+            sql.push_str(&format!(" AND recipient = ${idx}"));
+        }
+        if after_id.is_some() {
+            idx += 1;
+            sql.push_str(&format!(" AND id > ${idx}"));
+        }
+        idx += 1;
+        sql.push_str(&format!(" ORDER BY id ASC LIMIT ${idx}"));
+
+        let mut q = sqlx::query(&sql);
+        if let Some(r) = recipient {
+            q = q.bind(r.as_str());
+        }
+        if let Some(after) = after_id {
+            q = q.bind(after);
+        }
+        q = q.bind(limit as i64);
+        let rows = q.fetch_all(&self.pool).await?;
         rows.into_iter().map(row_to_pending).collect()
     }
 
     async fn get(&self, id: &str) -> Result<Option<PendingConfirmation>> {
         let row = sqlx::query(
-            r#"SELECT id, requested_at, actor, intent, sensitivity, trust_level,
+            r#"SELECT id, requested_at, actor, recipient, intent, sensitivity, trust_level,
                       summary, envelope_cbor, status, decided_at, decided_by
                FROM pending_confirmations
                WHERE id = $1"#,
@@ -200,6 +201,8 @@ fn row_to_pending(row: sqlx::postgres::PgRow) -> Result<PendingConfirmation> {
         Timestamp::from_unix_ms(row.try_get("requested_at")?).map_err(StorageError::Core)?;
     let actor_str: String = row.try_get("actor")?;
     let actor = AgentId::from_str(&actor_str).map_err(StorageError::Core)?;
+    let recipient_str: String = row.try_get("recipient")?;
+    let recipient = AgentId::from_str(&recipient_str).map_err(StorageError::Core)?;
     let intent_s: String = row.try_get("intent")?;
     let intent =
         crate::HoldedIntent::from_str(&intent_s).map_err(crate::error::StorageError::Core)?;
@@ -224,6 +227,7 @@ fn row_to_pending(row: sqlx::postgres::PgRow) -> Result<PendingConfirmation> {
         id,
         requested_at,
         actor,
+        recipient,
         intent,
         sensitivity,
         trust_level,

@@ -129,6 +129,14 @@ struct OpenRequest {
     requested_at: Timestamp,
     expires_at: Timestamp,
     origin: PromptOrigin,
+    /// Locally-hosted agent that owns this prompt. For `Local` origin
+    /// it's the IPC caller who opened the request (their MCP /
+    /// `permission.request`). For `Relayed` origin it's the local
+    /// agent the federated `PermissionPrompt` envelope was addressed
+    /// to (`envelope.to.id`). Multi-tenant isolation: list / respond
+    /// gate on caller == owner so distinct hosted agents have
+    /// independent permission queues.
+    owner: AgentId,
 }
 
 impl OpenRequest {
@@ -150,6 +158,10 @@ struct ResolvedEntry {
     request_id: String,
     outcome: PermissionOutcome,
     resolved_at: Timestamp,
+    /// Owner agent_id at resolve time. `list_resolved` filters by
+    /// caller for the same multi-tenant isolation reason as
+    /// `OpenRequest.owner`.
+    owner: AgentId,
 }
 
 impl ResolvedEntry {
@@ -189,18 +201,30 @@ impl State {
             }
         });
         for req in &expired {
-            self.push_resolved(req.request_id.clone(), PermissionOutcome::Expired, now);
+            self.push_resolved(
+                req.request_id.clone(),
+                PermissionOutcome::Expired,
+                now,
+                req.owner.clone(),
+            );
         }
         expired
     }
 
-    fn push_resolved(&mut self, request_id: String, outcome: PermissionOutcome, at: Timestamp) {
+    fn push_resolved(
+        &mut self,
+        request_id: String,
+        outcome: PermissionOutcome,
+        at: Timestamp,
+        owner: AgentId,
+    ) {
         self.next_seq = self.next_seq.saturating_add(1);
         let entry = ResolvedEntry {
             seq: self.next_seq,
             request_id,
             outcome,
             resolved_at: at,
+            owner,
         };
         self.resolved.push_back(entry);
         while self.resolved.len() > RESOLVED_RING_CAP {
@@ -280,6 +304,15 @@ impl PermissionService {
         &self,
         params: PermissionRequestParams,
     ) -> Result<PermissionRequestResult, ServiceError> {
+        // Capture the IPC caller as the prompt's owner. Subsequent
+        // `permission.list` / `respond` calls must come from the
+        // same agent — that's the multi-tenant isolation guarantee.
+        let owner = crate::audit_context::current_caller_agent().ok_or_else(|| {
+            ServiceError::InvalidParam(
+                "permission.request requires an IPC caller scope (no caller_agent in context)"
+                    .into(),
+            )
+        })?;
         let now = Timestamp::now();
         let expires_at = now.offset_by_ms(self.ttl.as_millis() as i64);
 
@@ -311,6 +344,7 @@ impl PermissionService {
                     requested_at: now,
                     expires_at,
                     origin: PromptOrigin::Local,
+                    owner: owner.clone(),
                 },
             );
             (id, expired)
@@ -435,12 +469,12 @@ impl PermissionService {
             let mut state = self.state.lock().await;
             let _ = state.purge_expired(now);
             let removed = state.by_id.remove(&request_id);
-            if removed.is_some() {
+            if let Some(req) = &removed {
                 let outcome = match behavior {
                     PermissionBehavior::Allow => PermissionOutcome::Allow,
                     PermissionBehavior::Deny => PermissionOutcome::Deny,
                 };
-                state.push_resolved(request_id.clone(), outcome, now);
+                state.push_resolved(request_id.clone(), outcome, now, req.owner.clone());
             }
             removed
         };
@@ -478,9 +512,11 @@ impl PermissionService {
     /// envelope addressed to `from`. The originator's `request_id`
     /// is used verbatim — the operator's CLI matches against it
     /// regardless of which side originated the prompt.
+    #[allow(clippy::too_many_arguments)]
     pub async fn receive_relayed(
         &self,
         from: AgentId,
+        recipient: AgentId,
         request_id: String,
         tool_name: String,
         description: String,
@@ -517,6 +553,7 @@ impl PermissionService {
                 requested_at: now,
                 expires_at,
                 origin: PromptOrigin::Relayed { from },
+                owner: recipient,
             },
         );
         Ok(())
@@ -541,18 +578,39 @@ impl PermissionService {
                 short_id::LEN
             )));
         }
+        let caller = crate::audit_context::current_caller_agent().ok_or_else(|| {
+            ServiceError::InvalidParam(
+                "permission.respond requires an IPC caller scope (no caller_agent in context)"
+                    .into(),
+            )
+        })?;
 
         let now = Timestamp::now();
         let (removed, expired) = {
             let mut state = self.state.lock().await;
             let expired = state.purge_expired(now);
-            let removed = state.by_id.remove(&params.request_id);
-            if removed.is_some() {
+            // Multi-tenant isolation: only the prompt's owner can
+            // answer it. Peek before remove; if the caller doesn't
+            // match, leave the prompt in place and report
+            // `matched=false` (same shape as "already answered" so
+            // we don't leak the existence of another agent's
+            // prompts).
+            let owner_match = state
+                .by_id
+                .get(&params.request_id)
+                .map(|r| r.owner == caller)
+                .unwrap_or(false);
+            let removed = if owner_match {
+                state.by_id.remove(&params.request_id)
+            } else {
+                None
+            };
+            if let Some(req) = &removed {
                 let outcome = match params.behavior {
                     PermissionBehavior::Allow => PermissionOutcome::Allow,
                     PermissionBehavior::Deny => PermissionOutcome::Deny,
                 };
-                state.push_resolved(params.request_id.clone(), outcome, now);
+                state.push_resolved(params.request_id.clone(), outcome, now, req.owner.clone());
             }
             (removed, expired)
         };
@@ -631,6 +689,12 @@ impl PermissionService {
         &self,
         params: PermissionListResolvedParams,
     ) -> Result<PermissionListResolvedResult, ServiceError> {
+        let caller = crate::audit_context::current_caller_agent().ok_or_else(|| {
+            ServiceError::InvalidParam(
+                "permission.list_resolved requires an IPC caller scope (no caller_agent in context)"
+                    .into(),
+            )
+        })?;
         let now = Timestamp::now();
         let after = params.after_seq.unwrap_or(0);
         let cap = params.limit.unwrap_or(256) as usize;
@@ -640,10 +704,13 @@ impl PermissionService {
             // Materialise expirations first so the cursor sees them in order.
             let expired = state.purge_expired(now);
 
+            // Per-agent isolation: only entries owned by the caller
+            // are visible. Without this, agent A's MCP cursor would
+            // observe agent B's verdicts.
             let resolved: Vec<PermissionResolvedView> = state
                 .resolved
                 .iter()
-                .filter(|e| e.seq > after)
+                .filter(|e| e.seq > after && e.owner == caller)
                 .take(cap)
                 .map(ResolvedEntry::view)
                 .collect();
@@ -671,12 +738,22 @@ impl PermissionService {
         &self,
         params: PermissionListParams,
     ) -> Result<PermissionListResult, ServiceError> {
+        let caller = crate::audit_context::current_caller_agent().ok_or_else(|| {
+            ServiceError::InvalidParam(
+                "permission.list requires an IPC caller scope (no caller_agent in context)".into(),
+            )
+        })?;
         let now = Timestamp::now();
         let (requests, expired) = {
             let mut state = self.state.lock().await;
             let expired = state.purge_expired(now);
-            let mut requests: Vec<PermissionRequestView> =
-                state.by_id.values().map(OpenRequest::view).collect();
+            // Per-agent isolation: filter to the caller's own queue.
+            let mut requests: Vec<PermissionRequestView> = state
+                .by_id
+                .values()
+                .filter(|r| r.owner == caller)
+                .map(OpenRequest::view)
+                .collect();
             // Stable, oldest-first ordering — operators triage in arrival order.
             requests.sort_by_key(|r| r.requested_at.unix_ms());
             if let Some(n) = params.limit {
@@ -723,6 +800,7 @@ mod tests {
     async fn make_service() -> (
         PermissionService,
         std::sync::Arc<dyn hermod_storage::Database>,
+        AgentId,
     ) {
         let mut p = std::env::temp_dir();
         p.push(format!("hermod-permission-{}.sqlite", ulid::Ulid::new()));
@@ -740,7 +818,22 @@ mod tests {
         .unwrap();
         let audit_sink: std::sync::Arc<dyn hermod_storage::AuditSink> =
             std::sync::Arc::new(hermod_storage::StorageAuditSink::new(db.clone()));
-        (PermissionService::new(audit_sink, self_id), db)
+        (
+            PermissionService::new(audit_sink, self_id.clone()),
+            db,
+            self_id,
+        )
+    }
+
+    /// Run `fut` inside a `CALLER_AGENT` task-local scope so service
+    /// methods that resolve the IPC caller (request / respond / list)
+    /// see `caller`. Mirrors what `ipc_remote::handshake_and_serve`
+    /// does in production.
+    async fn with_caller<F, T>(caller: AgentId, fut: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        crate::audit_context::with_caller_agent(Some(caller), fut).await
     }
 
     fn req_params(tool: &str) -> PermissionRequestParams {
@@ -753,253 +846,336 @@ mod tests {
 
     #[tokio::test]
     async fn request_returns_short_id_in_alphabet() {
-        let (svc, _db) = make_service().await;
-        for _ in 0..50 {
-            let r = svc.request(req_params("Bash")).await.unwrap();
-            assert!(
-                short_id::is_valid(&r.request_id),
-                "bad id: {}",
-                r.request_id
-            );
-        }
+        let (svc, _db, caller) = make_service().await;
+        with_caller(caller, async move {
+            for _ in 0..50 {
+                let r = svc.request(req_params("Bash")).await.unwrap();
+                assert!(
+                    short_id::is_valid(&r.request_id),
+                    "bad id: {}",
+                    r.request_id
+                );
+            }
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn respond_is_idempotent() {
-        let (svc, _db) = make_service().await;
-        let r = svc.request(req_params("Write")).await.unwrap();
+        let (svc, _db, caller) = make_service().await;
+        with_caller(caller, async move {
+            let r = svc.request(req_params("Write")).await.unwrap();
 
-        let first = svc
-            .respond(PermissionRespondParams {
-                request_id: r.request_id.clone(),
-                behavior: PermissionBehavior::Allow,
-            })
-            .await
-            .unwrap();
-        assert!(first.matched);
+            let first = svc
+                .respond(PermissionRespondParams {
+                    request_id: r.request_id.clone(),
+                    behavior: PermissionBehavior::Allow,
+                })
+                .await
+                .unwrap();
+            assert!(first.matched);
 
-        let second = svc
-            .respond(PermissionRespondParams {
-                request_id: r.request_id,
-                behavior: PermissionBehavior::Allow,
-            })
-            .await
-            .unwrap();
-        assert!(!second.matched, "second respond must be a no-op");
+            let second = svc
+                .respond(PermissionRespondParams {
+                    request_id: r.request_id,
+                    behavior: PermissionBehavior::Allow,
+                })
+                .await
+                .unwrap();
+            assert!(!second.matched, "second respond must be a no-op");
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn respond_unknown_id_is_no_op() {
-        let (svc, _db) = make_service().await;
-        // Use an id in the alphabet but never issued.
-        let res = svc
-            .respond(PermissionRespondParams {
-                request_id: "abcde".into(),
-                behavior: PermissionBehavior::Deny,
-            })
-            .await
-            .unwrap();
-        assert!(!res.matched);
+        let (svc, _db, caller) = make_service().await;
+        with_caller(caller, async move {
+            let res = svc
+                .respond(PermissionRespondParams {
+                    request_id: "abcde".into(),
+                    behavior: PermissionBehavior::Deny,
+                })
+                .await
+                .unwrap();
+            assert!(!res.matched);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn respond_rejects_invalid_id() {
-        let (svc, _db) = make_service().await;
-        let err = svc
-            .respond(PermissionRespondParams {
-                request_id: "ablde".into(), // contains forbidden `l`
-                behavior: PermissionBehavior::Allow,
-            })
-            .await
-            .unwrap_err();
-        assert!(matches!(err, ServiceError::InvalidParam(_)));
+        let (svc, _db, caller) = make_service().await;
+        with_caller(caller, async move {
+            let err = svc
+                .respond(PermissionRespondParams {
+                    request_id: "ablde".into(), // contains forbidden `l`
+                    behavior: PermissionBehavior::Allow,
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(err, ServiceError::InvalidParam(_)));
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn list_orders_oldest_first_and_honours_limit() {
-        let (svc, _db) = make_service().await;
-        let _r1 = svc.request(req_params("Bash")).await.unwrap();
-        let _r2 = svc.request(req_params("Write")).await.unwrap();
-        let _r3 = svc.request(req_params("Edit")).await.unwrap();
+        let (svc, _db, caller) = make_service().await;
+        with_caller(caller, async move {
+            let _r1 = svc.request(req_params("Bash")).await.unwrap();
+            let _r2 = svc.request(req_params("Write")).await.unwrap();
+            let _r3 = svc.request(req_params("Edit")).await.unwrap();
 
-        let res = svc
-            .list(PermissionListParams { limit: Some(2) })
-            .await
-            .unwrap();
-        assert_eq!(res.requests.len(), 2);
-        // Oldest first.
-        assert!(res.requests[0].requested_at.unix_ms() <= res.requests[1].requested_at.unix_ms());
+            let res = svc
+                .list(PermissionListParams { limit: Some(2) })
+                .await
+                .unwrap();
+            assert_eq!(res.requests.len(), 2);
+            assert!(
+                res.requests[0].requested_at.unix_ms() <= res.requests[1].requested_at.unix_ms()
+            );
+        })
+        .await;
+    }
+
+    /// Per-agent isolation: agent B's `permission.list` must NOT see
+    /// agent A's open prompts. Same for `respond` — B can't decide
+    /// on A's prompt (gets `matched=false`).
+    #[tokio::test]
+    async fn list_isolates_each_caller_to_its_own_queue() {
+        let (svc, _db, caller_a) = make_service().await;
+        let caller_b = hermod_crypto::Keypair::generate().agent_id();
+
+        // A opens a prompt.
+        let r_a = with_caller(caller_a.clone(), {
+            let svc = svc.clone();
+            async move { svc.request(req_params("Bash")).await.unwrap() }
+        })
+        .await;
+
+        // B's list is empty.
+        let b_view = with_caller(caller_b.clone(), {
+            let svc = svc.clone();
+            async move {
+                svc.list(PermissionListParams { limit: None })
+                    .await
+                    .unwrap()
+            }
+        })
+        .await;
+        assert!(
+            b_view.requests.is_empty(),
+            "B must not see A's prompts; got {:?}",
+            b_view.requests,
+        );
+
+        // B respond is a no-op (matched=false), without leaking that
+        // the prompt exists for someone else.
+        let b_resp = with_caller(caller_b, {
+            let svc = svc.clone();
+            let id = r_a.request_id.clone();
+            async move {
+                svc.respond(PermissionRespondParams {
+                    request_id: id,
+                    behavior: PermissionBehavior::Allow,
+                })
+                .await
+                .unwrap()
+            }
+        })
+        .await;
+        assert!(!b_resp.matched, "B must not be able to answer A's prompt");
+
+        // A's prompt is still pending after B's failed respond.
+        let a_view = with_caller(caller_a, async move {
+            svc.list(PermissionListParams { limit: None })
+                .await
+                .unwrap()
+        })
+        .await;
+        assert_eq!(a_view.requests.len(), 1);
+        assert_eq!(a_view.requests[0].request_id, r_a.request_id);
     }
 
     #[tokio::test]
     async fn cap_blocks_excess_requests() {
-        let (svc, _db) = make_service().await;
-        // Force the state into the cap and verify a fresh request is refused.
-        {
-            let mut state = svc.state.lock().await;
-            for i in 0..MAX_OPEN {
-                let id = format!("{:0>5}", i);
-                state.by_id.insert(
-                    id.clone(),
-                    OpenRequest {
-                        request_id: id.clone(),
-                        tool_name: "Bash".into(),
-                        description: String::new(),
-                        input_preview: String::new(),
-                        requested_at: Timestamp::now(),
-                        expires_at: Timestamp::now().offset_by_ms(60_000),
-                        origin: PromptOrigin::Local,
-                    },
-                );
+        let (svc, _db, caller) = make_service().await;
+        let owner = caller.clone();
+        with_caller(caller, async move {
+            // Force the state into the cap and verify a fresh request is refused.
+            {
+                let mut state = svc.state.lock().await;
+                for i in 0..MAX_OPEN {
+                    let id = format!("{:0>5}", i);
+                    state.by_id.insert(
+                        id.clone(),
+                        OpenRequest {
+                            request_id: id.clone(),
+                            tool_name: "Bash".into(),
+                            description: String::new(),
+                            input_preview: String::new(),
+                            requested_at: Timestamp::now(),
+                            expires_at: Timestamp::now().offset_by_ms(60_000),
+                            origin: PromptOrigin::Local,
+                            owner: owner.clone(),
+                        },
+                    );
+                }
             }
-        }
-        let err = svc.request(req_params("Bash")).await.unwrap_err();
-        assert!(matches!(err, ServiceError::InvalidParam(_)));
+            let err = svc.request(req_params("Bash")).await.unwrap_err();
+            assert!(matches!(err, ServiceError::InvalidParam(_)));
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn list_resolved_emits_allow_then_deny_in_seq_order() {
         use hermod_protocol::ipc::methods::PermissionListResolvedParams;
 
-        let (svc, _db) = make_service().await;
-        let r1 = svc.request(req_params("Bash")).await.unwrap();
-        let r2 = svc.request(req_params("Write")).await.unwrap();
+        let (svc, _db, caller) = make_service().await;
+        with_caller(caller, async move {
+            let r1 = svc.request(req_params("Bash")).await.unwrap();
+            let r2 = svc.request(req_params("Write")).await.unwrap();
 
-        svc.respond(PermissionRespondParams {
-            request_id: r1.request_id.clone(),
-            behavior: PermissionBehavior::Allow,
-        })
-        .await
-        .unwrap();
-        svc.respond(PermissionRespondParams {
-            request_id: r2.request_id.clone(),
-            behavior: PermissionBehavior::Deny,
-        })
-        .await
-        .unwrap();
-
-        let res = svc
-            .list_resolved(PermissionListResolvedParams::default())
-            .await
-            .unwrap();
-        assert_eq!(res.resolved.len(), 2);
-        assert!(res.resolved[0].seq < res.resolved[1].seq, "monotonic seq");
-        assert_eq!(res.resolved[0].outcome, PermissionOutcome::Allow);
-        assert_eq!(res.resolved[1].outcome, PermissionOutcome::Deny);
-
-        // Cursor advances correctly.
-        let after = res.resolved[0].seq;
-        let next = svc
-            .list_resolved(PermissionListResolvedParams {
-                after_seq: Some(after),
-                limit: None,
+            svc.respond(PermissionRespondParams {
+                request_id: r1.request_id.clone(),
+                behavior: PermissionBehavior::Allow,
             })
             .await
             .unwrap();
-        assert_eq!(next.resolved.len(), 1);
-        assert_eq!(next.resolved[0].outcome, PermissionOutcome::Deny);
+            svc.respond(PermissionRespondParams {
+                request_id: r2.request_id.clone(),
+                behavior: PermissionBehavior::Deny,
+            })
+            .await
+            .unwrap();
+
+            let res = svc
+                .list_resolved(PermissionListResolvedParams::default())
+                .await
+                .unwrap();
+            assert_eq!(res.resolved.len(), 2);
+            assert!(res.resolved[0].seq < res.resolved[1].seq, "monotonic seq");
+            assert_eq!(res.resolved[0].outcome, PermissionOutcome::Allow);
+            assert_eq!(res.resolved[1].outcome, PermissionOutcome::Deny);
+
+            let after = res.resolved[0].seq;
+            let next = svc
+                .list_resolved(PermissionListResolvedParams {
+                    after_seq: Some(after),
+                    limit: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(next.resolved.len(), 1);
+            assert_eq!(next.resolved[0].outcome, PermissionOutcome::Deny);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn purge_expired_records_expiry_in_resolved_feed() {
         use hermod_protocol::ipc::methods::PermissionListResolvedParams;
 
-        let (svc, _db) = make_service().await;
-        // Inject an entry that's already past its expiry.
-        {
-            let mut state = svc.state.lock().await;
-            let id = "aabba".to_string();
-            state.by_id.insert(
-                id.clone(),
-                OpenRequest {
-                    request_id: id,
-                    tool_name: "Bash".into(),
-                    description: String::new(),
-                    input_preview: String::new(),
-                    requested_at: Timestamp::now().offset_by_ms(-120_000),
-                    expires_at: Timestamp::now().offset_by_ms(-60_000),
-                    origin: PromptOrigin::Local,
-                },
-            );
-        }
+        let (svc, _db, caller) = make_service().await;
+        let owner = caller.clone();
+        with_caller(caller, async move {
+            // Inject an entry that's already past its expiry.
+            {
+                let mut state = svc.state.lock().await;
+                let id = "aabba".to_string();
+                state.by_id.insert(
+                    id.clone(),
+                    OpenRequest {
+                        request_id: id,
+                        tool_name: "Bash".into(),
+                        description: String::new(),
+                        input_preview: String::new(),
+                        requested_at: Timestamp::now().offset_by_ms(-120_000),
+                        expires_at: Timestamp::now().offset_by_ms(-60_000),
+                        origin: PromptOrigin::Local,
+                        owner: owner.clone(),
+                    },
+                );
+            }
 
-        // Calling list_resolved triggers purge.
-        let res = svc
-            .list_resolved(PermissionListResolvedParams::default())
-            .await
-            .unwrap();
-        assert_eq!(res.resolved.len(), 1);
-        assert_eq!(res.resolved[0].outcome, PermissionOutcome::Expired);
+            let res = svc
+                .list_resolved(PermissionListResolvedParams::default())
+                .await
+                .unwrap();
+            assert_eq!(res.resolved.len(), 1);
+            assert_eq!(res.resolved[0].outcome, PermissionOutcome::Expired);
+        })
+        .await;
     }
 
-    /// `list_resolved` reports the daemon's current `next_seq` so a cursor
-    /// consumer can detect a monotonic-counter rewind (== daemon
-    /// restart, since the in-memory ring is wiped).
     #[tokio::test]
     async fn list_resolved_reports_daemon_next_seq() {
         use hermod_protocol::ipc::methods::PermissionListResolvedParams;
 
-        let (svc, _db) = make_service().await;
-        let empty = svc
-            .list_resolved(PermissionListResolvedParams::default())
+        let (svc, _db, caller) = make_service().await;
+        with_caller(caller, async move {
+            let empty = svc
+                .list_resolved(PermissionListResolvedParams::default())
+                .await
+                .unwrap();
+            assert_eq!(empty.daemon_next_seq, 1, "fresh daemon: next_seq = 1");
+
+            let r = svc.request(req_params("Bash")).await.unwrap();
+            svc.respond(PermissionRespondParams {
+                request_id: r.request_id,
+                behavior: PermissionBehavior::Allow,
+            })
             .await
             .unwrap();
-        assert_eq!(empty.daemon_next_seq, 1, "fresh daemon: next_seq = 1");
 
-        let r = svc.request(req_params("Bash")).await.unwrap();
-        svc.respond(PermissionRespondParams {
-            request_id: r.request_id,
-            behavior: PermissionBehavior::Allow,
+            let after_one = svc
+                .list_resolved(PermissionListResolvedParams::default())
+                .await
+                .unwrap();
+            assert_eq!(after_one.resolved.len(), 1);
+            assert_eq!(after_one.resolved[0].seq, 1);
+            assert_eq!(after_one.daemon_next_seq, 2);
         })
-        .await
-        .unwrap();
-
-        let after_one = svc
-            .list_resolved(PermissionListResolvedParams::default())
-            .await
-            .unwrap();
-        assert_eq!(after_one.resolved.len(), 1);
-        assert_eq!(after_one.resolved[0].seq, 1);
-        assert_eq!(
-            after_one.daemon_next_seq, 2,
-            "next_seq must be strictly greater than every resolved seq"
-        );
+        .await;
     }
 
-    /// Audit-log evidence: an expiration must produce one
-    /// `permission.expired` row, just like allow/deny produce
-    /// `permission.allow` / `permission.deny`. Otherwise operators can't
-    /// distinguish "operator stalled" from "request silently timed out".
     #[tokio::test]
     async fn expiration_writes_permission_expired_audit_row() {
         use hermod_protocol::ipc::methods::PermissionListResolvedParams;
 
-        let (svc, _db) = make_service().await;
-        // Inject an expired open request.
-        {
-            let mut state = svc.state.lock().await;
-            let id = "aacde".to_string();
-            state.by_id.insert(
-                id.clone(),
-                OpenRequest {
-                    request_id: id,
-                    tool_name: "Bash".into(),
-                    description: "list dir".into(),
-                    input_preview: String::new(),
-                    requested_at: Timestamp::now().offset_by_ms(-600_000),
-                    expires_at: Timestamp::now().offset_by_ms(-1_000),
-                    origin: PromptOrigin::Local,
-                },
-            );
-        }
+        let (svc, db, caller) = make_service().await;
+        let owner = caller.clone();
+        with_caller(caller, {
+            let svc = svc.clone();
+            async move {
+                {
+                    let mut state = svc.state.lock().await;
+                    let id = "aacde".to_string();
+                    state.by_id.insert(
+                        id.clone(),
+                        OpenRequest {
+                            request_id: id,
+                            tool_name: "Bash".into(),
+                            description: "list dir".into(),
+                            input_preview: String::new(),
+                            requested_at: Timestamp::now().offset_by_ms(-600_000),
+                            expires_at: Timestamp::now().offset_by_ms(-1_000),
+                            origin: PromptOrigin::Local,
+                            owner: owner.clone(),
+                        },
+                    );
+                }
+                let _ = svc
+                    .list_resolved(PermissionListResolvedParams::default())
+                    .await
+                    .unwrap();
+            }
+        })
+        .await;
 
-        // Trigger a purge.
-        let _ = svc
-            .list_resolved(PermissionListResolvedParams::default())
-            .await
-            .unwrap();
-
-        let entries = _db
+        let entries = db
             .audit()
             .query(None, Some("permission.expired"), None, 16)
             .await

@@ -32,6 +32,7 @@ impl InboundProcessor {
             && let Err(e) = svc
                 .receive_relayed(
                     envelope.from.id.clone(),
+                    envelope.to.id.clone(),
                     request_id.to_string(),
                     tool_name.to_string(),
                     description.to_string(),

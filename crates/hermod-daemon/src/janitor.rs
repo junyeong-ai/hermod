@@ -425,6 +425,7 @@ mod tests {
             .enqueue(hermod_storage::HoldRequest {
                 envelope_id: &env_id,
                 actor: &agent,
+                recipient: &agent,
                 intent: hermod_storage::HoldedIntent::DirectMessage,
                 sensitivity: "review",
                 trust_level: TrustLevel::Tofu,
