@@ -50,8 +50,8 @@ pub use blobs::GcsBlobStore;
 #[cfg(feature = "s3")]
 pub use blobs::S3BlobStore;
 pub use blobs::{
-    BlobError, BlobStore, LocalFsBlobStore, MemoryBlobStore, bucket,
-    local_files as blob_store_local_files, open as open_blob_store,
+    BlobError, BlobStore, BlobStoreBackend, LocalFsBlobStore, MemoryBlobStore, bucket,
+    classify_blob_dsn, local_files as blob_store_local_files, open as open_blob_store,
 };
 pub use database::{Database, DatabaseBackend, MetricsSnapshot};
 pub use error::{Result, StorageError};
@@ -294,7 +294,21 @@ mod open_database_tests {
             .expect("open succeeds for valid sqlite dsn");
         // Trait method works → connection is real.
         db.ping().await.expect("ping succeeds");
+        // Instance-level backend identification matches the DSN-static
+        // classification — the two answer the same question, one
+        // before construction and one after.
+        assert_eq!(db.backend(), DatabaseBackend::Sqlite);
         db.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn blob_store_backend_methods_self_identify() {
+        let mem = open_blob_store("memory://").await.unwrap();
+        assert_eq!(mem.backend(), BlobStoreBackend::Memory);
+        let dir = tempfile::tempdir().unwrap();
+        let dsn = format!("file://{}", dir.path().display());
+        let local = open_blob_store(&dsn).await.unwrap();
+        assert_eq!(local.backend(), BlobStoreBackend::LocalFs);
     }
 }
 
@@ -329,6 +343,32 @@ mod local_files_tests {
             matches!(err, StorageError::Backend(ref s) if s.contains("unsupported storage scheme")),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn classify_blob_dsn_recognises_every_scheme() {
+        assert_eq!(
+            classify_blob_dsn("file:///var/lib/hermod/blob-store").unwrap(),
+            BlobStoreBackend::LocalFs
+        );
+        assert_eq!(
+            classify_blob_dsn("memory://").unwrap(),
+            BlobStoreBackend::Memory
+        );
+        assert_eq!(
+            classify_blob_dsn("gcs://bucket/prefix").unwrap(),
+            BlobStoreBackend::Gcs
+        );
+        assert_eq!(
+            classify_blob_dsn("s3://bucket/prefix").unwrap(),
+            BlobStoreBackend::S3
+        );
+    }
+
+    #[test]
+    fn classify_blob_dsn_rejects_unknown_scheme() {
+        let err = classify_blob_dsn("ftp://host/path").unwrap_err();
+        assert!(matches!(err, BlobError::Backend(_)), "got {err:?}");
     }
 
     #[test]

@@ -25,23 +25,30 @@ backend = one new arm in `open_database()` + one new module under
 (`gcs`, `s3`) take auth from the SDK's standard env-var chain (ADC,
 AWS credential chain) — DSN never carries secrets.
 
-## Pre-open DSN introspection
+## Backend introspection — symmetric 4-axis
 
-Three companion functions answer "what would this DSN do?" without
-opening a connection — used by the daemon's `home_layout` to derive
-boot-time enforcement and `hermod doctor` audit before storage is
-constructed:
+Each layer (Database, BlobStore) exposes the same four axes so
+"what does this backend do?" has one answer per question regardless
+of layer:
 
-```rust
-hermod_storage::classify_database_dsn(dsn)?;       // -> DatabaseBackend
-hermod_storage::database_local_files(dsn)?;        // -> Vec<LocalFile>
-hermod_storage::blob_store_local_files(dsn)?;      // -> Vec<LocalFile>
-```
+| axis                  | Database                  | BlobStore                  |
+| --------------------- | ------------------------- | -------------------------- |
+| typed enum            | `DatabaseBackend`         | `BlobStoreBackend`         |
+| classify (DSN-static) | `classify_database_dsn`   | `classify_blob_dsn`        |
+| local files (DSN-static) | `database_local_files` | `blob_store_local_files`   |
+| backend (instance)    | `Database::backend()`     | `BlobStore::backend()`     |
+
+`classify_*_dsn` and `*_local_files` answer before construction and
+are used by `home_layout` to derive boot-time enforcement and
+`hermod doctor` audit without opening the backend. `*::backend()`
+answers after construction so callers (metrics labels, doctor
+output, future operator tooling) get a typed identifier without
+downcasting.
 
 A new backend declares its on-disk artefacts in its `*_local_files`
-arm; the daemon's home-layout policy auto-picks them up. Backends
-with no local state (Postgres, GCS, S3, in-memory) return an empty
-Vec.
+arm and self-identifies via `backend()`. Backends with no local
+state (Postgres, GCS, S3, in-memory) return an empty `Vec<LocalFile>`
+from the static path.
 
 ## Trait surface
 

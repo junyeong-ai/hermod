@@ -40,6 +40,10 @@ impl GcsBlobStore {
 
 #[async_trait]
 impl BlobStore for GcsBlobStore {
+    fn backend(&self) -> super::BlobStoreBackend {
+        super::BlobStoreBackend::Gcs
+    }
+
     async fn put(&self, bucket: &str, key: &str, data: &[u8]) -> Result<String, BlobError> {
         self.inner.put(bucket, key, data).await
     }

@@ -40,6 +40,10 @@ impl S3BlobStore {
 
 #[async_trait]
 impl BlobStore for S3BlobStore {
+    fn backend(&self) -> super::BlobStoreBackend {
+        super::BlobStoreBackend::S3
+    }
+
     async fn put(&self, bucket: &str, key: &str, data: &[u8]) -> Result<String, BlobError> {
         self.inner.put(bucket, key, data).await
     }

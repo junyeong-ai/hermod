@@ -23,6 +23,10 @@ impl MemoryBlobStore {
 
 #[async_trait]
 impl BlobStore for MemoryBlobStore {
+    fn backend(&self) -> super::BlobStoreBackend {
+        super::BlobStoreBackend::Memory
+    }
+
     async fn put(&self, bucket: &str, key: &str, data: &[u8]) -> Result<String, BlobError> {
         let location = format!(
             "{URI_SCHEME}{}/{}",

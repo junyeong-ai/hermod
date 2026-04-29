@@ -103,6 +103,10 @@ impl SqliteDatabase {
 
 #[async_trait]
 impl Database for SqliteDatabase {
+    fn backend(&self) -> crate::DatabaseBackend {
+        crate::DatabaseBackend::Sqlite
+    }
+
     fn agents(&self) -> &dyn AgentRepository {
         &self.agents
     }

@@ -213,10 +213,14 @@ where
     // whether to admit, and the XFF capture feeds the client-IP
     // resolution that audit logging needs to recover the originating
     // IP from behind a chain of trusted reverse proxies.
+    //
+    // OnceLock matches the write-once-then-read semantics — the
+    // tungstenite callback fires at most once per handshake, and the
+    // post-handshake reader runs after the callback has returned.
     let auth_ok = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let auth_ok_for_callback = auth_ok.clone();
-    let xff_value: std::sync::Arc<std::sync::Mutex<Option<String>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let xff_value: std::sync::Arc<std::sync::OnceLock<String>> =
+        std::sync::Arc::new(std::sync::OnceLock::new());
     let xff_for_callback = xff_value.clone();
     let token = expected_token.clone();
 
@@ -236,9 +240,11 @@ where
                 .headers()
                 .get("X-Forwarded-For")
                 .and_then(|v| v.to_str().ok())
-                && let Ok(mut slot) = xff_for_callback.lock()
             {
-                *slot = Some(value.to_string());
+                // `set` errors only if already-set, which can't happen
+                // here — tungstenite invokes the handshake callback at
+                // most once per upgrade. Discard the Result.
+                let _ = xff_for_callback.set(value.to_string());
             }
             let header = req
                 .headers()
@@ -265,7 +271,7 @@ where
         return Err(anyhow!("bearer auth failed for {peer}"));
     }
 
-    let xff_seen = xff_value.lock().ok().and_then(|g| g.clone());
+    let xff_seen = xff_value.get().cloned();
     let client = resolve_client_ip(peer.ip(), xff_seen.as_deref(), &trusted_proxies);
     debug!(
         peer = %peer,

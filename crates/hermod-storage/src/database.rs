@@ -65,6 +65,12 @@ pub struct MetricsSnapshot {
 /// implementations are entirely opaque from this layer.
 #[async_trait::async_trait]
 pub trait Database: Send + Sync + std::fmt::Debug + 'static {
+    /// Identify which concrete backend this instance is. Mirrors
+    /// [`crate::BlobStore::backend`] for the blob layer; together
+    /// the two methods give callers a uniform "what is this?" answer
+    /// without downcasting.
+    fn backend(&self) -> DatabaseBackend;
+
     fn agents(&self) -> &dyn AgentRepository;
     fn audit(&self) -> &dyn AuditRepository;
     fn blobs(&self) -> Arc<dyn BlobStore>;

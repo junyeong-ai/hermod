@@ -105,6 +105,10 @@ impl PostgresDatabase {
 
 #[async_trait]
 impl Database for PostgresDatabase {
+    fn backend(&self) -> crate::DatabaseBackend {
+        crate::DatabaseBackend::Postgres
+    }
+
     fn agents(&self) -> &dyn AgentRepository {
         &self.agents
     }

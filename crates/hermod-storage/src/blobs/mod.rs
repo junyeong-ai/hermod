@@ -74,6 +74,24 @@ pub use gcs::GcsBlobStore;
 #[cfg(feature = "s3")]
 pub use s3::S3BlobStore;
 
+/// Identifies which concrete blob backend is in use. Returned by
+/// [`crate::classify_blob_dsn`] for callers that need to branch on
+/// the backend before opening it (e.g. `home_layout` deciding which
+/// on-disk artefacts belong in the boot enforcement spec) and by
+/// [`BlobStore::backend`] for post-construction introspection.
+///
+/// Variants are unconditional — classification is a static fact
+/// about the DSN, independent of which backend was compiled in. The
+/// `gcs` / `s3` cargo features only affect whether [`open`] can
+/// construct that backend; classification answers without them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlobStoreBackend {
+    LocalFs,
+    Memory,
+    Gcs,
+    S3,
+}
+
 /// Logical namespaces inside a [`BlobStore`].
 pub mod bucket {
     /// File-message payloads delivered to the operator's inbox.
@@ -84,6 +102,12 @@ pub mod bucket {
 
 #[async_trait]
 pub trait BlobStore: Send + Sync + std::fmt::Debug + 'static {
+    /// Identify which concrete backend this instance is. Mirrors
+    /// [`crate::Database::backend`] for the relational layer; together
+    /// the two methods give callers a uniform "what is this?" answer
+    /// without downcasting.
+    fn backend(&self) -> BlobStoreBackend;
+
     /// Persist `data` under `bucket` keyed by `key`. Returns the
     /// opaque location string the caller persists in its metadata
     /// table. Implementations MUST be atomic — a partially-written
@@ -132,30 +156,64 @@ pub enum BlobError {
 /// (ADC for GCS, AWS credential chain for S3) — the DSN carries only
 /// "where" (bucket + prefix), never secrets.
 pub async fn open(dsn: &str) -> Result<Arc<dyn BlobStore>, BlobError> {
-    let parsed = url::Url::parse(dsn)
-        .map_err(|e| BlobError::Backend(format!("parse blob dsn {dsn:?}: {e}")))?;
-    match parsed.scheme() {
-        "file" => {
+    let parsed = parse_blob_dsn(dsn)?;
+    match classify(&parsed)? {
+        BlobStoreBackend::LocalFs => {
             let path = parse_file_path(&parsed)?;
             let store = LocalFsBlobStore::new(path)
                 .map_err(|e| BlobError::Backend(format!("open local_fs blob store: {e}")))?;
             Ok(Arc::new(store))
         }
-        "memory" => Ok(Arc::new(MemoryBlobStore::new())),
-        #[cfg(feature = "gcs")]
-        "gcs" => {
-            let (bucket, prefix) = parse_bucket_prefix("gcs", &parsed)?;
-            Ok(Arc::new(GcsBlobStore::new(&bucket, prefix)?))
+        BlobStoreBackend::Memory => Ok(Arc::new(MemoryBlobStore::new())),
+        BlobStoreBackend::Gcs => {
+            #[cfg(feature = "gcs")]
+            {
+                let (bucket, prefix) = parse_bucket_prefix("gcs", &parsed)?;
+                Ok(Arc::new(GcsBlobStore::new(&bucket, prefix)?))
+            }
+            #[cfg(not(feature = "gcs"))]
+            {
+                Err(BlobError::Backend(format!(
+                    "gcs dsn {dsn:?} requires `--features gcs` at build time"
+                )))
+            }
         }
-        #[cfg(feature = "s3")]
-        "s3" => {
-            let (bucket, prefix) = parse_bucket_prefix("s3", &parsed)?;
-            Ok(Arc::new(S3BlobStore::new(&bucket, prefix)?))
+        BlobStoreBackend::S3 => {
+            #[cfg(feature = "s3")]
+            {
+                let (bucket, prefix) = parse_bucket_prefix("s3", &parsed)?;
+                Ok(Arc::new(S3BlobStore::new(&bucket, prefix)?))
+            }
+            #[cfg(not(feature = "s3"))]
+            {
+                Err(BlobError::Backend(format!(
+                    "s3 dsn {dsn:?} requires `--features s3` at build time"
+                )))
+            }
         }
+    }
+}
+
+/// Identify which blob backend a DSN selects without opening it.
+/// Valid for any DSN that [`open`] would accept; returns
+/// [`BlobStoreBackend`] independent of which backend is compiled in.
+/// Mirrors [`crate::classify_database_dsn`] for the relational layer.
+pub fn classify_blob_dsn(dsn: &str) -> Result<BlobStoreBackend, BlobError> {
+    classify(&parse_blob_dsn(dsn)?)
+}
+
+fn parse_blob_dsn(dsn: &str) -> Result<url::Url, BlobError> {
+    url::Url::parse(dsn).map_err(|e| BlobError::Backend(format!("parse blob dsn {dsn:?}: {e}")))
+}
+
+fn classify(parsed: &url::Url) -> Result<BlobStoreBackend, BlobError> {
+    match parsed.scheme() {
+        "file" => Ok(BlobStoreBackend::LocalFs),
+        "memory" => Ok(BlobStoreBackend::Memory),
+        "gcs" => Ok(BlobStoreBackend::Gcs),
+        "s3" => Ok(BlobStoreBackend::S3),
         other => Err(BlobError::Backend(format!(
-            "unsupported blob scheme {other:?} (supported: file, memory{}{})",
-            if cfg!(feature = "gcs") { ", gcs" } else { "" },
-            if cfg!(feature = "s3") { ", s3" } else { "" },
+            "unsupported blob scheme {other:?} (supported: file, memory, gcs, s3)"
         ))),
     }
 }
@@ -175,26 +233,16 @@ pub async fn open(dsn: &str) -> Result<Arc<dyn BlobStore>, BlobError> {
 /// Errors only on a malformed or unsupported DSN; symmetric with
 /// [`open`]'s validation.
 pub fn local_files(dsn: &str) -> Result<Vec<crate::LocalFile>, BlobError> {
-    let parsed = url::Url::parse(dsn)
-        .map_err(|e| BlobError::Backend(format!("parse blob dsn {dsn:?}: {e}")))?;
-    match parsed.scheme() {
-        "file" => {
+    let parsed = parse_blob_dsn(dsn)?;
+    match classify(&parsed)? {
+        BlobStoreBackend::LocalFs => {
             let root = parse_file_path(&parsed)?;
             Ok(vec![crate::LocalFile::directory_optional(
                 "blob store directory",
                 root,
             )])
         }
-        "memory" => Ok(Vec::new()),
-        #[cfg(feature = "gcs")]
-        "gcs" => Ok(Vec::new()),
-        #[cfg(feature = "s3")]
-        "s3" => Ok(Vec::new()),
-        other => Err(BlobError::Backend(format!(
-            "unsupported blob scheme {other:?} (supported: file, memory{}{})",
-            if cfg!(feature = "gcs") { ", gcs" } else { "" },
-            if cfg!(feature = "s3") { ", s3" } else { "" },
-        ))),
+        BlobStoreBackend::Memory | BlobStoreBackend::Gcs | BlobStoreBackend::S3 => Ok(Vec::new()),
     }
 }
 

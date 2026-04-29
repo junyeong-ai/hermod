@@ -73,6 +73,10 @@ impl LocalFsBlobStore {
 
 #[async_trait]
 impl BlobStore for LocalFsBlobStore {
+    fn backend(&self) -> super::BlobStoreBackend {
+        super::BlobStoreBackend::LocalFs
+    }
+
     async fn put(&self, bucket: &str, key: &str, data: &[u8]) -> Result<String, BlobError> {
         let safe_bucket = sanitize_segment(bucket);
         let safe_key = sanitize_segment(key);
