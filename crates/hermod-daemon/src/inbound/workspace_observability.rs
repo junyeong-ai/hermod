@@ -107,6 +107,7 @@ impl InboundProcessor {
                 .upsert_observed(&hermod_storage::AgentRecord {
                     id: m.id.clone(),
                     pubkey: m.pubkey,
+                    host_pubkey: None,
                     endpoint: None,
                     local_alias: None,
                     peer_asserted_alias: None,

@@ -25,17 +25,27 @@
 CREATE TABLE agents (
     id                  TEXT NOT NULL PRIMARY KEY,
     pubkey              BYTEA NOT NULL,
+    host_pubkey         BYTEA,
     endpoint            TEXT,
     local_alias         TEXT UNIQUE,
     peer_asserted_alias TEXT,
     trust_level         TEXT NOT NULL
-                        CHECK (trust_level IN ('self','verified','tofu','untrusted')),
+                        CHECK (trust_level IN ('local','verified','tofu','untrusted')),
     tls_fingerprint     TEXT,
     reputation          BIGINT NOT NULL DEFAULT 0,
     first_seen          BIGINT NOT NULL,
     last_seen           BIGINT
 );
 CREATE INDEX idx_agents_with_endpoint ON agents(id) WHERE endpoint IS NOT NULL;
+
+CREATE TABLE local_agents (
+    agent_id            TEXT NOT NULL PRIMARY KEY
+                        REFERENCES agents(id) ON DELETE CASCADE,
+    bearer_hash         BYTEA NOT NULL,
+    workspace_root      TEXT,
+    created_at          BIGINT NOT NULL
+);
+CREATE UNIQUE INDEX idx_local_agents_bearer_hash ON local_agents(bearer_hash);
 
 CREATE TABLE messages (
     id              TEXT NOT NULL PRIMARY KEY,

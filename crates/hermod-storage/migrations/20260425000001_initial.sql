@@ -22,18 +22,61 @@
 --     each one's claim).
 CREATE TABLE agents (
     id                  TEXT NOT NULL PRIMARY KEY,
+    -- Agent's own ed25519 keypair public half. Verifies envelope
+    -- signatures.
     pubkey              BLOB NOT NULL,
+    -- Host's ed25519 keypair public half — the static key the
+    -- *daemon* hosting this agent presents during the federation
+    -- Noise XX handshake. NULL for entries observed before the host
+    -- key was learned (e.g. a legacy `peer add` without the host
+    -- pubkey hint). For our own hosted agents (`local_agents` join),
+    -- equals this daemon's host pubkey.
+    host_pubkey         BLOB,
+    -- Network endpoint of the host. wss://host:port — host-level,
+    -- not agent-level. Multiple agents on the same host share one
+    -- endpoint (Noise XX terminates at the host; the envelope's
+    -- to.id selects which local agent receives the payload).
     endpoint            TEXT,
     local_alias         TEXT UNIQUE,
     peer_asserted_alias TEXT,
+    -- `local` means this agent is hosted by THIS daemon (private key
+    -- in `local_agents` row). Replaces the legacy `self` value.
+    -- Multi-tenant — multiple `local` rows are normal.
     trust_level         TEXT NOT NULL
-                        CHECK (trust_level IN ('self','verified','tofu','untrusted')),
+                        CHECK (trust_level IN ('local','verified','tofu','untrusted')),
+    -- SHA-256 of the *host*'s TLS cert. Pinned per-host, not per-
+    -- agent — multiple agents on the same host share one cert.
     tls_fingerprint     TEXT,
     reputation          INTEGER NOT NULL DEFAULT 0,
     first_seen          INTEGER NOT NULL,
     last_seen           INTEGER
 );
 CREATE INDEX idx_agents_with_endpoint ON agents(id) WHERE endpoint IS NOT NULL;
+
+-- Sub-relation for agents this daemon hosts. Adds the private-key
+-- material (kept on disk under `$HERMOD_HOME/agents/<id>/`, not in
+-- the DB) and the per-agent IPC bearer credential.
+--
+-- Foreign-keyed to `agents` so a local agent always has a directory
+-- entry (capabilities, briefs, presence, audit references all key by
+-- agent_id). `ON DELETE CASCADE` keeps the sub-relation consistent
+-- when an operator removes the agent.
+CREATE TABLE local_agents (
+    agent_id            TEXT NOT NULL PRIMARY KEY
+                        REFERENCES agents(id) ON DELETE CASCADE,
+    -- blake3 of the bearer token. The raw token is stored in the
+    -- filesystem (`$HERMOD_HOME/agents/<id>/bearer_token`, mode
+    -- 0600) for the CLI / MCP to read; this hash is the lookup key
+    -- IPC handshake compares against.
+    bearer_hash         BLOB NOT NULL,
+    -- Optional operator-set context. Filesystem path of the project
+    -- directory this agent represents — surfaced in MCP `instructions`
+    -- so Claude Code knows what this agent is about.
+    workspace_root      TEXT,
+    created_at          INTEGER NOT NULL
+);
+-- Bearer hash is the auth lookup key — index for O(log n) handshake.
+CREATE UNIQUE INDEX idx_local_agents_bearer_hash ON local_agents(bearer_hash);
 
 -- Direct-message event log + outbox columns.
 CREATE TABLE messages (

@@ -243,6 +243,7 @@ mod tests {
             .upsert(&AgentRecord {
                 id: actor.clone(),
                 pubkey: PubkeyBytes([1u8; 32]),
+                host_pubkey: None,
                 endpoint: None,
                 local_alias: None,
                 peer_asserted_alias: None,

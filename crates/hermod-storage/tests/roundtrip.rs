@@ -38,10 +38,11 @@ async fn message_roundtrip() {
             .upsert(&AgentRecord {
                 id: kp.agent_id(),
                 pubkey: kp.to_pubkey_bytes(),
+                host_pubkey: None,
                 endpoint: None,
                 local_alias: None,
                 peer_asserted_alias: None,
-                trust_level: TrustLevel::Self_,
+                trust_level: TrustLevel::Local,
                 tls_fingerprint: None,
                 reputation: 0,
                 first_seen: now,
@@ -115,10 +116,11 @@ async fn priority_min_filter_binds_correctly() {
             .upsert(&AgentRecord {
                 id: kp.agent_id(),
                 pubkey: kp.to_pubkey_bytes(),
+                host_pubkey: None,
                 endpoint: None,
                 local_alias: None,
                 peer_asserted_alias: None,
-                trust_level: TrustLevel::Self_,
+                trust_level: TrustLevel::Local,
                 tls_fingerprint: None,
                 reputation: 0,
                 first_seen: now,
@@ -200,10 +202,11 @@ async fn wrong_recipient_cannot_ack() {
             .upsert(&AgentRecord {
                 id: kp.agent_id(),
                 pubkey: kp.to_pubkey_bytes(),
+                host_pubkey: None,
                 endpoint: None,
                 local_alias: None,
                 peer_asserted_alias: None,
-                trust_level: TrustLevel::Self_,
+                trust_level: TrustLevel::Local,
                 tls_fingerprint: None,
                 reputation: 0,
                 first_seen: now,
@@ -252,6 +255,7 @@ async fn agent_upsert_preserves_operator_trust() {
         .upsert(&AgentRecord {
             id: kp.agent_id(),
             pubkey: kp.to_pubkey_bytes(),
+            host_pubkey: None,
             endpoint: None,
             local_alias: None,
             peer_asserted_alias: None,
@@ -275,6 +279,7 @@ async fn agent_upsert_preserves_operator_trust() {
         .upsert(&AgentRecord {
             id: kp.agent_id(),
             pubkey: kp.to_pubkey_bytes(),
+            host_pubkey: None,
             endpoint: None,
             local_alias: None,
             peer_asserted_alias: None,
@@ -314,6 +319,7 @@ async fn broadcast_hmac_end_to_end() {
             .upsert(&AgentRecord {
                 id: kp.agent_id(),
                 pubkey: kp.to_pubkey_bytes(),
+                host_pubkey: None,
                 endpoint: None,
                 local_alias: None,
                 peer_asserted_alias: None,
@@ -438,6 +444,7 @@ async fn fail_pending_to_clears_invisible_pending() {
             .upsert(&AgentRecord {
                 id: kp.agent_id(),
                 pubkey: kp.to_pubkey_bytes(),
+                host_pubkey: None,
                 endpoint: None,
                 local_alias: None,
                 peer_asserted_alias: None,
@@ -515,6 +522,7 @@ async fn list_distinct_excluding_is_deterministic() {
             .upsert(&AgentRecord {
                 id: kp.agent_id(),
                 pubkey: kp.to_pubkey_bytes(),
+                host_pubkey: None,
                 endpoint: None,
                 local_alias: None,
                 peer_asserted_alias: None,
@@ -585,6 +593,7 @@ async fn forget_peer_returns_prior_endpoint_atomically() {
         .upsert(&AgentRecord {
             id: kp.agent_id(),
             pubkey: kp.to_pubkey_bytes(),
+            host_pubkey: None,
             endpoint: Some(endpoint.clone()),
             local_alias: None,
             peer_asserted_alias: None,
@@ -635,6 +644,7 @@ async fn repin_returns_endpoint_snapshot_for_pool_eviction() {
         .upsert(&AgentRecord {
             id: kp.agent_id(),
             pubkey: kp.to_pubkey_bytes(),
+            host_pubkey: None,
             endpoint: Some(endpoint.clone()),
             local_alias: None,
             peer_asserted_alias: None,
@@ -677,6 +687,7 @@ async fn repin_atomic_against_trust_change() {
         .upsert(&AgentRecord {
             id: kp.agent_id(),
             pubkey: kp.to_pubkey_bytes(),
+            host_pubkey: None,
             endpoint: None,
             local_alias: None,
             peer_asserted_alias: None,
@@ -764,10 +775,11 @@ async fn claim_pending_remote_no_double_claims_under_race() {
         .upsert(&AgentRecord {
             id: sender.agent_id(),
             pubkey: sender.to_pubkey_bytes(),
+            host_pubkey: None,
             endpoint: None,
             local_alias: None,
             peer_asserted_alias: None,
-            trust_level: TrustLevel::Self_,
+            trust_level: TrustLevel::Local,
             tls_fingerprint: None,
             reputation: 0,
             first_seen: now,
@@ -779,6 +791,7 @@ async fn claim_pending_remote_no_double_claims_under_race() {
         .upsert(&AgentRecord {
             id: recipient.agent_id(),
             pubkey: recipient.to_pubkey_bytes(),
+            host_pubkey: None,
             endpoint: Some(endpoint),
             local_alias: None,
             peer_asserted_alias: None,
@@ -864,13 +877,14 @@ async fn claim_pending_remote_reclaims_stale_owners() {
         port: 7823,
     });
     for (kp, ep, trust) in [
-        (&sender, None, TrustLevel::Self_),
+        (&sender, None, TrustLevel::Local),
         (&recipient, Some(endpoint), TrustLevel::Verified),
     ] {
         db.agents()
             .upsert(&AgentRecord {
                 id: kp.agent_id(),
                 pubkey: kp.to_pubkey_bytes(),
+                host_pubkey: None,
                 endpoint: ep,
                 local_alias: None,
                 peer_asserted_alias: None,

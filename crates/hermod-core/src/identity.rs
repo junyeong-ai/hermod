@@ -248,13 +248,15 @@ impl FromStr for AgentAddress {
     }
 }
 
-/// Trust level for a known peer or agent.
+/// Trust level for a known agent. `Local` marks agents this daemon
+/// hosts (private key in the `local_agents` table) — multi-tenant,
+/// so multiple `Local` rows are normal. The other three apply to
+/// remote peer agents observed in our directory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrustLevel {
-    /// Myself.
-    #[serde(rename = "self")]
-    Self_,
+    /// Hosted on this daemon — we hold the keypair.
+    Local,
     /// Out-of-band fingerprint verification completed.
     Verified,
     /// Trust on first use. Fingerprint memorised.
@@ -266,7 +268,7 @@ pub enum TrustLevel {
 impl TrustLevel {
     pub fn as_str(&self) -> &'static str {
         match self {
-            TrustLevel::Self_ => "self",
+            TrustLevel::Local => "local",
             TrustLevel::Verified => "verified",
             TrustLevel::Tofu => "tofu",
             TrustLevel::Untrusted => "untrusted",
@@ -279,7 +281,7 @@ impl FromStr for TrustLevel {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "self" => Ok(TrustLevel::Self_),
+            "local" => Ok(TrustLevel::Local),
             "verified" => Ok(TrustLevel::Verified),
             "tofu" => Ok(TrustLevel::Tofu),
             "untrusted" => Ok(TrustLevel::Untrusted),

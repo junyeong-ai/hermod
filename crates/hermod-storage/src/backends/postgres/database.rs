@@ -18,6 +18,7 @@ use crate::repositories::{
     briefs::BriefRepository,
     capabilities::CapabilityRepository,
     confirmations::ConfirmationRepository,
+    local_agents::LocalAgentRepository,
     messages::MessageRepository,
     presence::{AgentPresenceRepository, McpSessionRepository},
     rate_limit::RateLimitRepository,
@@ -32,6 +33,7 @@ use super::audit::PostgresAuditRepository;
 use super::briefs::PostgresBriefRepository;
 use super::capabilities::PostgresCapabilityRepository;
 use super::confirmations::PostgresConfirmationRepository;
+use super::local_agents::PostgresLocalAgentRepository;
 use super::messages::PostgresMessageRepository;
 use super::pool::{open_pool, run_migrations};
 use super::presence::{PostgresAgentPresenceRepository, PostgresMcpSessionRepository};
@@ -52,6 +54,7 @@ pub struct PostgresDatabase {
     channels: PostgresChannelRepository,
     confirmations: PostgresConfirmationRepository,
     discovered_channels: PostgresDiscoveredChannelRepository,
+    local_agents: PostgresLocalAgentRepository,
     mcp_sessions: PostgresMcpSessionRepository,
     messages: PostgresMessageRepository,
     presences: PostgresAgentPresenceRepository,
@@ -87,6 +90,7 @@ impl PostgresDatabase {
             channels: PostgresChannelRepository::new(pool.clone()),
             confirmations: PostgresConfirmationRepository::new(pool.clone()),
             discovered_channels: PostgresDiscoveredChannelRepository::new(pool.clone()),
+            local_agents: PostgresLocalAgentRepository::new(pool.clone()),
             mcp_sessions: PostgresMcpSessionRepository::new(pool.clone()),
             messages: PostgresMessageRepository::new(pool.clone()),
             presences: PostgresAgentPresenceRepository::new(pool.clone()),
@@ -129,6 +133,9 @@ impl Database for PostgresDatabase {
     }
     fn confirmations(&self) -> &dyn ConfirmationRepository {
         &self.confirmations
+    }
+    fn local_agents(&self) -> &dyn LocalAgentRepository {
+        &self.local_agents
     }
     fn discovered_channels(&self) -> &dyn DiscoveredChannelRepository {
         &self.discovered_channels

@@ -15,6 +15,7 @@ use crate::repositories::{
     briefs::BriefRepository,
     capabilities::CapabilityRepository,
     confirmations::ConfirmationRepository,
+    local_agents::LocalAgentRepository,
     messages::MessageRepository,
     presence::{AgentPresenceRepository, McpSessionRepository},
     rate_limit::RateLimitRepository,
@@ -29,6 +30,7 @@ use super::audit::SqliteAuditRepository;
 use super::briefs::SqliteBriefRepository;
 use super::capabilities::SqliteCapabilityRepository;
 use super::confirmations::SqliteConfirmationRepository;
+use super::local_agents::SqliteLocalAgentRepository;
 use super::messages::SqliteMessageRepository;
 use super::pool::{open_pool, run_migrations};
 use super::presence::{SqliteAgentPresenceRepository, SqliteMcpSessionRepository};
@@ -49,6 +51,7 @@ pub struct SqliteDatabase {
     channels: SqliteChannelRepository,
     confirmations: SqliteConfirmationRepository,
     discovered_channels: SqliteDiscoveredChannelRepository,
+    local_agents: SqliteLocalAgentRepository,
     mcp_sessions: SqliteMcpSessionRepository,
     messages: SqliteMessageRepository,
     presences: SqliteAgentPresenceRepository,
@@ -84,6 +87,7 @@ impl SqliteDatabase {
             channels: SqliteChannelRepository::new(pool.clone()),
             confirmations: SqliteConfirmationRepository::new(pool.clone()),
             discovered_channels: SqliteDiscoveredChannelRepository::new(pool.clone()),
+            local_agents: SqliteLocalAgentRepository::new(pool.clone()),
             mcp_sessions: SqliteMcpSessionRepository::new(pool.clone()),
             messages: SqliteMessageRepository::new(pool.clone()),
             presences: SqliteAgentPresenceRepository::new(pool.clone()),
@@ -130,6 +134,9 @@ impl Database for SqliteDatabase {
     }
     fn discovered_channels(&self) -> &dyn DiscoveredChannelRepository {
         &self.discovered_channels
+    }
+    fn local_agents(&self) -> &dyn LocalAgentRepository {
+        &self.local_agents
     }
     fn mcp_sessions(&self) -> &dyn McpSessionRepository {
         &self.mcp_sessions

@@ -108,10 +108,11 @@ pub async fn ensure_self_agent(
         .upsert(&AgentRecord {
             id: keypair.agent_id(),
             pubkey: keypair.to_pubkey_bytes(),
+            host_pubkey: None,
             endpoint: None,
             local_alias: alias,
             peer_asserted_alias: None,
-            trust_level: hermod_core::TrustLevel::Self_,
+            trust_level: hermod_core::TrustLevel::Local,
             tls_fingerprint: None,
             reputation: 0,
             first_seen: now,

@@ -75,6 +75,9 @@ pub use repositories::confirmations::{
     ConfirmationRepository, ConfirmationStatus, HoldRequest, HoldedIntent, MAX_PENDING_PER_ACTOR,
     PendingConfirmation,
 };
+pub use repositories::local_agents::{
+    LocalAgentInsertOutcome, LocalAgentRecord, LocalAgentRemoveOutcome, LocalAgentRepository,
+};
 pub use repositories::messages::{
     InboxFilter, MessagePruneOutcome, MessageRecord, MessageRepository, TransitionOutcome,
 };

@@ -102,6 +102,7 @@ impl AgentService {
         let record = AgentRecord {
             id: id.clone(),
             pubkey,
+            host_pubkey: None,
             endpoint: params.endpoint.clone(),
             local_alias: params.local_alias.clone(),
             peer_asserted_alias: None,

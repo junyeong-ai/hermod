@@ -59,6 +59,7 @@ async fn seed_agents(repo: &dyn hermod_storage::AgentRepository, from: &AgentId,
         repo.upsert(&AgentRecord {
             id: id.clone(),
             pubkey: pk_bytes(seed),
+            host_pubkey: None,
             endpoint: None,
             local_alias: None,
             peer_asserted_alias: None,

@@ -9,6 +9,7 @@ pub mod audit;
 pub mod briefs;
 pub mod capabilities;
 pub mod confirmations;
+pub mod local_agents;
 pub mod messages;
 pub mod presence;
 pub mod rate_limit;

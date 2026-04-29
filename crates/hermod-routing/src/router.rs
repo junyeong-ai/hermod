@@ -127,6 +127,7 @@ mod tests {
             .upsert(&AgentRecord {
                 id,
                 pubkey: pk,
+                host_pubkey: None,
                 endpoint,
                 local_alias: None,
                 peer_asserted_alias: None,

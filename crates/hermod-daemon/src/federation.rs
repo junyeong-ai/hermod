@@ -141,6 +141,7 @@ impl FederationServer {
             .upsert_observed(&AgentRecord {
                 id: identity.agent_id.clone(),
                 pubkey: identity.agent_pubkey,
+                host_pubkey: None,
                 endpoint: None,
                 local_alias: None,
                 peer_asserted_alias: identity.alias.clone(),
@@ -270,6 +271,7 @@ pub async fn record_peer(
         .upsert_observed(&AgentRecord {
             id: agent_id.clone(),
             pubkey,
+            host_pubkey: None,
             endpoint: Some(Endpoint::Wss(endpoint)),
             local_alias,
             peer_asserted_alias,

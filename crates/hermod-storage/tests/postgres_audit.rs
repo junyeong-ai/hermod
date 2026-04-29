@@ -81,7 +81,6 @@ async fn signed_chain_verifies() {
                 target: Some(format!("t{i}")),
                 details: Some(serde_json::json!({"i": i})),
                 client_ip: None,
-                client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             })
             .await
@@ -109,7 +108,6 @@ async fn tamper_detected_as_hash_mismatch() {
             action: "honest".into(),
             target: None,
             details: None,
-            client_ip: None,
             client_ip: None,
             federation: hermod_storage::AuditFederationPolicy::Default,
         })
@@ -147,7 +145,6 @@ async fn missing_link_detected() {
                     action: format!("step.{i}"),
                     target: None,
                     details: None,
-                    client_ip: None,
                     client_ip: None,
                     federation: hermod_storage::AuditFederationPolicy::Default,
                 })
@@ -191,7 +188,6 @@ async fn concurrent_appends_chain_correctly() {
                     target: None,
                     details: None,
                     client_ip: None,
-                    client_ip: None,
                     federation: hermod_storage::AuditFederationPolicy::Default,
                 })
                 .await
@@ -228,7 +224,6 @@ async fn query_filters_actor_and_action_with_dynamic_placeholders() {
             target: None,
             details: None,
             client_ip: None,
-            client_ip: None,
             federation: hermod_storage::AuditFederationPolicy::Default,
         })
         .await
@@ -242,7 +237,6 @@ async fn query_filters_actor_and_action_with_dynamic_placeholders() {
             target: None,
             details: None,
             client_ip: None,
-            client_ip: None,
             federation: hermod_storage::AuditFederationPolicy::Default,
         })
         .await
@@ -255,7 +249,6 @@ async fn query_filters_actor_and_action_with_dynamic_placeholders() {
             action: "alpha".into(),
             target: None,
             details: None,
-            client_ip: None,
             client_ip: None,
             federation: hermod_storage::AuditFederationPolicy::Default,
         })
@@ -307,7 +300,6 @@ async fn earliest_ts_returns_min_or_none() {
             target: None,
             details: None,
             client_ip: None,
-            client_ip: None,
             federation: hermod_storage::AuditFederationPolicy::Default,
         })
         .await
@@ -320,7 +312,6 @@ async fn earliest_ts_returns_min_or_none() {
             action: "earlier".into(),
             target: None,
             details: None,
-            client_ip: None,
             client_ip: None,
             federation: hermod_storage::AuditFederationPolicy::Default,
         })
@@ -354,7 +345,6 @@ async fn archive_day_then_verify_archive_roundtrip() {
                 action: format!("day.{i}"),
                 target: Some(format!("t{i}")),
                 details: Some(serde_json::json!({"i": i})),
-                client_ip: None,
                 client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
             })
@@ -433,7 +423,6 @@ async fn open_database_via_postgres_dsn() {
             action: "connected".into(),
             target: None,
             details: None,
-            client_ip: None,
             client_ip: None,
             federation: hermod_storage::AuditFederationPolicy::Default,
         })

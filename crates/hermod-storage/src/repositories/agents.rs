@@ -22,13 +22,24 @@ use crate::error::Result;
 #[derive(Debug, Clone)]
 pub struct AgentRecord {
     pub id: AgentId,
+    /// Agent's own ed25519 public key — verifies envelope signatures.
     pub pubkey: PubkeyBytes,
+    /// Host's ed25519 public key — the static key the *daemon* hosting
+    /// this agent presents during the federation Noise XX handshake.
+    /// Multiple agents on the same host share one `host_pubkey`.
+    /// `None` for legacy entries observed before the host key was
+    /// learned. For our own hosted agents (rows joined to `local_agents`),
+    /// equals this daemon's host pubkey.
+    pub host_pubkey: Option<PubkeyBytes>,
+    /// Network endpoint of the host (`wss://host:port`). Host-level,
+    /// not agent-level — multiple agents at one endpoint.
     pub endpoint: Option<Endpoint>,
     pub local_alias: Option<AgentAlias>,
     pub peer_asserted_alias: Option<AgentAlias>,
     pub trust_level: TrustLevel,
-    /// SHA-256 of the peer's TLS cert DER, captured on first successful TLS
-    /// handshake. `None` until pinned. Lowercase, colon-separated.
+    /// SHA-256 of the *host*'s TLS cert DER, captured on first
+    /// successful TLS handshake. Pinned per-host (multiple agents on
+    /// the same host share one cert). Lowercase, colon-separated.
     pub tls_fingerprint: Option<String>,
     /// Operator-managed feedback signal.
     pub reputation: i64,

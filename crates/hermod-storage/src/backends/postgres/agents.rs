@@ -57,15 +57,17 @@ impl PostgresAgentRepository {
 
         let endpoint = record.endpoint.as_ref().map(|e| e.to_string());
         let pubkey = record.pubkey.as_slice().to_vec();
+        let host_pubkey = record.host_pubkey.as_ref().map(|h| h.as_slice().to_vec());
         sqlx::query(
             r#"
             INSERT INTO agents
-                (id, pubkey, endpoint, local_alias, peer_asserted_alias,
+                (id, pubkey, host_pubkey, endpoint, local_alias, peer_asserted_alias,
                  trust_level, tls_fingerprint, reputation, first_seen, last_seen)
             VALUES
-                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             ON CONFLICT(id) DO UPDATE SET
                 pubkey              = EXCLUDED.pubkey,
+                host_pubkey         = COALESCE(EXCLUDED.host_pubkey, agents.host_pubkey),
                 endpoint            = COALESCE(EXCLUDED.endpoint, agents.endpoint),
                 local_alias         = COALESCE(EXCLUDED.local_alias, agents.local_alias),
                 peer_asserted_alias = COALESCE(EXCLUDED.peer_asserted_alias, agents.peer_asserted_alias),
@@ -74,6 +76,7 @@ impl PostgresAgentRepository {
         )
         .bind(record.id.as_str())
         .bind(pubkey)
+        .bind(host_pubkey)
         .bind(endpoint)
         .bind(effective_local.as_ref().map(|a| a.as_str()))
         .bind(record.peer_asserted_alias.as_ref().map(|a| a.as_str()))
@@ -156,18 +159,20 @@ impl AgentRepository for PostgresAgentRepository {
     async fn upsert(&self, record: &AgentRecord) -> Result<()> {
         let endpoint = record.endpoint.as_ref().map(|e| e.to_string());
         let pubkey = record.pubkey.as_slice().to_vec();
+        let host_pubkey = record.host_pubkey.as_ref().map(|h| h.as_slice().to_vec());
 
         // Operator-managed columns intentionally NOT in the conflict
         // update list — see SqliteAgentRepository::upsert for rationale.
         sqlx::query(
             r#"
             INSERT INTO agents
-                (id, pubkey, endpoint, local_alias, peer_asserted_alias,
+                (id, pubkey, host_pubkey, endpoint, local_alias, peer_asserted_alias,
                  trust_level, tls_fingerprint, reputation, first_seen, last_seen)
             VALUES
-                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             ON CONFLICT(id) DO UPDATE SET
                 pubkey              = EXCLUDED.pubkey,
+                host_pubkey         = COALESCE(EXCLUDED.host_pubkey, agents.host_pubkey),
                 endpoint            = COALESCE(EXCLUDED.endpoint, agents.endpoint),
                 local_alias         = COALESCE(EXCLUDED.local_alias, agents.local_alias),
                 peer_asserted_alias = COALESCE(EXCLUDED.peer_asserted_alias, agents.peer_asserted_alias),
@@ -176,6 +181,7 @@ impl AgentRepository for PostgresAgentRepository {
         )
         .bind(record.id.as_str())
         .bind(pubkey)
+        .bind(host_pubkey)
         .bind(endpoint)
         .bind(record.local_alias.as_ref().map(|a| a.as_str()))
         .bind(record.peer_asserted_alias.as_ref().map(|a| a.as_str()))
@@ -334,7 +340,7 @@ impl AgentRepository for PostgresAgentRepository {
     }
 }
 
-const COLUMNS: &str = "id, pubkey, endpoint, local_alias, peer_asserted_alias, trust_level, \
+const COLUMNS: &str = "id, pubkey, host_pubkey, endpoint, local_alias, peer_asserted_alias, trust_level, \
      tls_fingerprint, reputation, first_seen, last_seen";
 
 fn select(predicate: &str, order_by: Option<&str>) -> String {
@@ -348,20 +354,11 @@ fn row_to_agent(row: sqlx::postgres::PgRow) -> Result<AgentRecord> {
     let id_str: String = row.try_get("id")?;
     let id = AgentId::from_str(&id_str).map_err(StorageError::Core)?;
 
-    let pubkey_bytes: Vec<u8> = row.try_get("pubkey")?;
-    if pubkey_bytes.len() != PubkeyBytes::LEN {
-        return Err(StorageError::decode(
-            "pubkey",
-            format!(
-                "expected {} bytes, got {}",
-                PubkeyBytes::LEN,
-                pubkey_bytes.len()
-            ),
-        ));
-    }
-    let mut pk_arr = [0u8; PubkeyBytes::LEN];
-    pk_arr.copy_from_slice(&pubkey_bytes);
-    let pubkey = PubkeyBytes(pk_arr);
+    let pubkey = decode_pubkey(row.try_get::<Vec<u8>, _>("pubkey")?, "pubkey")?;
+    let host_pubkey: Option<Vec<u8>> = row.try_get("host_pubkey")?;
+    let host_pubkey = host_pubkey
+        .map(|b| decode_pubkey(b, "host_pubkey"))
+        .transpose()?;
 
     let endpoint: Option<String> = row.try_get("endpoint")?;
     let endpoint = endpoint
@@ -390,6 +387,7 @@ fn row_to_agent(row: sqlx::postgres::PgRow) -> Result<AgentRecord> {
     Ok(AgentRecord {
         id,
         pubkey,
+        host_pubkey,
         endpoint,
         local_alias,
         peer_asserted_alias,
@@ -399,6 +397,18 @@ fn row_to_agent(row: sqlx::postgres::PgRow) -> Result<AgentRecord> {
         first_seen,
         last_seen,
     })
+}
+
+fn decode_pubkey(bytes: Vec<u8>, column: &'static str) -> Result<PubkeyBytes> {
+    if bytes.len() != PubkeyBytes::LEN {
+        return Err(StorageError::decode(
+            column,
+            format!("expected {} bytes, got {}", PubkeyBytes::LEN, bytes.len()),
+        ));
+    }
+    let mut arr = [0u8; PubkeyBytes::LEN];
+    arr.copy_from_slice(&bytes);
+    Ok(PubkeyBytes(arr))
 }
 
 fn parse_alias(raw: Option<String>) -> Result<Option<AgentAlias>> {

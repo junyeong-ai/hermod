@@ -117,7 +117,7 @@ pub fn decide(trust: TrustLevel, sensitivity: Sensitivity) -> Verdict {
     use TrustLevel::*;
     use Verdict::*;
     match (trust, sensitivity) {
-        (Self_, _) => Accept,
+        (Local, _) => Accept,
         (Verified, Sensitive) => Confirm,
         (Verified, _) => Accept,
         (Tofu, Routine) => Accept,
@@ -261,7 +261,7 @@ mod tests {
     #[test]
     fn matrix_is_total() {
         let trusts = [
-            TrustLevel::Self_,
+            TrustLevel::Local,
             TrustLevel::Verified,
             TrustLevel::Tofu,
             TrustLevel::Untrusted,
@@ -287,13 +287,13 @@ mod tests {
     }
 
     #[test]
-    fn self_always_accepts() {
+    fn local_always_accepts() {
         for s in [
             Sensitivity::Routine,
             Sensitivity::Review,
             Sensitivity::Sensitive,
         ] {
-            assert_eq!(decide(TrustLevel::Self_, s), Verdict::Accept);
+            assert_eq!(decide(TrustLevel::Local, s), Verdict::Accept);
         }
     }
 
