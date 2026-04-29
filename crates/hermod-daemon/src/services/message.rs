@@ -1,5 +1,8 @@
-use hermod_core::{AgentAddress, Envelope, MessageBody, MessagePriority, MessageStatus, Timestamp};
-use hermod_crypto::Signer;
+use hermod_core::{
+    AgentAddress, AgentId, Envelope, MessageBody, MessagePriority, MessageStatus, Timestamp,
+};
+use hermod_crypto::{LocalKeySigner, Signer};
+use hermod_daemon::local_agent::LocalAgentRegistry;
 use hermod_protocol::envelope::serialize_envelope;
 use hermod_protocol::ipc::methods::{
     MessageAckParams, MessageAckResult, MessageListParams, MessageListResult, MessageSendParams,
@@ -10,6 +13,7 @@ use hermod_routing::{AccessController, RateLimiter, RemoteDeliverer, RouteDecisi
 use hermod_storage::{AuditEntry, AuditSink, Database, InboxFilter, MessageRecord};
 use std::sync::Arc;
 
+use crate::audit_context::current_caller_agent;
 use crate::outbox::OutboxNotifier;
 use crate::services::{ServiceError, audit_or_warn};
 
@@ -39,7 +43,11 @@ pub struct MessageService {
     router: Router,
     access: AccessController,
     rate_limit: RateLimiter,
-    signer: Arc<dyn Signer>,
+    /// Lookup table from `caller_agent_id` (resolved at the IPC
+    /// handshake; see `crate::audit_context::CALLER_AGENT`) to the
+    /// keypair that signs the outbound envelope. Per-call signer
+    /// derivation replaces the H2.5-era static `Arc<dyn Signer>`.
+    registry: LocalAgentRegistry,
     remote: RemoteDeliverer,
     outbox_notifier: OutboxNotifier,
 }
@@ -52,7 +60,7 @@ impl MessageService {
         router: Router,
         access: AccessController,
         rate_limit: RateLimiter,
-        signer: Arc<dyn Signer>,
+        registry: LocalAgentRegistry,
         remote: RemoteDeliverer,
         outbox_notifier: OutboxNotifier,
     ) -> Self {
@@ -62,10 +70,30 @@ impl MessageService {
             router,
             access,
             rate_limit,
-            signer,
+            registry,
             remote,
             outbox_notifier,
         }
+    }
+
+    /// Resolve the caller agent + a signer wrapping its keypair.
+    /// Errors when either no IPC scope is active (daemon-internal
+    /// call site that should provide its own signer) or the caller
+    /// agent isn't in this daemon's hosted-agent registry (auth-time
+    /// race: the caller's row was removed between handshake and now).
+    fn caller_signer(&self) -> Result<(AgentId, Arc<dyn Signer>), ServiceError> {
+        let caller = current_caller_agent().ok_or_else(|| {
+            ServiceError::InvalidParam(
+                "message.send requires an IPC caller scope (no caller_agent in context)".into(),
+            )
+        })?;
+        let agent = self.registry.lookup(&caller).ok_or_else(|| {
+            ServiceError::InvalidParam(format!(
+                "caller {caller} is not in this daemon's local-agent registry"
+            ))
+        })?;
+        let signer: Arc<dyn Signer> = Arc::new(LocalKeySigner::new(agent.keypair.clone()));
+        Ok((caller, signer))
     }
 
     #[tracing::instrument(
@@ -103,7 +131,8 @@ impl MessageService {
             }
         }
 
-        let from = AgentAddress::local(self.signer.agent_id());
+        let (caller, signer) = self.caller_signer()?;
+        let from = AgentAddress::local(caller.clone());
         let priority = params.priority.unwrap_or(MessagePriority::Normal);
         let ttl = params.ttl_secs.unwrap_or(3600);
 
@@ -126,16 +155,13 @@ impl MessageService {
 
         let decision = self.router.resolve(&params.to).await?;
 
-        // Outbound: sender is us, AccessController short-circuits for self.
-        // Caps are only required at inbound (federation listener side).
-        self.access
-            .check_send(self.router.self_id(), &params.to.id, &[])
-            .await?;
-        self.rate_limit
-            .consume_one(self.router.self_id(), &params.to.id)
-            .await?;
+        // Outbound: sender is the calling agent, AccessController
+        // short-circuits for self. Caps are only required at inbound
+        // (federation listener side).
+        self.access.check_send(&caller, &params.to.id, &[]).await?;
+        self.rate_limit.consume_one(&caller, &params.to.id).await?;
 
-        self.signer
+        signer
             .sign_envelope(&mut envelope)
             .await
             .map_err(ServiceError::Crypto)?;

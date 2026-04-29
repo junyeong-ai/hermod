@@ -1,5 +1,6 @@
 use hermod_core::{AgentId, CapabilityToken, MessageBody, MessagePriority, Timestamp};
-use hermod_crypto::{CAPABILITY_VERSION, CapabilityClaim, Signer};
+use hermod_crypto::{CAPABILITY_VERSION, CapabilityClaim, LocalKeySigner, Signer};
+use hermod_daemon::local_agent::LocalAgentRegistry;
 use hermod_protocol::ipc::methods::{
     CapabilityDeliverParams, CapabilityDeliverResult, CapabilityIssueParams, CapabilityIssueResult,
     CapabilityListParams, CapabilityListResult, CapabilityRevokeParams, CapabilityRevokeResult,
@@ -12,14 +13,17 @@ use std::sync::{Arc, OnceLock};
 const DEFAULT_LIST_LIMIT: u32 = 100;
 const MAX_LIST_LIMIT: u32 = 500;
 
+use crate::audit_context::current_caller_agent;
 use crate::services::{MessageService, ServiceError, audit_or_warn};
 
 #[derive(Clone)]
 pub struct CapabilityService {
     db: Arc<dyn Database>,
     audit_sink: Arc<dyn AuditSink>,
-    signer: Arc<dyn Signer>,
-    self_id: AgentId,
+    /// Per-call signer derivation: the calling agent (resolved at the
+    /// IPC handshake) supplies the keypair that signs the cap claim.
+    /// Replaces the H2.5-era static `Arc<dyn Signer>`.
+    registry: LocalAgentRegistry,
     /// Set once at daemon startup (after MessageService exists) so
     /// `deliver` can ship a `CapabilityGrant` envelope to the
     /// audience. `OnceLock` because the wiring is single-shot and
@@ -29,9 +33,7 @@ pub struct CapabilityService {
 
 impl std::fmt::Debug for CapabilityService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CapabilityService")
-            .field("self_id", &self.self_id)
-            .finish_non_exhaustive()
+        f.debug_struct("CapabilityService").finish_non_exhaustive()
     }
 }
 
@@ -39,14 +41,12 @@ impl CapabilityService {
     pub fn new(
         db: Arc<dyn Database>,
         audit_sink: Arc<dyn AuditSink>,
-        signer: Arc<dyn Signer>,
+        registry: LocalAgentRegistry,
     ) -> Self {
-        let self_id = signer.agent_id();
         Self {
             db,
             audit_sink,
-            signer,
-            self_id,
+            registry,
             messages: Arc::new(OnceLock::new()),
         }
     }
@@ -57,10 +57,30 @@ impl CapabilityService {
         let _ = self.messages.set(messages);
     }
 
+    /// Resolve the caller agent + a signer wrapping its keypair.
+    /// Mirrors `MessageService::caller_signer` — every cap-issuing
+    /// IPC method runs inside an active `CALLER_AGENT` scope and
+    /// signs as that agent.
+    fn caller_signer(&self) -> Result<(AgentId, Arc<dyn Signer>), ServiceError> {
+        let caller = current_caller_agent().ok_or_else(|| {
+            ServiceError::InvalidParam(
+                "capability call requires an IPC caller scope (no caller_agent in context)".into(),
+            )
+        })?;
+        let agent = self.registry.lookup(&caller).ok_or_else(|| {
+            ServiceError::InvalidParam(format!(
+                "caller {caller} is not in this daemon's local-agent registry"
+            ))
+        })?;
+        let signer: Arc<dyn Signer> = Arc::new(LocalKeySigner::new(agent.keypair.clone()));
+        Ok((caller, signer))
+    }
+
     pub async fn issue(
         &self,
         params: CapabilityIssueParams,
     ) -> Result<CapabilityIssueResult, ServiceError> {
+        let (issuer, signer) = self.caller_signer()?;
         let now_ms = Timestamp::now().unix_ms();
         let exp = params
             .expires_in_secs
@@ -69,7 +89,7 @@ impl CapabilityService {
         let jti = ulid::Ulid::new().to_string();
         let claim = CapabilityClaim {
             v: CAPABILITY_VERSION,
-            iss: self.self_id.clone(),
+            iss: issuer.clone(),
             aud,
             scope: params.scope.clone(),
             target: params.target.clone(),
@@ -77,15 +97,14 @@ impl CapabilityService {
             exp,
             jti: jti.clone(),
         };
-        let token_bytes = self
-            .signer
+        let token_bytes = signer
             .sign_capability(&claim)
             .await
             .map_err(ServiceError::Crypto)?;
 
         let record = CapabilityRecord {
             id: jti.clone(),
-            issuer: self.self_id.clone(),
+            issuer: issuer.clone(),
             audience: claim.aud.clone(),
             scope: claim.scope.clone(),
             target: claim.target.clone(),
@@ -100,7 +119,7 @@ impl CapabilityService {
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),
-                actor: self.self_id.clone(),
+                actor: issuer,
                 action: "capability.issue".into(),
                 target: Some(jti.clone()),
                 details: Some(serde_json::json!({
@@ -134,9 +153,10 @@ impl CapabilityService {
                 "capability deliver attempted before MessageService was wired".into(),
             )
         })?;
+        let caller = current_caller_agent().ok_or_else(|| {
+            ServiceError::InvalidParam("capability.deliver requires an IPC caller scope".into())
+        })?;
 
-        // 1. Issue under the existing path so the audit + storage
-        //    side-effects mirror a regular `capability.issue`.
         let issue_result = self
             .issue(CapabilityIssueParams {
                 audience: Some(params.audience.id.clone()),
@@ -146,7 +166,6 @@ impl CapabilityService {
             })
             .await?;
 
-        // 2. Wrap the token in a `CapabilityGrant` envelope and ship.
         let token_bytes = issue_result.token.as_bytes().to_vec();
         let send = messages
             .send(MessageSendParams {
@@ -167,7 +186,7 @@ impl CapabilityService {
             AuditEntry {
                 id: None,
                 ts: Timestamp::now(),
-                actor: self.self_id.clone(),
+                actor: caller,
                 action: "capability.deliver".into(),
                 target: Some(params.audience.id.to_string()),
                 details: Some(serde_json::json!({
@@ -191,6 +210,9 @@ impl CapabilityService {
         &self,
         params: CapabilityRevokeParams,
     ) -> Result<CapabilityRevokeResult, ServiceError> {
+        let caller = current_caller_agent().ok_or_else(|| {
+            ServiceError::InvalidParam("capability.revoke requires an IPC caller scope".into())
+        })?;
         let now = Timestamp::now();
         let revoked = self.db.capabilities().revoke(&params.token_id, now).await?;
         if revoked {
@@ -199,7 +221,7 @@ impl CapabilityService {
                 AuditEntry {
                     id: None,
                     ts: now,
-                    actor: self.self_id.clone(),
+                    actor: caller,
                     action: "capability.revoke".into(),
                     target: Some(params.token_id.clone()),
                     details: None,
@@ -216,12 +238,13 @@ impl CapabilityService {
         &self,
         params: CapabilityListParams,
     ) -> Result<CapabilityListResult, ServiceError> {
+        let caller = current_caller_agent().ok_or_else(|| {
+            ServiceError::InvalidParam("capability.list requires an IPC caller scope".into())
+        })?;
         let limit = params
             .limit
             .unwrap_or(DEFAULT_LIST_LIMIT)
             .min(MAX_LIST_LIMIT);
-        // Default direction is Issued — preserves the long-standing
-        // "what did I grant?" view for unparam'd `capability list`.
         let direction = params
             .direction
             .unwrap_or(hermod_core::CapabilityDirection::Issued);
@@ -236,7 +259,7 @@ impl CapabilityService {
         let rows = self
             .db
             .capabilities()
-            .list(&self.self_id, now_ms, &filter)
+            .list(&caller, now_ms, &filter)
             .await?;
         let capabilities = rows
             .into_iter()

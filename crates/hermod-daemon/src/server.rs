@@ -66,8 +66,6 @@ pub async fn serve(
         .clone();
     let self_id = solo.agent_id.clone();
     let host_id = host_keypair.agent_id();
-    let agent_signer: Arc<dyn Signer> =
-        Arc::new(hermod_crypto::LocalKeySigner::new(solo.keypair.clone()));
     let key_ref = KeyRef::from_keypair(&solo.keypair, None);
 
     // Bearer authentication map for the remote-IPC listeners. Built
@@ -445,7 +443,7 @@ pub async fn serve(
         router.clone(),
         access.clone(),
         rate_limit.clone(),
-        agent_signer.clone(),
+        registry.clone(),
         remote.clone(),
         outbox_notifier.clone(),
     );
@@ -482,7 +480,7 @@ pub async fn serve(
         self_id.clone(),
         messages.clone(),
     );
-    let capabilities = CapabilityService::new(db.clone(), audit_sink.clone(), agent_signer.clone());
+    let capabilities = CapabilityService::new(db.clone(), audit_sink.clone(), registry.clone());
     capabilities.set_message_service(messages.clone());
     let dispatcher = Dispatcher {
         status: StatusService::new(db.clone(), key_ref, started),
