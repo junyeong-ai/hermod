@@ -134,12 +134,28 @@ pub async fn serve(
     // static key is the *host* keypair: federation handshakes
     // authenticate the daemon as a network entity, distinct from any
     // local agent's envelope-signing identity.
-    let transport: Arc<dyn hermod_routing::Transport> =
-        Arc::new(hermod_routing::WssNoiseTransport::new(
+    //
+    // Outbound TLS pin spec is configurable via `[federation] tls_pin`.
+    // Default: `Insecure` (Noise XX already provides cryptographic peer
+    // auth). Set to `public-ca` when a hosted broker fronts the
+    // daemon, `tofu` for SSH-style first-use pinning, or a 64-char
+    // SHA-256 hex for explicit fingerprint pinning.
+    let dial_pin =
+        parse_federation_pin_spec(&config.federation.tls_pin).context("[federation] tls_pin")?;
+    let pin_store = hermod_transport::pin::TlsPinStore::at_home(&home, "federation_pins.json");
+    info!(
+        spec = parse_federation_pin_label(&dial_pin),
+        "federation outbound TLS pin spec",
+    );
+    let transport: Arc<dyn hermod_routing::Transport> = Arc::new(
+        hermod_routing::WssNoiseTransport::new(
             host_keypair.clone(),
             tls.cert_pem.clone().into(),
             tls.key_pem.clone().into(),
-        ));
+            pin_store,
+        )
+        .with_dial_pin(dial_pin),
+    );
 
     let remote = RemoteDeliverer::new(transport.clone(), db.clone());
 
@@ -898,6 +914,82 @@ fn spawn_tls_reload_task(transport: Arc<dyn hermod_routing::Transport>, home: Pa
             }
         }
     });
+}
+
+/// Parse the `[federation] tls_pin` config value. `None` (or empty
+/// string after trim) defaults to `Insecure` — federation already
+/// authenticates peers cryptographically at the Noise XX layer, so
+/// the lowest-friction default is "any cert is fine, Noise will
+/// catch impersonation". Operators with hosted brokers (Cloud Run /
+/// IAP / Cloudflare) opt into `public-ca` for proper LB chain
+/// validation.
+fn parse_federation_pin_spec(
+    raw: &Option<String>,
+) -> anyhow::Result<hermod_transport::pin::PinSpec> {
+    use std::str::FromStr;
+    let trimmed = raw.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    match trimmed {
+        Some(s) => hermod_transport::pin::PinSpec::from_str(s).map_err(|e| anyhow::anyhow!("{e}")),
+        None => Ok(hermod_transport::pin::PinSpec::Insecure),
+    }
+}
+
+fn parse_federation_pin_label(spec: &hermod_transport::pin::PinSpec) -> &'static str {
+    match spec {
+        hermod_transport::pin::PinSpec::Tofu => "tofu",
+        hermod_transport::pin::PinSpec::PublicCa => "public-ca",
+        hermod_transport::pin::PinSpec::Insecure => "insecure",
+        hermod_transport::pin::PinSpec::Fingerprint(_) => "fingerprint",
+    }
+}
+
+#[cfg(test)]
+mod federation_pin_tests {
+    use super::*;
+    use hermod_transport::pin::PinSpec;
+
+    #[test]
+    fn unset_defaults_to_insecure() {
+        assert_eq!(parse_federation_pin_spec(&None).unwrap(), PinSpec::Insecure);
+        assert_eq!(
+            parse_federation_pin_spec(&Some("".into())).unwrap(),
+            PinSpec::Insecure,
+        );
+        assert_eq!(
+            parse_federation_pin_spec(&Some("   ".into())).unwrap(),
+            PinSpec::Insecure,
+        );
+    }
+
+    #[test]
+    fn keywords_parse() {
+        assert_eq!(
+            parse_federation_pin_spec(&Some("tofu".into())).unwrap(),
+            PinSpec::Tofu,
+        );
+        assert_eq!(
+            parse_federation_pin_spec(&Some("public-ca".into())).unwrap(),
+            PinSpec::PublicCa,
+        );
+        assert_eq!(
+            parse_federation_pin_spec(&Some("none".into())).unwrap(),
+            PinSpec::Insecure,
+        );
+    }
+
+    #[test]
+    fn fingerprint_parses() {
+        let fp = "AB".to_string() + &"00".repeat(31);
+        match parse_federation_pin_spec(&Some(fp)).unwrap() {
+            PinSpec::Fingerprint(s) => assert!(s.starts_with("ab:00:")),
+            other => panic!("expected Fingerprint, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(parse_federation_pin_spec(&Some("nonsense".into())).is_err());
+    }
 }
 
 #[cfg(test)]

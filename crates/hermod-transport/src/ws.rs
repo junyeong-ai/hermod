@@ -33,7 +33,7 @@ use tokio_tungstenite::{WebSocketStream, accept_async_with_config, client_async_
 use tracing::trace;
 
 use crate::error::TransportError;
-use crate::tls::{client_config_with_insecure_verifier, install_default_crypto_provider};
+use crate::tls::install_default_crypto_provider;
 
 /// Hard cap on a single Hermod wire message.
 ///
@@ -237,12 +237,27 @@ pub async fn connect(host: &str, port: u16) -> Result<WsStream, TransportError> 
     })
 }
 
-/// TLS-wrapped WebSocket connect. Captures the peer's cert SHA-256 fingerprint on
-/// `WsStream.peer_tls_fingerprint` so the routing layer can apply TOFU pinning.
+/// TLS-wrapped WebSocket connect with the *insecure* policy: any cert
+/// is accepted, the SHA-256 fingerprint is captured for routing-layer
+/// pinning. Equivalent to `connect_tls_with_policy(host, port,
+/// &TlsPinPolicy::Insecure)`. Kept for callers that want the lowest-
+/// friction default; everyone else picks an explicit policy.
 pub async fn connect_tls(host: &str, port: u16) -> Result<WsStream, TransportError> {
+    connect_tls_with_policy(host, port, &crate::pin::TlsPinPolicy::Insecure).await
+}
+
+/// TLS-wrapped WebSocket connect with an explicit pin policy. The
+/// rustls verifier is built from `policy`; `TlsPinPolicy::Tofu` writes
+/// to its store on first contact and fails loud on subsequent
+/// mismatch, `PublicCa` validates against the OS root store, etc.
+pub async fn connect_tls_with_policy(
+    host: &str,
+    port: u16,
+    policy: &crate::pin::TlsPinPolicy,
+) -> Result<WsStream, TransportError> {
     install_default_crypto_provider();
     let stream = TcpStream::connect((host, port)).await?;
-    let config = client_config_with_insecure_verifier();
+    let config = policy.build_client_config()?;
     let connector = TlsConnector::from(Arc::new(config));
     let server_name = rustls_pki_types::ServerName::try_from(host.to_string())
         .map_err(|e| TransportError::WebSocket(format!("invalid server name: {e}")))?;
@@ -252,6 +267,8 @@ pub async fn connect_tls(host: &str, port: u16) -> Result<WsStream, TransportErr
         .map_err(|e| TransportError::WebSocket(format!("tls handshake: {e}")))?;
 
     // Capture the cert fingerprint before consuming the TlsStream.
+    // Surfaced even when the verifier is `Insecure` so callers (Noise
+    // TOFU) can pin at their own layer.
     let peer_tls_fingerprint = tls
         .get_ref()
         .1

@@ -357,6 +357,19 @@ pub struct FederationConfig {
     /// daemon's directory on startup, just like a static seed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_broker: Option<String>,
+    /// Outbound TLS pin policy for federation dials (broker + every
+    /// peer this daemon connects to). Mirrors the IPC client's
+    /// `--pin` flag; one of `tofu` (default) | `public-ca` | `none`
+    /// | a 64-char SHA-256 fingerprint. `tofu` records the first-
+    /// seen cert under `$HERMOD_HOME/federation_pins.json` and
+    /// fail-loud on subsequent mismatch — the SSH host-key model.
+    /// `public-ca` is the right answer when the broker sits behind
+    /// Cloud Run / IAP / Cloudflare Access (LB cert rotates under a
+    /// stable hostname). `none` skips TLS validation entirely; only
+    /// for tests / fully-trusted LAN. Cryptographic peer auth still
+    /// happens at the Noise XX layer regardless of this policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_pin: Option<String>,
 }
 
 impl Default for FederationConfig {
@@ -367,6 +380,7 @@ impl Default for FederationConfig {
             peers: Vec::new(),
             mdns_beacon_validity_secs: defaults::mdns_beacon_validity(),
             upstream_broker: None,
+            tls_pin: None,
         }
     }
 }
@@ -593,6 +607,14 @@ impl Config {
         if let Ok(v) = std::env::var("HERMOD_FEDERATION_UPSTREAM_BROKER") {
             let trimmed = v.trim();
             self.federation.upstream_broker = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        if let Ok(v) = std::env::var("HERMOD_FEDERATION_TLS_PIN") {
+            let trimmed = v.trim();
+            self.federation.tls_pin = if trimmed.is_empty() {
                 None
             } else {
                 Some(trimmed.to_string())

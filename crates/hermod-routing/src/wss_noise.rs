@@ -13,7 +13,8 @@ use async_trait::async_trait;
 use hermod_core::{Endpoint, MessageId};
 use hermod_crypto::Keypair;
 use hermod_protocol::wire::{AckStatus, WireFrame};
-use hermod_transport::ws::{SharedTlsAcceptor, WsListener, connect_tls};
+use hermod_transport::pin::{PinSpec, TlsPinStore};
+use hermod_transport::ws::{SharedTlsAcceptor, WsListener, connect_tls_with_policy};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -43,37 +44,78 @@ pub struct WssNoiseTransport {
     host_keypair: Arc<Keypair>,
     tls_material: Option<(Arc<str>, Arc<str>)>,
     tls_state: Arc<Mutex<Option<SharedTlsAcceptor>>>,
+    /// Outbound TLS verification spec. The `Tofu` arm needs the
+    /// per-dial `host:port` to key its store, so the spec stays in
+    /// its operator-string form here and is materialised to a
+    /// `TlsPinPolicy` once per dial. Default: `Insecure` —
+    /// federation relies on Noise XX for cryptographic peer auth
+    /// regardless. Operators running through a public-CA-fronted
+    /// broker (Cloud Run, IAP, Cloudflare Access) set `PublicCa`.
+    dial_pin: Arc<PinSpec>,
+    /// TOFU pin store, used only when `dial_pin == PinSpec::Tofu`.
+    /// Each dial materialises a per-host_port `TlsPinPolicy::Tofu`
+    /// so a single transport handles many peers.
+    pin_store: TlsPinStore,
 }
 
 impl std::fmt::Debug for WssNoiseTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WssNoiseTransport")
             .field("listen_capable", &self.tls_material.is_some())
+            .field("dial_pin", &spec_label(&self.dial_pin))
             .finish_non_exhaustive()
+    }
+}
+
+fn spec_label(spec: &PinSpec) -> &'static str {
+    match spec {
+        PinSpec::Tofu => "tofu",
+        PinSpec::PublicCa => "public-ca",
+        PinSpec::Insecure => "insecure",
+        PinSpec::Fingerprint(_) => "fingerprint",
     }
 }
 
 impl WssNoiseTransport {
     /// Outbound-only constructor — no TLS material, `listen` returns an
     /// error. Used by daemons running pure outbound federation
-    /// (e.g. mobile clients that never accept inbound).
-    pub fn outbound_only(host_keypair: Arc<Keypair>) -> Self {
+    /// (e.g. mobile clients that never accept inbound). `pin_store`
+    /// is consulted only under TOFU policy; pass an unused store
+    /// when running with `PublicCa` / `Insecure` / `Fingerprint`.
+    pub fn outbound_only(host_keypair: Arc<Keypair>, pin_store: TlsPinStore) -> Self {
         Self {
             host_keypair,
             tls_material: None,
             tls_state: Arc::new(Mutex::new(None)),
+            dial_pin: Arc::new(PinSpec::Insecure),
+            pin_store,
         }
     }
 
     /// Full constructor: outbound + inbound. `cert_pem` / `key_pem` are
     /// the daemon's self-signed TLS material (see
-    /// `hermod_crypto::TlsMaterial`).
-    pub fn new(host_keypair: Arc<Keypair>, cert_pem: Arc<str>, key_pem: Arc<str>) -> Self {
+    /// `hermod_crypto::TlsMaterial`). Outbound dial verification
+    /// defaults to `Insecure`; override via [`Self::with_dial_pin`].
+    pub fn new(
+        host_keypair: Arc<Keypair>,
+        cert_pem: Arc<str>,
+        key_pem: Arc<str>,
+        pin_store: TlsPinStore,
+    ) -> Self {
         Self {
             host_keypair,
             tls_material: Some((cert_pem, key_pem)),
             tls_state: Arc::new(Mutex::new(None)),
+            dial_pin: Arc::new(PinSpec::Insecure),
+            pin_store,
         }
+    }
+
+    /// Replace the outbound dial pin spec. Server-side `accept` is
+    /// unaffected (peers verify our cert at *their* layer).
+    pub fn with_dial_pin(mut self, spec: PinSpec) -> Self {
+        self.dial_pin = Arc::new(spec);
+        self
     }
 }
 
@@ -161,7 +203,11 @@ impl Transport for WssNoiseTransport {
                 )));
             }
         };
-        let ws = connect_tls(&host, port)
+        let host_port = format!("{host}:{port}");
+        let policy = (*self.dial_pin)
+            .clone()
+            .resolve(self.pin_store.clone(), host_port);
+        let ws = connect_tls_with_policy(&host, port, &policy)
             .await
             .map_err(|e| PeerTransportError::Io(e.to_string()))?;
         let tls_fp = ws.peer_tls_fingerprint().map(|s| s.to_string());
