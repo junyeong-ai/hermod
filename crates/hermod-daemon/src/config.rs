@@ -424,7 +424,15 @@ mod defaults {
 }
 
 impl Config {
-    pub fn load_or_default(explicit: Option<&Path>, home: &Path) -> Result<Self> {
+    /// Read `config.toml` (from `explicit` if provided, otherwise
+    /// `<home>/config.toml`), layer `HERMOD_*` env overrides, and
+    /// validate. A missing file is fine — the daemon falls back to
+    /// `Self::default()` so a fresh install boots without a config.
+    /// Any other failure (parse error, malformed env override,
+    /// validation breach) returns `Err` so the operator sees the
+    /// problem at startup instead of debugging from "wrong default
+    /// got applied silently".
+    pub fn load(explicit: Option<&Path>, home: &Path) -> Result<Self> {
         let path = match explicit {
             Some(p) => p.to_path_buf(),
             None => home.join("config.toml"),
@@ -795,6 +803,39 @@ mod tests {
             mutate(&mut cfg);
             cfg.validate().unwrap_or_else(|e| panic!("{label}: {e:#}"));
         }
+    }
+
+    #[test]
+    fn validate_rejects_malformed_trusted_proxy_cidr() {
+        // Catch CIDR typos at boot rather than on the first
+        // XFF-bearing request; the runtime resolver is structured to
+        // never panic on a bad CIDR, so validation is the single
+        // diagnostic surface.
+        let mut cfg = Config::default();
+        cfg.daemon.trusted_proxies = vec!["not-a-cidr".into()];
+        let err = cfg
+            .validate()
+            .expect_err("malformed trusted_proxies entry must be rejected");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("trusted_proxies entry") && msg.contains("CIDR"),
+            "error must point at the field and the expected form, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_well_formed_trusted_proxy_cidrs() {
+        // Mix of IPv4 / IPv6, single-host (`/32`) and network ranges —
+        // every combination ipnet accepts must pass.
+        let mut cfg = Config::default();
+        cfg.daemon.trusted_proxies = vec![
+            "10.0.0.0/8".into(),
+            "172.16.0.0/12".into(),
+            "192.168.1.1/32".into(),
+            "fd00::/8".into(),
+            "2001:db8::/32".into(),
+        ];
+        cfg.validate().expect("well-formed CIDRs must validate");
     }
 
     #[test]

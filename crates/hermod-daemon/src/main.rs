@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     let home = paths::resolve_home(cli.home.as_deref())?;
-    let config = Config::load_or_default(cli.config.as_deref(), &home).context("load config")?;
+    let config = Config::load(cli.config.as_deref(), &home).context("load config")?;
 
     info!(home = %home.display(), "starting hermodd");
 

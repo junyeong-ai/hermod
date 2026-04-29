@@ -456,7 +456,7 @@ fn init_tracing() {
 }
 
 fn resolve_socket_from_config(home: &std::path::Path) -> anyhow::Result<PathBuf> {
-    let cfg = hermod_daemon::config::Config::load_or_default(None, home)?;
+    let cfg = hermod_daemon::config::Config::load(None, home)?;
     Ok(hermod_daemon::paths::expand(&cfg.daemon.socket_path, home))
 }
 

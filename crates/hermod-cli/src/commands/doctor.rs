@@ -36,7 +36,7 @@ pub async fn run(home: &Path, target: &ClientTarget) -> Result<()> {
     // Audit is backend-aware on both axes: a Postgres-backed daemon
     // has no local database file; a cloud-blob daemon has no local
     // blob root. Resolve the same DSNs the daemon will see at boot.
-    let config = Config::load_or_default(None, home).context("load config")?;
+    let config = Config::load(None, home).context("load config")?;
     let storage_dsn = paths::expand_dsn(&config.storage.dsn, home);
     let blob_dsn = paths::expand_dsn(&config.blob.dsn, home);
     for (file, finding) in hermod_daemon::home_layout::audit(home, &storage_dsn, &blob_dsn) {
