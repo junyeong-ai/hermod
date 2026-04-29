@@ -714,6 +714,52 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_both_ipc_listen_keys_set() {
+        // The two listener flavours describe mutually-exclusive TLS
+        // topologies — `ipc_listen_wss` terminates TLS at the daemon,
+        // `ipc_listen_ws` expects an upstream proxy to do it. A
+        // config that sets both is incoherent. Reject loud at boot
+        // rather than picking one silently and confusing the operator.
+        let mut cfg = Config::default();
+        cfg.daemon.ipc_listen_wss = Some("0.0.0.0:7824".into());
+        cfg.daemon.ipc_listen_ws = Some("0.0.0.0:7825".into());
+        let err = cfg
+            .validate()
+            .err()
+            .expect("both listeners set must be rejected");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("mutually exclusive"),
+            "error must explain the conflict, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_either_ipc_listen_key_alone() {
+        // Each flavour alone is the supported topology — pin both
+        // single-key configurations as accepted so a future change to
+        // the validator can't accidentally regress one of them.
+        for (label, mutate) in [
+            (
+                "ipc_listen_wss alone",
+                Box::new(|c: &mut Config| {
+                    c.daemon.ipc_listen_wss = Some("0.0.0.0:7824".into());
+                }) as Box<dyn FnOnce(&mut Config)>,
+            ),
+            (
+                "ipc_listen_ws alone",
+                Box::new(|c: &mut Config| {
+                    c.daemon.ipc_listen_ws = Some("0.0.0.0:7824".into());
+                }),
+            ),
+        ] {
+            let mut cfg = Config::default();
+            mutate(&mut cfg);
+            cfg.validate().unwrap_or_else(|e| panic!("{label}: {e:#}"));
+        }
+    }
+
+    #[test]
     fn broker_mode_serde_round_trips_each_variant() {
         // Each mode must round-trip through TOML so a config file
         // written by one daemon binary parses on a peer running the
