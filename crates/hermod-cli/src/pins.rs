@@ -79,11 +79,12 @@ impl RemotePinStore {
     }
 }
 
-/// What to do when validating the daemon's TLS cert.
+/// What to do when validating the daemon's TLS cert. Variants share
+/// vocabulary with [`PinArg`] (the parse-side enum) — the only
+/// difference is `Tofu` carrying the runtime store + host_port that
+/// can't be expressed in a CLI string.
 #[derive(Debug, Clone)]
 pub enum PinPolicy {
-    /// Cert SHA-256 must equal this fingerprint (lowercase, colon-separated).
-    Explicit(String),
     /// First-connect: record the observed fingerprint to `store`. Subsequent
     /// connects: fail loud on mismatch. `host_port` is the lookup key.
     Tofu {
@@ -99,7 +100,9 @@ pub enum PinPolicy {
     /// the cert's SAN list, matching browser semantics.
     PublicCa,
     /// Skip TLS validation entirely. Strictly opt-in for tests / known-LAN.
-    InsecureNoVerify,
+    Insecure,
+    /// Cert SHA-256 must equal this fingerprint (lowercase, colon-separated).
+    Fingerprint(String),
 }
 
 /// CLI argument shape for `--pin`. `clap` parses one of the textual
@@ -113,8 +116,10 @@ pub enum PinArg {
     Tofu,
     /// Validate via the OS root CA store.
     PublicCa,
-    /// Skip TLS validation.
-    None,
+    /// Skip TLS validation. The CLI surface token is `none` for
+    /// operator ergonomics; the variant uses `Insecure` to match
+    /// `PinPolicy` and to avoid visual collision with `Option::None`.
+    Insecure,
     /// Explicit SHA-256 fingerprint (lowercase, colon-separated form
     /// produced by [`PinPolicy::normalize_fingerprint`]).
     Fingerprint(String),
@@ -127,7 +132,7 @@ impl std::str::FromStr for PinArg {
         match s {
             "tofu" => Ok(Self::Tofu),
             "public-ca" => Ok(Self::PublicCa),
-            "none" => Ok(Self::None),
+            "none" => Ok(Self::Insecure),
             other => PinPolicy::normalize_fingerprint(other)
                 .map(Self::Fingerprint)
                 .map_err(|e| {
@@ -200,7 +205,10 @@ mod tests {
             PinArg::from_str("public-ca").unwrap(),
             PinArg::PublicCa
         ));
-        assert!(matches!(PinArg::from_str("none").unwrap(), PinArg::None));
+        assert!(matches!(
+            PinArg::from_str("none").unwrap(),
+            PinArg::Insecure
+        ));
         let fp = "AB".to_string() + &"00".repeat(31);
         match PinArg::from_str(&fp).unwrap() {
             PinArg::Fingerprint(s) => assert!(s.starts_with("ab:00:")),

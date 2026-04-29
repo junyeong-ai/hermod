@@ -522,9 +522,9 @@ fn build_pin_policy(
     home: &std::path::Path,
 ) -> anyhow::Result<pins::PinPolicy> {
     match &cli.pin {
-        pins::PinArg::None => Ok(pins::PinPolicy::InsecureNoVerify),
+        pins::PinArg::Insecure => Ok(pins::PinPolicy::Insecure),
         pins::PinArg::PublicCa => Ok(pins::PinPolicy::PublicCa),
-        pins::PinArg::Fingerprint(fp) => Ok(pins::PinPolicy::Explicit(fp.clone())),
+        pins::PinArg::Fingerprint(fp) => Ok(pins::PinPolicy::Fingerprint(fp.clone())),
         pins::PinArg::Tofu => {
             let host = url
                 .host_str()

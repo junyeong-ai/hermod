@@ -221,79 +221,9 @@ impl RemoteIpcClient {
 
         let connector = if scheme == "wss" {
             install_default_crypto_provider();
-            let config = match policy {
-                PinPolicy::InsecureNoVerify => ClientConfig::builder_with_protocol_versions(
-                    hermod_transport::tls::PROTOCOL_VERSIONS,
-                )
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(NoVerify))
-                .with_no_client_auth(),
-                PinPolicy::Explicit(expected) => ClientConfig::builder_with_protocol_versions(
-                    hermod_transport::tls::PROTOCOL_VERSIONS,
-                )
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(PinningVerifier::explicit(expected)))
-                .with_no_client_auth(),
-                PinPolicy::Tofu { store, host_port } => {
-                    ClientConfig::builder_with_protocol_versions(
-                        hermod_transport::tls::PROTOCOL_VERSIONS,
-                    )
-                    .dangerous()
-                    .with_custom_certificate_verifier(Arc::new(PinningVerifier::tofu(
-                        store, host_port,
-                    )))
-                    .with_no_client_auth()
-                }
-                // Public-CA mode delegates chain + hostname validation
-                // to rustls' built-in `WebPkiServerVerifier` over the
-                // OS trust store. No custom verifier — `with_root_certificates`
-                // is the production-blessed path that enforces SAN /
-                // expiry / EKU correctly. `connect_async_tls_with_config`
-                // forwards the URL host as the SNI / verification
-                // target, so cert rotation on the LB just works.
-                PinPolicy::PublicCa => {
-                    let mut roots = rustls::RootCertStore::empty();
-                    let native = rustls_native_certs::load_native_certs();
-                    // `rustls_native_certs::Error` is not `Clone`, so we
-                    // capture the count up front and let `?`-debug
-                    // borrow `native.errors` immutably before moving
-                    // `native.certs` into the parser below.
-                    let load_error_count = native.errors.len();
-                    if !native.errors.is_empty() {
-                        tracing::debug!(
-                            errors = ?native.errors,
-                            "rustls-native-certs reported {} non-fatal load error(s)",
-                            load_error_count,
-                        );
-                    }
-                    let (added, ignored) = roots.add_parsable_certificates(native.certs);
-                    if added == 0 {
-                        // Three distinct causes flow into `added == 0`,
-                        // each with a different operator action — surface
-                        // them all instead of blanket-blaming the trust
-                        // store. `load_errors` reports loader-stage
-                        // failures (e.g. unreadable system store);
-                        // `ignored` reports parser-stage failures (the
-                        // store had bytes we couldn't turn into certs).
-                        return Err(RemoteConnectError::Other(anyhow!(
-                            "--pin public-ca requested but no usable root CAs were loaded \
-                             from the OS trust store (loader errors: {load_errs}, parsed-but-\
-                             rejected: {ignored}). Install/repair the system CA bundle \
-                             (`update-ca-certificates` on Debian, `security` keychain on \
-                             macOS, …), or use `--pin <sha256>` with an explicitly-\
-                             provisioned fingerprint",
-                            load_errs = load_error_count,
-                            ignored = ignored,
-                        )));
-                    }
-                    ClientConfig::builder_with_protocol_versions(
-                        hermod_transport::tls::PROTOCOL_VERSIONS,
-                    )
-                    .with_root_certificates(roots)
-                    .with_no_client_auth()
-                }
-            };
-            Some(Connector::Rustls(Arc::new(config)))
+            Some(Connector::Rustls(Arc::new(build_client_tls_config(
+                policy,
+            )?)))
         } else {
             None
         };
@@ -424,6 +354,71 @@ pub async fn connect_remote_with_refresh(
 /// Map a second-attempt failure to a clear operator-facing message.
 /// `Other` propagates verbatim (TLS / pin / IO failures aren't
 /// auth-related and shouldn't be reframed as auth issues).
+/// Build the rustls `ClientConfig` for the chosen [`PinPolicy`].
+/// Three policies hand a custom verifier to the same dangerous-mode
+/// builder; `PublicCa` is the one branch that uses rustls'
+/// production-blessed `WebPkiServerVerifier` over the OS trust store
+/// (`with_root_certificates`), enforcing SAN / expiry / EKU correctly.
+/// `connect_async_tls_with_config` forwards the URL host as the SNI /
+/// verification target, so cert rotation on the LB just works.
+fn build_client_tls_config(policy: PinPolicy) -> Result<ClientConfig, RemoteConnectError> {
+    let base =
+        ClientConfig::builder_with_protocol_versions(hermod_transport::tls::PROTOCOL_VERSIONS);
+    match policy {
+        PinPolicy::PublicCa => Ok(base
+            .with_root_certificates(load_native_roots()?)
+            .with_no_client_auth()),
+        PinPolicy::Insecure => Ok(base
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoVerify))
+            .with_no_client_auth()),
+        PinPolicy::Fingerprint(expected) => Ok(base
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(PinningVerifier::fingerprint(expected)))
+            .with_no_client_auth()),
+        PinPolicy::Tofu { store, host_port } => Ok(base
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(PinningVerifier::tofu(store, host_port)))
+            .with_no_client_auth()),
+    }
+}
+
+/// Load the OS trust store via `rustls-native-certs` and return the
+/// populated `RootCertStore`. Distinguishes loader-stage failures
+/// (system store unreadable) from parser-stage failures (bytes
+/// present but unparseable) so the error message can point at the
+/// actual cause — an operator with a broken CA bundle gets a
+/// different remediation hint than one whose SDK rejected the certs.
+fn load_native_roots() -> Result<rustls::RootCertStore, RemoteConnectError> {
+    let mut roots = rustls::RootCertStore::empty();
+    let native = rustls_native_certs::load_native_certs();
+    // `rustls_native_certs::Error` is not `Clone`, so we capture the
+    // count up front and let `?`-debug borrow `native.errors`
+    // immutably before moving `native.certs` into the parser below.
+    let load_error_count = native.errors.len();
+    if !native.errors.is_empty() {
+        tracing::debug!(
+            errors = ?native.errors,
+            "rustls-native-certs reported {} non-fatal load error(s)",
+            load_error_count,
+        );
+    }
+    let (added, ignored) = roots.add_parsable_certificates(native.certs);
+    if added == 0 {
+        return Err(RemoteConnectError::Other(anyhow!(
+            "--pin public-ca requested but no usable root CAs were loaded \
+             from the OS trust store (loader errors: {load_errs}, parsed-but-\
+             rejected: {ignored}). Install/repair the system CA bundle \
+             (`update-ca-certificates` on Debian, `security` keychain on \
+             macOS, …), or use `--pin <sha256>` with an explicitly-\
+             provisioned fingerprint",
+            load_errs = load_error_count,
+            ignored = ignored,
+        )));
+    }
+    Ok(roots)
+}
+
 fn escalate_after_refresh(e: RemoteConnectError) -> anyhow::Error {
     match e {
         RemoteConnectError::Unauthorized => anyhow!(
@@ -471,7 +466,7 @@ struct PinningVerifier {
 
 #[derive(Debug)]
 enum PinningMode {
-    Explicit {
+    Fingerprint {
         expected: String,
     },
     Tofu {
@@ -481,9 +476,9 @@ enum PinningMode {
 }
 
 impl PinningVerifier {
-    fn explicit(expected: String) -> Self {
+    fn fingerprint(expected: String) -> Self {
         Self {
-            mode: PinningMode::Explicit { expected },
+            mode: PinningMode::Fingerprint { expected },
         }
     }
     fn tofu(store: RemotePinStore, host_port: String) -> Self {
@@ -504,7 +499,7 @@ impl ServerCertVerifier for PinningVerifier {
     ) -> Result<ServerCertVerified, rustls::Error> {
         let observed = sha256_fp(end_entity.as_ref());
         match &self.mode {
-            PinningMode::Explicit { expected } => {
+            PinningMode::Fingerprint { expected } => {
                 if &observed == expected {
                     Ok(ServerCertVerified::assertion())
                 } else {
