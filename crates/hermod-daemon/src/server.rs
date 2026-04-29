@@ -538,47 +538,33 @@ pub async fn serve(
     // Optional remote IPC over WebSocket+Bearer. Lets `hermod --remote …`
     // and `hermod mcp --remote …` connect to this daemon over the network
     // with the same JSON-RPC surface the local Unix socket serves. Two
-    // mutually-exclusive flavours (config layer enforces exclusivity):
+    // mutually-exclusive flavours (config layer enforces exclusivity at
+    // load time):
     //   * `ipc_listen_wss` — TLS terminated at the daemon, reuses the
     //     daemon's TLS material. Federation + LAN deployments.
     //   * `ipc_listen_ws`  — plaintext, expects an upstream reverse
     //     proxy (Cloud Run, IAP, oauth2-proxy, …) to terminate TLS.
-    if let Some(addr_str) = &config.daemon.ipc_listen_wss {
-        match addr_str.parse::<std::net::SocketAddr>() {
-            Ok(addr) => {
-                let dispatcher_for_ipc = dispatcher.clone();
-                let tls_for_ipc = tls.clone();
-                let token = bearer_token.clone();
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        crate::ipc_remote::serve_wss(addr, tls_for_ipc, token, dispatcher_for_ipc)
-                            .await
-                    {
-                        tracing::error!(error = %e, "remote IPC (WSS) listener exited");
-                    }
-                });
+    if let Some(addr) = parse_listen_addr(&config.daemon.ipc_listen_wss, "ipc_listen_wss") {
+        let dispatcher_for_ipc = dispatcher.clone();
+        let tls_for_ipc = tls.clone();
+        let token = bearer_token.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                crate::ipc_remote::serve_wss(addr, tls_for_ipc, token, dispatcher_for_ipc).await
+            {
+                tracing::error!(error = %e, "remote IPC (WSS) listener exited");
             }
-            Err(e) => {
-                tracing::warn!(addr = %addr_str, error = %e, "invalid ipc_listen_wss");
+        });
+    }
+    if let Some(addr) = parse_listen_addr(&config.daemon.ipc_listen_ws, "ipc_listen_ws") {
+        warn_if_plaintext_exposed(addr);
+        let dispatcher_for_ipc = dispatcher.clone();
+        let token = bearer_token.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::ipc_remote::serve_ws(addr, token, dispatcher_for_ipc).await {
+                tracing::error!(error = %e, "remote IPC (WS) listener exited");
             }
-        }
-    } else if let Some(addr_str) = &config.daemon.ipc_listen_ws {
-        match addr_str.parse::<std::net::SocketAddr>() {
-            Ok(addr) => {
-                let dispatcher_for_ipc = dispatcher.clone();
-                let token = bearer_token.clone();
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        crate::ipc_remote::serve_ws(addr, token, dispatcher_for_ipc).await
-                    {
-                        tracing::error!(error = %e, "remote IPC (WS) listener exited");
-                    }
-                });
-            }
-            Err(e) => {
-                tracing::warn!(addr = %addr_str, error = %e, "invalid ipc_listen_ws");
-            }
-        }
+        });
     }
 
     // Accept loop until SIGINT or SIGTERM.
@@ -746,6 +732,43 @@ impl UpstreamBroker {
 /// clear error to react to.
 ///
 /// Lives in its own task so a SIGHUP never blocks the accept loop and
+/// Parse an `Option<String>` listen address into a `SocketAddr`,
+/// logging at warn-level if the string is present-but-invalid. Returns
+/// `None` for both "unset" and "invalid" — the caller treats them
+/// identically (don't spawn the listener), but the warn lets the
+/// operator see that their config wasn't applied.
+fn parse_listen_addr(raw: &Option<String>, label: &str) -> Option<std::net::SocketAddr> {
+    let raw = raw.as_ref()?;
+    match raw.parse::<std::net::SocketAddr>() {
+        Ok(addr) => Some(addr),
+        Err(e) => {
+            tracing::warn!(addr = %raw, error = %e, "invalid {label}");
+            None
+        }
+    }
+}
+
+/// Plaintext WebSocket exposes the bearer token to anyone on the wire
+/// between client and daemon. Operators MAY bind it to a non-loopback
+/// interface intentionally (private network, VPN, in-cluster pod IP),
+/// but the more common cause of a 0.0.0.0 bind is "forgot to set up
+/// the fronting reverse proxy first". Surface a warn so the misuse
+/// case is visible without refusing the bind (which would block the
+/// intentional case).
+fn warn_if_plaintext_exposed(addr: std::net::SocketAddr) {
+    if !addr.ip().is_loopback() {
+        tracing::warn!(
+            addr = %addr,
+            "ipc_listen_ws is bound to a non-loopback address — this is \
+             plaintext WebSocket. The bearer token rides in the clear unless \
+             an upstream TLS-terminating reverse proxy (Cloud Run, IAP, \
+             oauth2-proxy, Cloudflare Access, ALB+Cognito, k8s ingress) is in \
+             front of this listener. If you intended TLS-at-the-daemon, switch \
+             to `ipc_listen_wss` instead."
+        );
+    }
+}
+
 /// a slow disk read never delays an in-flight rotation. Terminates
 /// when the daemon's main task exits (the spawned task is detached;
 /// the runtime drops it on shutdown).

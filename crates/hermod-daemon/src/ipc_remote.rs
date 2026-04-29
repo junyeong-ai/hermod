@@ -31,6 +31,7 @@ use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
@@ -49,6 +50,44 @@ const EXPECTED_BEARER_PREFIX: &str = "Bearer ";
 /// enough that a misbehaving client can't pin the daemon's memory.
 const MAX_REMOTE_IPC_BYTES: usize = 1024 * 1024;
 
+/// Pause after a transient `accept` failure (FD exhaustion, RST
+/// flood, ephemeral kernel resource pressure). Short enough that
+/// recovery is prompt; long enough that a hard error doesn't pin a
+/// CPU spinning on the same `accept` call.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(200);
+
+/// Per-connection wrap chosen at listener-construction time. Adding a
+/// new transport (mTLS, Unix-socket-bridge, …) is one new variant
+/// here plus its arm in [`AcceptStrategy::wrap`].
+enum AcceptStrategy {
+    /// Plaintext WebSocket — the upstream reverse proxy terminates
+    /// TLS and forwards plain HTTP to the daemon.
+    Plain,
+    /// TLS terminated at the daemon. Used by federation peers and
+    /// LAN deployments that don't sit behind a fronting proxy.
+    Tls(TlsAcceptor),
+}
+
+impl AcceptStrategy {
+    /// Apply the per-connection wrap to a freshly-accepted TCP socket
+    /// and run the WebSocket handshake + JSON-RPC dispatch on top.
+    async fn wrap(
+        &self,
+        sock: tokio::net::TcpStream,
+        peer: SocketAddr,
+        bearer: Arc<SecretString>,
+        dispatcher: Dispatcher,
+    ) -> Result<()> {
+        match self {
+            AcceptStrategy::Plain => handshake_and_serve(sock, peer, bearer, dispatcher).await,
+            AcceptStrategy::Tls(acceptor) => {
+                let stream = acceptor.accept(sock).await.context("TLS handshake")?;
+                handshake_and_serve(stream, peer, bearer, dispatcher).await
+            }
+        }
+    }
+}
+
 /// TLS-at-the-daemon listener. Use when the daemon is reachable over
 /// the network without a fronting reverse proxy (federation peers
 /// connecting directly, internal LAN, …).
@@ -62,18 +101,11 @@ pub async fn serve_wss(
     let listener = TcpListener::bind(addr).await?;
     let local = listener.local_addr()?;
     info!(addr = %local, "remote IPC (WSS+Bearer) listener up");
-
     accept_loop(
         listener,
+        AcceptStrategy::Tls(acceptor),
         bearer_token,
         dispatcher,
-        move |sock, peer, t, d| {
-            let acceptor = acceptor.clone();
-            Box::pin(async move {
-                let stream = acceptor.accept(sock).await.context("TLS handshake")?;
-                handshake_and_serve(stream, peer, t, d).await
-            })
-        },
     )
     .await
 }
@@ -92,47 +124,33 @@ pub async fn serve_ws(
     let listener = TcpListener::bind(addr).await?;
     let local = listener.local_addr()?;
     info!(addr = %local, "remote IPC (WS+Bearer, TLS-upstream) listener up");
-
-    accept_loop(listener, bearer_token, dispatcher, |sock, peer, t, d| {
-        Box::pin(async move { handshake_and_serve(sock, peer, t, d).await })
-    })
-    .await
+    accept_loop(listener, AcceptStrategy::Plain, bearer_token, dispatcher).await
 }
 
-/// Shared accept loop — the per-connection wrap differs only in
-/// whether a TLS handshake runs before the WebSocket handshake.
-async fn accept_loop<F>(
+/// Shared accept loop. One per listener. The `strategy` decides what
+/// happens between TCP accept and WebSocket handshake — clone-free
+/// for `Plain`, `acceptor.clone()` for `Tls` (cheap `Arc` clone).
+async fn accept_loop(
     listener: TcpListener,
+    strategy: AcceptStrategy,
     bearer_token: Arc<SecretString>,
     dispatcher: Dispatcher,
-    wrap: F,
-) -> Result<()>
-where
-    F: Fn(
-            tokio::net::TcpStream,
-            SocketAddr,
-            Arc<SecretString>,
-            Dispatcher,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-{
+) -> Result<()> {
+    let strategy = Arc::new(strategy);
     loop {
         let (sock, peer) = match listener.accept().await {
             Ok(p) => p,
             Err(e) => {
                 warn!(error = %e, "remote IPC accept failed");
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                tokio::time::sleep(ACCEPT_BACKOFF).await;
                 continue;
             }
         };
-        let token = bearer_token.clone();
+        let strategy = strategy.clone();
+        let bearer = bearer_token.clone();
         let dispatcher = dispatcher.clone();
-        let wrap = wrap.clone();
         tokio::spawn(async move {
-            if let Err(e) = wrap(sock, peer, token, dispatcher).await {
+            if let Err(e) = strategy.wrap(sock, peer, bearer, dispatcher).await {
                 debug!(peer = %peer, error = %e, "remote IPC connection ended");
             }
         });
