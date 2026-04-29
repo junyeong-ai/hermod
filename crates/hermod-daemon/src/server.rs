@@ -544,13 +544,22 @@ pub async fn serve(
     //     daemon's TLS material. Federation + LAN deployments.
     //   * `ipc_listen_ws`  — plaintext, expects an upstream reverse
     //     proxy (Cloud Run, IAP, oauth2-proxy, …) to terminate TLS.
+    //
+    // Both listeners share the parsed `trusted_proxies` set — any
+    // listener that runs behind an L7 reverse proxy benefits from the
+    // X-Forwarded-For resolution that recovers the originating client
+    // IP. Empty set is a no-op.
+    let trusted_proxies =
+        std::sync::Arc::new(parse_trusted_proxies(&config.daemon.trusted_proxies));
     if let Some(addr) = parse_listen_addr(&config.daemon.ipc_listen_wss, "ipc_listen_wss") {
         let dispatcher_for_ipc = dispatcher.clone();
         let tls_for_ipc = tls.clone();
         let token = bearer_token.clone();
+        let trusted = trusted_proxies.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                crate::ipc_remote::serve_wss(addr, tls_for_ipc, token, dispatcher_for_ipc).await
+                crate::ipc_remote::serve_wss(addr, tls_for_ipc, token, trusted, dispatcher_for_ipc)
+                    .await
             {
                 tracing::error!(error = %e, "remote IPC (WSS) listener exited");
             }
@@ -560,8 +569,11 @@ pub async fn serve(
         warn_if_plaintext_exposed(addr);
         let dispatcher_for_ipc = dispatcher.clone();
         let token = bearer_token.clone();
+        let trusted = trusted_proxies.clone();
         tokio::spawn(async move {
-            if let Err(e) = crate::ipc_remote::serve_ws(addr, token, dispatcher_for_ipc).await {
+            if let Err(e) =
+                crate::ipc_remote::serve_ws(addr, token, trusted, dispatcher_for_ipc).await
+            {
                 tracing::error!(error = %e, "remote IPC (WS) listener exited");
             }
         });
@@ -746,6 +758,29 @@ fn parse_listen_addr(raw: &Option<String>, label: &str) -> Option<std::net::Sock
             None
         }
     }
+}
+
+/// Parse the operator-supplied CIDR strings into the typed
+/// representation `client_ip::resolve_client_ip` consumes. Config
+/// validation already rejected malformed entries at load time
+/// (`Config::validate`), so reaching this with an unparseable string
+/// would be a regression in the validation pass — fall back to "drop
+/// the bad entry" with a warn rather than panicking, so the daemon
+/// keeps running.
+fn parse_trusted_proxies(raw: &[String]) -> Vec<ipnet::IpNet> {
+    raw.iter()
+        .filter_map(|s| match s.parse::<ipnet::IpNet>() {
+            Ok(net) => Some(net),
+            Err(e) => {
+                tracing::warn!(
+                    entry = %s,
+                    error = %e,
+                    "trusted_proxies entry skipped — config.validate should have caught this"
+                );
+                None
+            }
+        })
+        .collect()
 }
 
 /// Plaintext WebSocket exposes the bearer token to anyone on the wire

@@ -258,6 +258,23 @@ pub struct DaemonConfig {
     /// recycle) lower this too.
     #[serde(default = "defaults::shutdown_grace")]
     pub shutdown_grace_secs: u64,
+    /// CIDR ranges of reverse proxies whose `X-Forwarded-For` header
+    /// the daemon will trust to recover the originating client IP for
+    /// audit logging.
+    ///
+    /// Default: empty — XFF is ignored, the TCP peer IP is the client
+    /// IP. The well-established trusted-proxy pattern (nginx
+    /// `set_real_ip_from`, Apache `mod_remoteip`, Envoy
+    /// `xff_num_trusted_hops`) governs the resolution: see
+    /// [`crate::client_ip::resolve_client_ip`].
+    ///
+    /// Specify upstream **proxy networks** here, never public-internet
+    /// ranges — an entry that covers an attacker-reachable IP would
+    /// let them forge audit IPs by sending a crafted XFF header. Each
+    /// entry is parsed by [`ipnet::IpNet`] (`10.0.0.0/8`,
+    /// `172.16.0.0/12`, `2001:db8::/32`, …).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_proxies: Vec<String>,
 }
 
 impl Default for DaemonConfig {
@@ -269,6 +286,7 @@ impl Default for DaemonConfig {
             ipc_listen_ws: None,
             metrics_listen: None,
             shutdown_grace_secs: defaults::shutdown_grace(),
+            trusted_proxies: Vec::new(),
         }
     }
 }
@@ -493,6 +511,16 @@ impl Config {
                 self.daemon.shutdown_grace_secs
             );
         }
+        // Pre-parse every CIDR so a typo surfaces at boot, not on the
+        // first XFF-bearing request. The parsed values are re-derived
+        // at the use site (`crate::client_ip::resolve_client_ip`); the
+        // round-trip here is purely a syntactic check against the
+        // operator's strings.
+        for raw in &self.daemon.trusted_proxies {
+            raw.parse::<ipnet::IpNet>().with_context(|| {
+                format!("invalid [daemon] trusted_proxies entry {raw:?} (expected CIDR like `10.0.0.0/8`)")
+            })?;
+        }
         Ok(())
     }
 
@@ -520,6 +548,17 @@ impl Config {
             self.daemon.shutdown_grace_secs = v
                 .parse()
                 .with_context(|| format!("invalid HERMOD_DAEMON_SHUTDOWN_GRACE_SECS = {v:?}"))?;
+        }
+        if let Ok(v) = std::env::var("HERMOD_DAEMON_TRUSTED_PROXIES") {
+            // Comma-separated list of CIDR strings; CIDR validity is
+            // checked in `validate()` so a single env var carrying a
+            // bad entry surfaces with the same message format the TOML
+            // path produces.
+            self.daemon.trusted_proxies = v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
         }
         if let Ok(v) = std::env::var("HERMOD_STORAGE_DSN") {
             self.storage.dsn = v;

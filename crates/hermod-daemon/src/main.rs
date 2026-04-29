@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use tracing::info;
 
 mod bootstrap;
+mod client_ip;
 mod dispatcher;
 mod federation;
 mod inbound;

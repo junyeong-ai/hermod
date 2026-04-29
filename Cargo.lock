@@ -1128,6 +1128,7 @@ dependencies = [
  "hermod-storage",
  "hermod-transport",
  "hex",
+ "ipnet",
  "libc",
  "rand 0.8.6",
  "rustls",

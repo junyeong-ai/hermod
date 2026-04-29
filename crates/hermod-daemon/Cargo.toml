@@ -59,6 +59,7 @@ strum              = { workspace = true }
 futures            = { workspace = true }
 zeroize            = { workspace = true }
 libc               = { workspace = true }
+ipnet              = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

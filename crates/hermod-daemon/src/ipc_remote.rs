@@ -21,11 +21,13 @@
 //! The two are mutually exclusive; the config layer rejects both
 //! being set (see [`crate::config::Config::validate`]).
 
+use crate::client_ip::resolve_client_ip;
 use crate::dispatcher::Dispatcher;
 use anyhow::{Context, Result, anyhow};
 use futures::{SinkExt, StreamExt};
 use hermod_crypto::{SecretString, TlsMaterial};
 use hermod_protocol::ipc::{Request, Response, message::Id};
+use ipnet::IpNet;
 use rustls::ServerConfig;
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
@@ -76,13 +78,16 @@ impl AcceptStrategy {
         sock: tokio::net::TcpStream,
         peer: SocketAddr,
         bearer: Arc<SecretString>,
+        trusted_proxies: Arc<Vec<IpNet>>,
         dispatcher: Dispatcher,
     ) -> Result<()> {
         match self {
-            AcceptStrategy::Plain => handshake_and_serve(sock, peer, bearer, dispatcher).await,
+            AcceptStrategy::Plain => {
+                handshake_and_serve(sock, peer, bearer, trusted_proxies, dispatcher).await
+            }
             AcceptStrategy::Tls(acceptor) => {
                 let stream = acceptor.accept(sock).await.context("TLS handshake")?;
-                handshake_and_serve(stream, peer, bearer, dispatcher).await
+                handshake_and_serve(stream, peer, bearer, trusted_proxies, dispatcher).await
             }
         }
     }
@@ -95,6 +100,7 @@ pub async fn serve_wss(
     addr: SocketAddr,
     tls: TlsMaterial,
     bearer_token: Arc<SecretString>,
+    trusted_proxies: Arc<Vec<IpNet>>,
     dispatcher: Dispatcher,
 ) -> Result<()> {
     let acceptor = build_tls_acceptor(&tls)?;
@@ -105,6 +111,7 @@ pub async fn serve_wss(
         listener,
         AcceptStrategy::Tls(acceptor),
         bearer_token,
+        trusted_proxies,
         dispatcher,
     )
     .await
@@ -119,12 +126,20 @@ pub async fn serve_wss(
 pub async fn serve_ws(
     addr: SocketAddr,
     bearer_token: Arc<SecretString>,
+    trusted_proxies: Arc<Vec<IpNet>>,
     dispatcher: Dispatcher,
 ) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
     let local = listener.local_addr()?;
     info!(addr = %local, "remote IPC (WS+Bearer, TLS-upstream) listener up");
-    accept_loop(listener, AcceptStrategy::Plain, bearer_token, dispatcher).await
+    accept_loop(
+        listener,
+        AcceptStrategy::Plain,
+        bearer_token,
+        trusted_proxies,
+        dispatcher,
+    )
+    .await
 }
 
 /// Shared accept loop. One per listener. The `strategy` decides what
@@ -134,6 +149,7 @@ async fn accept_loop(
     listener: TcpListener,
     strategy: AcceptStrategy,
     bearer_token: Arc<SecretString>,
+    trusted_proxies: Arc<Vec<IpNet>>,
     dispatcher: Dispatcher,
 ) -> Result<()> {
     let strategy = Arc::new(strategy);
@@ -148,9 +164,10 @@ async fn accept_loop(
         };
         let strategy = strategy.clone();
         let bearer = bearer_token.clone();
+        let trusted = trusted_proxies.clone();
         let dispatcher = dispatcher.clone();
         tokio::spawn(async move {
-            if let Err(e) = strategy.wrap(sock, peer, bearer, dispatcher).await {
+            if let Err(e) = strategy.wrap(sock, peer, bearer, trusted, dispatcher).await {
                 debug!(peer = %peer, error = %e, "remote IPC connection ended");
             }
         });
@@ -184,15 +201,23 @@ async fn handshake_and_serve<S>(
     stream: S,
     peer: SocketAddr,
     expected_token: Arc<SecretString>,
+    trusted_proxies: Arc<Vec<IpNet>>,
     dispatcher: Dispatcher,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    // Capture the auth header during the WS handshake. accept_hdr_async lets
-    // us inspect the upgrade request before completing the handshake.
+    // Capture the auth header AND the X-Forwarded-For header during
+    // the WS handshake. accept_hdr_async lets us inspect the upgrade
+    // request before completing the handshake; the auth check decides
+    // whether to admit, and the XFF capture feeds the client-IP
+    // resolution that audit logging needs to recover the originating
+    // IP from behind a chain of trusted reverse proxies.
     let auth_ok = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let auth_ok_for_callback = auth_ok.clone();
+    let xff_value: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let xff_for_callback = xff_value.clone();
     let token = expected_token.clone();
 
     let ws_config = WebSocketConfig::default()
@@ -202,6 +227,19 @@ where
     let ws = tokio_tungstenite::accept_hdr_async_with_config(
         stream,
         move |req: &HsRequest, resp: HsResponse| -> Result<HsResponse, ErrorResponse> {
+            // X-Forwarded-For is captured unconditionally; the
+            // resolver decides whether to trust it based on the TCP
+            // peer's CIDR membership. An untrusted peer's XFF is
+            // ignored (forgery defence), so capturing it here is
+            // safe — the trust check happens at the use site.
+            if let Some(value) = req
+                .headers()
+                .get("X-Forwarded-For")
+                .and_then(|v| v.to_str().ok())
+                && let Ok(mut slot) = xff_for_callback.lock()
+            {
+                *slot = Some(value.to_string());
+            }
             let header = req
                 .headers()
                 .get("Authorization")
@@ -227,7 +265,13 @@ where
         return Err(anyhow!("bearer auth failed for {peer}"));
     }
 
-    debug!(peer = %peer, "remote IPC client authenticated");
+    let xff_seen = xff_value.lock().ok().and_then(|g| g.clone());
+    let client = resolve_client_ip(peer.ip(), xff_seen.as_deref(), &trusted_proxies);
+    debug!(
+        peer = %peer,
+        client = %client,
+        "remote IPC client authenticated"
+    );
     let (mut tx, mut rx) = ws.split();
     while let Some(frame) = rx.next().await {
         let frame = frame?;

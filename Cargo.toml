@@ -131,6 +131,12 @@ x509-parser      = "0.18"
 # uncompressed JSON; saves ~1.2 MiB of dependency weight.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "http2"] }
 
+# CIDR / IP-range parsing for `daemon.trusted_proxies`. Powers the
+# `X-Forwarded-For` resolution that recovers the originating client IP
+# from a chain of trusted reverse proxies (Cloud Run, IAP, ALB, …).
+# The crate is small (~12 KiB) and dependency-free.
+ipnet        = "2.10"
+
 # Utility
 hex          = "0.4"
 serde_bytes  = "0.11"

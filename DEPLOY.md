@@ -217,6 +217,40 @@ nginx, traefik, Cloud Run, IAP, …) and either:
 
 The bearer token still authenticates each request in both shapes.
 
+### Recovering the originating client IP behind a reverse proxy
+
+When the daemon sits behind a reverse proxy (Cloud Run, IAP, ALB,
+ingress-nginx, …) the TCP `peer` it sees is the proxy IP, not the
+end user's. The proxy injects `X-Forwarded-For`, but trusting that
+header unconditionally would let an attacker who can reach the
+daemon directly forge audit IPs. Configure `daemon.trusted_proxies`
+to opt in, listing the **proxy networks** (never public-internet
+ranges):
+
+```toml
+[daemon]
+ipc_listen_ws = "0.0.0.0:7824"
+trusted_proxies = [
+  "10.0.0.0/8",          # internal LB
+  "172.16.0.0/12",       # ingress controller pods
+]
+```
+
+Resolution rule (matches nginx `set_real_ip_from`, Apache
+`mod_remoteip`, Envoy `xff_num_trusted_hops`):
+
+1. If the TCP peer is **not** in `trusted_proxies` → XFF ignored,
+   peer IP is the client IP. (Forgery defence.)
+2. If the peer is trusted, walk `X-Forwarded-For` right-to-left and
+   stop at the first IP that is **not** in `trusted_proxies`. That's
+   the originating client.
+3. If every entry is trusted → fall back to peer.
+
+Default: empty list. XFF is ignored, peer IP is used as-is.
+
+The env-var equivalent is `HERMOD_DAEMON_TRUSTED_PROXIES`
+(comma-separated CIDRs).
+
 ### Behind an SSO reverse proxy (IAP / oauth2-proxy / Cloudflare Access)
 
 Corporate / zero-trust deployments commonly front the broker with an
