@@ -729,6 +729,46 @@ mod tests {
         );
     }
 
+    /// SQLite's WAL/SHM companions are produced by *appending* the
+    /// suffix to the full db path, not by replacing the extension —
+    /// `Path::with_extension("db-wal")` would turn `/x/hermod.db`
+    /// into `/x/hermod.db-wal`, which is correct *only* because the
+    /// substitution lands after the dot. For a db named
+    /// `archive.tar.db`, `Path::with_extension` would clobber `.db`
+    /// to `.db-wal`, dropping `.tar`. `with_extension_suffix` does
+    /// the literal append SQLite actually expects.
+    #[test]
+    fn wal_shm_paths_append_to_full_db_path() {
+        let db = PathBuf::from("/var/lib/hermod/archive.tar.db");
+        assert_eq!(
+            with_extension_suffix(&db, "-wal"),
+            PathBuf::from("/var/lib/hermod/archive.tar.db-wal"),
+        );
+        assert_eq!(
+            with_extension_suffix(&db, "-shm"),
+            PathBuf::from("/var/lib/hermod/archive.tar.db-shm"),
+        );
+        // And the spec must produce paths that match `with_extension_suffix`
+        // bit-for-bit — adding a new sqlite-derived file in `spec` must
+        // round-trip through the same helper or the audit/enforce loop
+        // resolves the wrong path.
+        let tmp = TempDir::new().unwrap();
+        let dsn = sqlite_dsn(tmp.path());
+        let by_label: std::collections::HashMap<&str, PathBuf> = spec(tmp.path(), &dsn)
+            .into_iter()
+            .map(|f| (f.label, f.path))
+            .collect();
+        let db_path = by_label["hermod database"].clone();
+        assert_eq!(
+            by_label["hermod database WAL"],
+            with_extension_suffix(&db_path, "-wal"),
+        );
+        assert_eq!(
+            by_label["hermod database SHM"],
+            with_extension_suffix(&db_path, "-shm"),
+        );
+    }
+
     #[test]
     fn error_message_includes_chmod_hint() {
         let err = LayoutError::ModeMismatch {

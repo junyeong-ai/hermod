@@ -254,20 +254,36 @@ impl RemoteIpcClient {
                 PinPolicy::PublicCa => {
                     let mut roots = rustls::RootCertStore::empty();
                     let native = rustls_native_certs::load_native_certs();
+                    // `rustls_native_certs::Error` is not `Clone`, so we
+                    // capture the count up front and let `?`-debug
+                    // borrow `native.errors` immutably before moving
+                    // `native.certs` into the parser below.
+                    let load_error_count = native.errors.len();
                     if !native.errors.is_empty() {
                         tracing::debug!(
                             errors = ?native.errors,
                             "rustls-native-certs reported {} non-fatal load error(s)",
-                            native.errors.len()
+                            load_error_count,
                         );
                     }
-                    let (added, _ignored) = roots.add_parsable_certificates(native.certs);
+                    let (added, ignored) = roots.add_parsable_certificates(native.certs);
                     if added == 0 {
+                        // Three distinct causes flow into `added == 0`,
+                        // each with a different operator action — surface
+                        // them all instead of blanket-blaming the trust
+                        // store. `load_errors` reports loader-stage
+                        // failures (e.g. unreadable system store);
+                        // `ignored` reports parser-stage failures (the
+                        // store had bytes we couldn't turn into certs).
                         return Err(RemoteConnectError::Other(anyhow!(
-                            "--pin public-ca requested but the OS trust store yielded \
-                             no usable root certificates — install/repair the system CA \
-                             bundle, or use `--pin <sha256>` with an explicitly-provisioned \
-                             fingerprint"
+                            "--pin public-ca requested but no usable root CAs were loaded \
+                             from the OS trust store (loader errors: {load_errs}, parsed-but-\
+                             rejected: {ignored}). Install/repair the system CA bundle \
+                             (`update-ca-certificates` on Debian, `security` keychain on \
+                             macOS, …), or use `--pin <sha256>` with an explicitly-\
+                             provisioned fingerprint",
+                            load_errs = load_error_count,
+                            ignored = ignored,
                         )));
                     }
                     ClientConfig::builder_with_protocol_versions(

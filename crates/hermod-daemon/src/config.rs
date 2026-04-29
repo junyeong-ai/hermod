@@ -725,8 +725,7 @@ mod tests {
         cfg.daemon.ipc_listen_ws = Some("0.0.0.0:7825".into());
         let err = cfg
             .validate()
-            .err()
-            .expect("both listeners set must be rejected");
+            .expect_err("both listeners set must be rejected");
         let msg = format!("{err:#}");
         assert!(
             msg.contains("mutually exclusive"),
