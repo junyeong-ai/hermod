@@ -112,6 +112,7 @@ impl InboundProcessor {
                     pubkey: advertised.pubkey,
                     host_pubkey: Some(*host_pubkey),
                     endpoint: existing.as_ref().and_then(|r| r.endpoint.clone()),
+                    via_agent_id: existing.as_ref().and_then(|r| r.via_agent_id.clone()),
                     local_alias: existing.as_ref().and_then(|r| r.local_alias.clone()),
                     peer_asserted_alias: advertised.alias.clone().or_else(|| {
                         existing

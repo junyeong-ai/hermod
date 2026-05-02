@@ -123,6 +123,7 @@ impl LocalAgentService {
             pubkey: agent.keypair.to_pubkey_bytes(),
             host_pubkey: Some(self.host_pubkey),
             endpoint: None,
+            via_agent_id: None,
             local_alias: alias.clone(),
             peer_asserted_alias: None,
             trust_level: TrustLevel::Local,

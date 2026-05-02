@@ -131,6 +131,7 @@ pub async fn ensure_local_agents(
                 pubkey: agent.keypair.to_pubkey_bytes(),
                 host_pubkey: Some(host_pubkey),
                 endpoint: None,
+                via_agent_id: None,
                 local_alias: agent.local_alias.clone(),
                 peer_asserted_alias: None,
                 trust_level: hermod_core::TrustLevel::Local,

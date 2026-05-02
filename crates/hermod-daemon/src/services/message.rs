@@ -172,7 +172,7 @@ impl MessageService {
             RouteDecision::Loopback | RouteDecision::LocalKnown => {
                 (MessageStatus::Delivered, false)
             }
-            RouteDecision::Remote(endpoint) | RouteDecision::Brokered(endpoint) => {
+            RouteDecision::Remote(endpoint) | RouteDecision::Brokered { endpoint, .. } => {
                 // First attempt is synchronous; on transient failure, leave Pending
                 // and let the outbox worker retry with exponential backoff. The
                 // broker case uses the same outbound deliverer — the broker is just
@@ -210,7 +210,9 @@ impl MessageService {
         // it without re-resolving — covers brokered envelopes whose
         // recipient has no `agents.endpoint` of their own.
         record.delivery_endpoint = match &decision {
-            RouteDecision::Remote(ep) | RouteDecision::Brokered(ep) => Some(ep.to_string()),
+            RouteDecision::Remote(ep) | RouteDecision::Brokered { endpoint: ep, .. } => {
+                Some(ep.to_string())
+            }
             _ => None,
         };
         if status == MessageStatus::Delivered {
@@ -385,7 +387,7 @@ impl MessageService {
             RouteDecision::Loopback => "loopback",
             RouteDecision::LocalKnown => "local",
             RouteDecision::Remote(_) => "remote",
-            RouteDecision::Brokered(_) => "brokered",
+            RouteDecision::Brokered { .. } => "brokered",
         };
         audit_or_warn(
             &*self.audit_sink,

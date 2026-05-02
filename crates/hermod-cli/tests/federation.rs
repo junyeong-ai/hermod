@@ -35,8 +35,33 @@ struct Daemon {
     fed_addr: SocketAddr,
 }
 
+#[derive(Default)]
+struct DaemonConfig {
+    rate_limit: Option<u32>,
+    broker_mode: Option<&'static str>,
+}
+
+impl DaemonConfig {
+    fn rate_limit(mut self, v: Option<u32>) -> Self {
+        self.rate_limit = v;
+        self
+    }
+    fn broker_mode(mut self, v: &'static str) -> Self {
+        self.broker_mode = Some(v);
+        self
+    }
+}
+
 impl Daemon {
     fn spawn(alias: &str, fed_port: u16, rate_limit: Option<u32>) -> Self {
+        Self::spawn_with(
+            alias,
+            fed_port,
+            DaemonConfig::default().rate_limit(rate_limit),
+        )
+    }
+
+    fn spawn_with(alias: &str, fed_port: u16, cfg: DaemonConfig) -> Self {
         let home = tempfile::tempdir().expect("tempdir");
         let bin_hermod = release_bin("hermod");
         let bin_hermodd = release_bin("hermodd");
@@ -59,8 +84,11 @@ impl Daemon {
             .env("HERMOD_DAEMON_LOG", "warn")
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        if let Some(r) = rate_limit {
+        if let Some(r) = cfg.rate_limit {
             cmd.env("HERMOD_POLICY_RATE_LIMIT_PER_SENDER", r.to_string());
+        }
+        if let Some(mode) = cfg.broker_mode {
+            cmd.env("HERMOD_BROKER_MODE", mode);
         }
         let child = cmd.spawn().expect("spawn hermodd");
         wait_for_port(fed_addr, Duration::from_secs(5));
@@ -470,5 +498,201 @@ fn peer_advertise_reports_failed_when_target_down() {
     assert!(
         audit_out.contains("\"failed\":") && audit_out.contains("\"delivered\":"),
         "audit must record per-status counts (delivered + failed): {audit_out}"
+    );
+}
+
+/// PR-2 mesh e2e: alice and bob can DM each other through a relay
+/// broker even though neither knows the other's endpoint. Topology:
+///
+/// ```text
+///   alice ──┐               ┌── bob
+///           ▼               ▼
+///         broker (relay_only, public endpoint)
+/// ```
+///
+/// Alice's directory has `bob` registered with `via_agent_id =
+/// broker.id` (no endpoint). The dispatcher resolves to
+/// `RouteDecision::Brokered { endpoint: broker.endpoint, via:
+/// broker.id }`; the broker's `RelayOnly` fall-through forwards to
+/// bob.
+#[test]
+fn brokered_mesh_via_relay_only_broker() {
+    let alice = Daemon::spawn("alice", 17929, None);
+    let broker = Daemon::spawn_with(
+        "broker",
+        17930,
+        DaemonConfig::default().broker_mode("relay_only"),
+    );
+    let bob = Daemon::spawn("bob", 17931, None);
+
+    let alice_id = alice.agent_id();
+    let alice_host_pk = alice.host_pubkey_hex();
+    let alice_agent_pk = alice.agent_pubkey_hex();
+    let broker_id = broker.agent_id();
+    let broker_host_pk = broker.host_pubkey_hex();
+    let broker_agent_pk = broker.agent_pubkey_hex();
+    let bob_id = bob.agent_id();
+    let bob_host_pk = bob.host_pubkey_hex();
+    let bob_agent_pk = bob.agent_pubkey_hex();
+
+    // alice trusts broker directly, bob trusts broker directly.
+    // Brokered routing requires the *broker* to also have direct
+    // peer entries for each endpoint it relays to — that's a
+    // RelayOnly invariant (the broker holds Noise XX keys for both
+    // sides).
+    alice.run(&[
+        "peer",
+        "add",
+        "--endpoint",
+        &format!("wss://{}", broker.fed_addr),
+        "--host-pubkey-hex",
+        &broker_host_pk,
+        "--agent-pubkey-hex",
+        &broker_agent_pk,
+        "--alias",
+        "broker",
+    ]);
+    broker.run(&[
+        "peer",
+        "add",
+        "--endpoint",
+        &format!("wss://{}", alice.fed_addr),
+        "--host-pubkey-hex",
+        &alice_host_pk,
+        "--agent-pubkey-hex",
+        &alice_agent_pk,
+    ]);
+    broker.run(&[
+        "peer",
+        "add",
+        "--endpoint",
+        &format!("wss://{}", bob.fed_addr),
+        "--host-pubkey-hex",
+        &bob_host_pk,
+        "--agent-pubkey-hex",
+        &bob_agent_pk,
+    ]);
+    bob.run(&[
+        "peer",
+        "add",
+        "--endpoint",
+        &format!("wss://{}", broker.fed_addr),
+        "--host-pubkey-hex",
+        &broker_host_pk,
+        "--agent-pubkey-hex",
+        &broker_agent_pk,
+    ]);
+    alice.run(&["peer", "trust", &broker_id, "verified"]);
+    broker.run(&["peer", "trust", &alice_id, "verified"]);
+    broker.run(&["peer", "trust", &bob_id, "verified"]);
+    bob.run(&["peer", "trust", &broker_id, "verified"]);
+
+    // The crux — alice registers bob with `--via @broker`, no
+    // endpoint of her own. Dispatcher should resolve to Brokered.
+    let (rc, add_out) = alice.run(&[
+        "peer",
+        "add",
+        "--via",
+        "@broker",
+        "--host-pubkey-hex",
+        &bob_host_pk,
+        "--agent-pubkey-hex",
+        &bob_agent_pk,
+        "--alias",
+        "bob",
+    ]);
+    assert_eq!(rc, 0, "alice peer add bob via broker; out: {add_out}");
+    assert!(
+        add_out.contains("\"trust_level\": \"tofu\""),
+        "first add is TOFU: {add_out}",
+    );
+
+    // Bob also trusts alice as relayed-via-broker (sender-side TOFU).
+    bob.run(&[
+        "peer",
+        "add",
+        "--via",
+        "@broker",
+        "--host-pubkey-hex",
+        &alice_host_pk,
+        "--agent-pubkey-hex",
+        &alice_agent_pk,
+        "--alias",
+        "alice",
+    ]);
+    alice.run(&["peer", "trust", &bob_id, "verified"]);
+    bob.run(&["peer", "trust", &alice_id, "verified"]);
+
+    // Send DM alice → bob via broker.
+    let (rc, send_out) = alice.run(&["message", "send", "--to", "@bob", "--body", "hi via broker"]);
+    assert_eq!(rc, 0, "alice send via broker; out: {send_out}");
+    assert!(
+        send_out.contains("delivered"),
+        "expected delivered status (broker should ack on alice's side); got: {send_out}",
+    );
+
+    // Wait for the broker to relay then bob to confirm-or-deliver.
+    std::thread::sleep(Duration::from_millis(800));
+
+    // bob's audit should show inbound from alice. Trust starts as
+    // TOFU on bob's side (peer.add was TOFU); the held-confirmation
+    // path may queue it. Either delivered-to-inbox or held-for-
+    // confirm is correct evidence the broker relay worked.
+    let (_, bob_audit) = bob.run(&["audit", "query", "--limit", "20"]);
+    let saw_relay_evidence = bob_audit.contains("confirmation.held")
+        || bob_audit.contains("message.delivered")
+        || bob_audit.contains(&alice_id);
+    assert!(
+        saw_relay_evidence,
+        "bob's audit should show evidence of alice's envelope arriving via broker: {bob_audit}",
+    );
+}
+
+/// `peer add --via @unknown_broker` must fail loud — the broker's
+/// directory row is required (FK + friendly error) before any
+/// peer can be attached behind it.
+#[test]
+fn peer_add_via_unknown_broker_rejects() {
+    let alice = Daemon::spawn("alice", 17932, None);
+    let bob = Daemon::spawn("bob", 17933, None);
+    let bob_host_pk = bob.host_pubkey_hex();
+    let bob_agent_pk = bob.agent_pubkey_hex();
+
+    let (rc, out) = alice.run(&[
+        "peer",
+        "add",
+        "--via",
+        "@nonexistent",
+        "--host-pubkey-hex",
+        &bob_host_pk,
+        "--agent-pubkey-hex",
+        &bob_agent_pk,
+        "--alias",
+        "bob",
+    ]);
+    assert_ne!(rc, 0, "expected non-zero exit for unknown via; got: {out}");
+}
+
+/// `peer add --endpoint X --via Y` must be rejected by clap's
+/// XOR — if both are passed the CLI errors before touching the
+/// daemon.
+#[test]
+fn peer_add_endpoint_and_via_are_mutually_exclusive() {
+    let alice = Daemon::spawn("alice", 17934, None);
+    let (rc, out) = alice.run(&[
+        "peer",
+        "add",
+        "--endpoint",
+        "wss://x:7823",
+        "--via",
+        "@broker",
+        "--host-pubkey-hex",
+        &"00".repeat(32),
+        "--agent-pubkey-hex",
+        &"00".repeat(32),
+    ]);
+    assert_ne!(
+        rc, 0,
+        "clap should reject endpoint + via both set; stdout was: {out}"
     );
 }

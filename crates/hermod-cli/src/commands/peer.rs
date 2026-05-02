@@ -2,7 +2,8 @@ use anyhow::Result;
 use clap::Args;
 use hermod_core::{Endpoint, TrustLevel};
 use hermod_protocol::ipc::methods::{
-    PeerAddParams, PeerAdvertiseParams, PeerRemoveParams, PeerRepinParams, PeerTrustParams,
+    PeerAddParams, PeerAdvertiseParams, PeerReach, PeerRemoveParams, PeerRepinParams,
+    PeerTrustParams,
 };
 
 use std::str::FromStr;
@@ -12,9 +13,16 @@ use crate::error::{from_underlying, invalid};
 
 #[derive(Args, Debug)]
 pub struct AddArgs {
-    /// Endpoint URI, e.g. `wss://host:7823`.
+    /// Direct endpoint, e.g. `wss://host:7823`. Mutually exclusive
+    /// with `--via` — pick one.
+    #[arg(long, conflicts_with = "via", required_unless_present = "via")]
+    pub endpoint: Option<String>,
+    /// Reach this peer through a broker that's already in the
+    /// directory (`agent_id` or `@<local_alias>`). The broker's
+    /// `BrokerMode::RelayOnly` fall-through forwards the envelope.
+    /// Mutually exclusive with `--endpoint`.
     #[arg(long)]
-    pub endpoint: String,
+    pub via: Option<String>,
     /// 64-char hex of the remote daemon's host identity pubkey. Pinned
     /// for the Noise XX handshake when this daemon dials the peer.
     #[arg(long)]
@@ -55,12 +63,21 @@ pub struct RepinArgs {
 }
 
 pub async fn add(args: AddArgs, target: &ClientTarget) -> Result<()> {
-    let endpoint =
-        Endpoint::from_str(&args.endpoint).map_err(|e| from_underlying("endpoint", e))?;
+    // clap's `conflicts_with` + `required_unless_present` combo
+    // guarantees exactly one of `--endpoint` / `--via` is set; the
+    // match is exhaustive for the operator's mental model and the
+    // wire enum.
+    let reach = match (args.endpoint, args.via) {
+        (Some(ep), None) => PeerReach::Direct {
+            endpoint: Endpoint::from_str(&ep).map_err(|e| from_underlying("endpoint", e))?,
+        },
+        (None, Some(via)) => PeerReach::Via { via },
+        _ => unreachable!("clap enforces XOR"),
+    };
     let mut c = target.connect().await?;
     let r = c
         .peer_add(PeerAddParams {
-            endpoint,
+            reach,
             host_pubkey_hex: args.host_pubkey_hex,
             agent_pubkey_hex: args.agent_pubkey_hex,
             local_alias: args

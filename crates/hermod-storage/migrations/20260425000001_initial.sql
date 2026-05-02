@@ -37,6 +37,25 @@ CREATE TABLE agents (
     -- endpoint (Noise XX terminates at the host; the envelope's
     -- to.id selects which local agent receives the payload).
     endpoint            TEXT,
+    -- Indirect routing target. NULL ⇒ this row's `endpoint` is dialled
+    -- directly. `Some(broker_id)` ⇒ envelopes addressed to this agent
+    -- are dispatched to the broker `agents.via_agent_id`'s endpoint
+    -- with `envelope.to.id` preserved (the broker's
+    -- `BrokerMode::RelayOnly` fall-through relays the second hop).
+    -- Enables mesh topologies where only one node has a public
+    -- endpoint — every other peer reaches them through that broker.
+    --
+    -- Resolution is recursive (broker may itself be indirect via
+    -- another broker), capped at MAX_RELAY_HOPS at dispatch time.
+    -- Cycles fail-loud at dispatch (audit `routing.cycle_detected`)
+    -- rather than at row insert — the dependency graph can change
+    -- atomically across multiple rows so DB-level constraints
+    -- can't catch every cycle.
+    --
+    -- ON DELETE SET NULL keeps the indirect row around when the
+    -- broker is forgotten — operator repair (re-add broker, swap
+    -- via_agent_id) is a step, not a forced cascade.
+    via_agent_id        TEXT REFERENCES agents(id) ON DELETE SET NULL,
     local_alias         TEXT UNIQUE,
     peer_asserted_alias TEXT,
     -- `local` means this agent is hosted by THIS daemon (private key
@@ -49,7 +68,11 @@ CREATE TABLE agents (
     tls_fingerprint     TEXT,
     reputation          INTEGER NOT NULL DEFAULT 0,
     first_seen          INTEGER NOT NULL,
-    last_seen           INTEGER
+    last_seen           INTEGER,
+    -- Endpoint XOR via_agent_id (or both NULL = directory-only,
+    -- not yet routable). Observed agents start NULL/NULL and become
+    -- routable once an endpoint or broker hint arrives.
+    CHECK (endpoint IS NULL OR via_agent_id IS NULL)
 );
 CREATE INDEX idx_agents_with_endpoint ON agents(id) WHERE endpoint IS NOT NULL;
 

@@ -69,6 +69,7 @@ async fn seed_agent(pool: &sqlx::PgPool, id: AgentId, byte: u8) {
             pubkey: PubkeyBytes([byte; 32]),
             host_pubkey: None,
             endpoint: None,
+            via_agent_id: None,
             local_alias: None,
             peer_asserted_alias: None,
             trust_level: TrustLevel::Local,

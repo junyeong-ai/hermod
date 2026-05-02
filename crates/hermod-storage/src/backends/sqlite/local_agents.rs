@@ -174,6 +174,7 @@ mod tests {
                     host: "host.example".into(),
                     port: 7823,
                 })),
+                via_agent_id: None,
                 local_alias: None,
                 peer_asserted_alias: None,
                 trust_level: TrustLevel::Local,

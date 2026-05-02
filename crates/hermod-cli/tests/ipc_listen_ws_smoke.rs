@@ -294,7 +294,10 @@ async fn xff_resolved_client_ip_lands_in_audit_row() {
         "203.0.113.42",
         "peer.add",
         serde_json::json!({
-            "endpoint": {"scheme": "wss", "host": "fake-peer.example", "port": 7823},
+            "reach": {
+                "kind": "direct",
+                "endpoint": {"scheme": "wss", "host": "fake-peer.example", "port": 7823},
+            },
             "host_pubkey_hex": host_pubkey_hex,
             "agent_pubkey_hex": agent_pubkey_hex,
         }),
@@ -336,7 +339,10 @@ async fn xff_from_untrusted_peer_is_ignored_in_audit() {
         "198.51.100.13", // attacker-claimed IP — must be ignored
         "peer.add",
         serde_json::json!({
-            "endpoint": {"scheme": "wss", "host": "fake-peer-2.example", "port": 7823},
+            "reach": {
+                "kind": "direct",
+                "endpoint": {"scheme": "wss", "host": "fake-peer-2.example", "port": 7823},
+            },
             "host_pubkey_hex": host_pubkey_hex,
             "agent_pubkey_hex": agent_pubkey_hex,
         }),

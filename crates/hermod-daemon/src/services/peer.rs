@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::federation::record_agent_peer;
+use crate::federation::{record_agent_peer, record_brokered_peer};
 use crate::local_agent::LocalAgentRegistry;
 use crate::services::{
     ServiceError, audit_or_warn, message::MessageService, presence::PresenceService,
@@ -61,25 +61,41 @@ impl PeerService {
     }
 
     pub async fn add(&self, params: PeerAddParams) -> Result<PeerAddResult, ServiceError> {
-        let endpoint = match params.endpoint {
-            Endpoint::Wss(w) => w,
-            Endpoint::Unix { .. } => {
-                return Err(ServiceError::InvalidParam(
-                    "peer.add only accepts wss:// endpoints".into(),
-                ));
-            }
-        };
         let host_pubkey = parse_pubkey(&params.host_pubkey_hex)?;
         let agent_pubkey = parse_pubkey(&params.agent_pubkey_hex)?;
-        let (rec, outcome) = record_agent_peer(
-            &*self.db,
-            endpoint,
-            host_pubkey,
-            agent_pubkey,
-            params.local_alias,
-        )
-        .await
-        .map_err(|e| ServiceError::InvalidParam(e.to_string()))?;
+        let (rec, outcome) = match params.reach {
+            hermod_protocol::ipc::methods::PeerReach::Direct { endpoint } => {
+                let wss = match endpoint {
+                    Endpoint::Wss(w) => w,
+                    Endpoint::Unix { .. } => {
+                        return Err(ServiceError::InvalidParam(
+                            "peer.add only accepts wss:// endpoints".into(),
+                        ));
+                    }
+                };
+                record_agent_peer(
+                    &*self.db,
+                    wss,
+                    host_pubkey,
+                    agent_pubkey,
+                    params.local_alias.clone(),
+                )
+                .await
+                .map_err(|e| ServiceError::InvalidParam(e.to_string()))?
+            }
+            hermod_protocol::ipc::methods::PeerReach::Via { via } => {
+                let via_id = self.resolve_target(&via).await?;
+                record_brokered_peer(
+                    &*self.db,
+                    via_id,
+                    host_pubkey,
+                    agent_pubkey,
+                    params.local_alias.clone(),
+                )
+                .await
+                .map_err(|e| ServiceError::InvalidParam(e.to_string()))?
+            }
+        };
         let fingerprint = hermod_crypto::fingerprint_from_pubkey(&rec.pubkey).to_human_prefix(8);
 
         // Audit a collision *before* the peer.add row so the chain shows
@@ -120,6 +136,7 @@ impl PeerService {
                 details: Some(serde_json::json!({
                     "fingerprint": fingerprint,
                     "endpoint": rec.endpoint.as_ref().map(|e| e.to_string()),
+                    "via_agent_id": rec.via_agent_id.as_ref().map(|a| a.to_string()),
                     "alias_outcome": match &outcome {
                         hermod_storage::AliasOutcome::Accepted => "accepted",
                         hermod_storage::AliasOutcome::LocalDropped { .. } => "local_dropped",

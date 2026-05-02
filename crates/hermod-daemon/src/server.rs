@@ -107,8 +107,18 @@ pub async fn serve(
         .map(|a| (a.agent_id.clone(), a.keypair.public_key()))
         .collect();
     let router = match &upstream_broker {
-        Some(ub) => Router::new(local_ids.clone(), db.clone())
-            .with_upstream_broker(hermod_core::Endpoint::Wss(ub.endpoint.clone())),
+        Some(ub) => {
+            // The broker is identified by its host pubkey hash —
+            // same derivation `record_host_peer` used to insert
+            // the broker's directory row above.
+            let broker_id = hermod_crypto::agent_id_from_pubkey(&ub.pubkey);
+            Router::new(local_ids.clone(), db.clone()).with_upstream_broker(
+                hermod_routing::UpstreamBrokerHint {
+                    agent_id: broker_id,
+                    endpoint: hermod_core::Endpoint::Wss(ub.endpoint.clone()),
+                },
+            )
+        }
         None => Router::new(local_ids.clone(), db.clone()),
     };
     let access = AccessController::new(

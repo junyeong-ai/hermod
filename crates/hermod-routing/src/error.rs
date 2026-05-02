@@ -52,6 +52,21 @@ pub enum RoutingError {
 
     #[error("peer link is dead (heartbeat timed out)")]
     DeadLink,
+
+    /// A `via_agent_id` chain looped back to an already-visited
+    /// agent. The dispatch path refuses to forward — the operator's
+    /// directory is misconfigured. `chain` lists the visit order
+    /// (oldest first) ending at the cycle target so the audit row
+    /// can replay the path.
+    #[error("via-routing cycle detected: {chain:?}")]
+    ViaCycle { chain: Vec<String> },
+
+    /// Chain depth exceeded `MAX_RELAY_HOPS` before reaching a
+    /// directly-dialable endpoint. Equivalent to a misconfigured
+    /// directory (every broker hop should be at most a couple
+    /// deep); fail-loud so the operator notices.
+    #[error("via-routing chain exceeded MAX_RELAY_HOPS={limit} (target {target})")]
+    ViaTooDeep { target: String, limit: u32 },
 }
 
 pub type Result<T, E = RoutingError> = std::result::Result<T, E>;

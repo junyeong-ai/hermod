@@ -34,6 +34,13 @@ pub struct AgentRecord {
     /// Network endpoint of the host (`wss://host:port`). Host-level,
     /// not agent-level — multiple agents at one endpoint.
     pub endpoint: Option<Endpoint>,
+    /// Indirect routing target. NULL ⇒ dial `endpoint` directly.
+    /// `Some(broker)` ⇒ envelopes addressed to this agent are
+    /// dispatched to the broker's endpoint with `to.id` preserved;
+    /// the broker's `BrokerMode::RelayOnly` fall-through relays the
+    /// second hop. Mutually exclusive with `endpoint` at the schema
+    /// level — operators choose direct OR brokered, never both.
+    pub via_agent_id: Option<AgentId>,
     pub local_alias: Option<AgentAlias>,
     pub peer_asserted_alias: Option<AgentAlias>,
     pub trust_level: TrustLevel,

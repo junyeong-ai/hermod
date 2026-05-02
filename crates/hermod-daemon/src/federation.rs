@@ -228,6 +228,7 @@ pub async fn record_host_peer(
             pubkey: host_pubkey,
             host_pubkey: Some(host_pubkey),
             endpoint: endpoint.map(Endpoint::Wss),
+            via_agent_id: None,
             local_alias: None,
             peer_asserted_alias,
             trust_level: TrustLevel::Tofu,
@@ -270,6 +271,7 @@ pub async fn record_agent_peer(
             pubkey: agent_pubkey,
             host_pubkey: Some(host_pubkey),
             endpoint: Some(Endpoint::Wss(endpoint)),
+            via_agent_id: None,
             local_alias,
             peer_asserted_alias: None,
             trust_level: TrustLevel::Tofu,
@@ -284,5 +286,66 @@ pub async fn record_agent_peer(
         .get(&agent_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("agent peer vanished after upsert: {agent_id}"))?;
+    Ok((rec, outcome))
+}
+
+/// Register a peer agent that's reachable only through a broker.
+///
+/// Mirror of [`record_agent_peer`] for the brokered case: instead
+/// of pinning an `endpoint`, the new agent's row points at
+/// `via_agent_id`. The broker's directory row must already exist
+/// (FK enforces it) — typically from a prior `peer add --endpoint`
+/// of the broker itself, or `record_host_peer` during inbound
+/// federation handshake.
+///
+/// The host row is NOT auto-inserted here: the broker is the
+/// single host the dispatcher will dial, and its row was
+/// established when the broker was added. The new agent's
+/// `host_pubkey` is the *peer's* host pubkey (the daemon hosting
+/// that agent on the far side of the broker), pinned for envelope
+/// signature verification — same self-cert binding as the direct
+/// case.
+pub async fn record_brokered_peer(
+    db: &dyn Database,
+    via_agent_id: hermod_core::AgentId,
+    host_pubkey: PubkeyBytes,
+    agent_pubkey: PubkeyBytes,
+    local_alias: Option<hermod_core::AgentAlias>,
+) -> anyhow::Result<(AgentRecord, hermod_storage::AliasOutcome)> {
+    use hermod_crypto::agent_id_from_pubkey;
+    // Verify the broker exists in the directory — FK will reject
+    // otherwise, but a friendly error here saves the operator a
+    // round-trip to the SQL log.
+    if db.agents().get(&via_agent_id).await?.is_none() {
+        anyhow::bail!(
+            "via target {via_agent_id} not in directory; add the broker first \
+             (`peer add --endpoint <broker_url> --host-pubkey-hex … --agent-pubkey-hex …`)"
+        );
+    }
+
+    let now = Timestamp::now();
+    let agent_id = agent_id_from_pubkey(&agent_pubkey);
+    let outcome = db
+        .agents()
+        .upsert_observed(&AgentRecord {
+            id: agent_id.clone(),
+            pubkey: agent_pubkey,
+            host_pubkey: Some(host_pubkey),
+            endpoint: None,
+            via_agent_id: Some(via_agent_id),
+            local_alias,
+            peer_asserted_alias: None,
+            trust_level: TrustLevel::Tofu,
+            tls_fingerprint: None,
+            reputation: 0,
+            first_seen: now,
+            last_seen: None,
+        })
+        .await?;
+    let rec = db
+        .agents()
+        .get(&agent_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("brokered peer vanished after upsert: {agent_id}"))?;
     Ok((rec, outcome))
 }

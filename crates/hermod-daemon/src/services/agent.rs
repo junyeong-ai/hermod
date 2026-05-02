@@ -104,6 +104,7 @@ impl AgentService {
             pubkey,
             host_pubkey: None,
             endpoint: params.endpoint.clone(),
+            via_agent_id: None,
             local_alias: params.local_alias.clone(),
             peer_asserted_alias: None,
             trust_level: params.trust_level,

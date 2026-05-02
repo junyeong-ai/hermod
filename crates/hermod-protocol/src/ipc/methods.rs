@@ -436,9 +436,26 @@ pub struct LocalRotateResult {
 
 // ---------- peer.* ----------
 
+/// Reachability hint: a peer is either dialed directly or reached
+/// through a broker that's already in the directory. Mutually
+/// exclusive at the schema level (`agents.endpoint` XOR
+/// `agents.via_agent_id`); the wire enum mirrors that XOR so the
+/// operator can't accidentally ask for both.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PeerReach {
+    /// Direct dial: `endpoint` is the peer daemon's WSS+Noise URL.
+    Direct { endpoint: Endpoint },
+    /// Brokered: envelopes go through `via` (an existing directory
+    /// entry — agent_id or `@<local_alias>`). The broker's own
+    /// endpoint is the dial target; `to.id` is preserved so the
+    /// broker's `BrokerMode::RelayOnly` fall-through forwards.
+    Via { via: String },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PeerAddParams {
-    pub endpoint: Endpoint,
+    pub reach: PeerReach,
     /// Remote daemon's host pubkey — pinned for the Noise XX handshake.
     pub host_pubkey_hex: String,
     /// The peer agent we want to address by name. Envelopes sent

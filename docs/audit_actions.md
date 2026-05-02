@@ -112,12 +112,12 @@ runs it on every PR.
 ### peer.*
 | Action | Trigger | Details |
 | --- | --- | --- |
-| `peer.add` | Operator `peer.add`. | `fingerprint`, `endpoint`, `alias_outcome` |
+| `peer.add` | Operator `peer.add`. Exactly one of `endpoint` / `via_agent_id` is non-null per the schema CHECK; `alias_outcome` carries the `AliasOutcome` view. | `fingerprint`, `endpoint`, `via_agent_id`, `alias_outcome` |
 | `peer.alias_collision` | Local alias requested in `peer.add` collides with an existing peer. | `proposed`, `for_id` |
 | `peer.trust` | `peer.trust` (operator promotes / demotes). | `level` |
 | `peer.remove` | `peer.remove` (clears endpoint and TLS pin). | none |
 | `peer.repin` | `peer.repin` (operator-confirmed cert rotation). | `previous`, `new` |
-| `peer.advertise` | Operator pushed a `PeerAdvertise` (or `peer.add` auto-trigger). | `fanout`, `agents` |
+| `peer.advertise` | Operator pushed a `PeerAdvertise` (or `peer.add` auto-trigger). Per-target wire status reflected in the `delivered` / `failed` counts. | `delivered`, `failed`, `agents` |
 | `peer.advertise.received` | Inbound `PeerAdvertise` from a peer. | `agents_advertised`, `agents_upserted`, `rejected_self_cert`, `rejected_host_conflict` |
 
 ### local.*
