@@ -373,3 +373,102 @@ fn inbound_rate_limit_kicks_in() {
         "bob inbox should have at most 2 messages, got {total_count}: {list_out}"
     );
 }
+
+/// Honesty contract: `peer advertise --target` must report the
+/// actual wire delivery status per target, not the queue-ack
+/// status. Concretely — kill bob, fire alice's advertise at @bob,
+/// the response must show `status: "failed"` and the CLI must exit
+/// non-zero.
+///
+/// Mirrors the behaviour of `message send`, which already returns
+/// `{"status":"delivered"|"failed"}` truthfully. Before this fix
+/// the response was `{"fanout": 1}` even when the wire failed —
+/// dishonest UX that masked queued-against-dead-peer scenarios.
+#[test]
+fn peer_advertise_reports_failed_when_target_down() {
+    let alice = Daemon::spawn("alice", 17927, None);
+    let bob = Daemon::spawn("bob", 17928, None);
+    let alice_id = alice.agent_id();
+    let bob_id = bob.agent_id();
+    let alice_host_pk = alice.host_pubkey_hex();
+    let bob_host_pk = bob.host_pubkey_hex();
+    let alice_agent_pk = alice.agent_pubkey_hex();
+    let bob_agent_pk = bob.agent_pubkey_hex();
+
+    // Bidirectional verified peering so the directory has bob's
+    // endpoint pinned. `peer add` itself triggers an auto-advertise
+    // that we let happen — the test exercises a *subsequent*
+    // explicit advertise into a now-down peer.
+    alice.run(&[
+        "peer",
+        "add",
+        "--endpoint",
+        &format!("wss://{}", bob.fed_addr),
+        "--host-pubkey-hex",
+        &bob_host_pk,
+        "--agent-pubkey-hex",
+        &bob_agent_pk,
+        "--alias",
+        "bob",
+    ]);
+    bob.run(&[
+        "peer",
+        "add",
+        "--endpoint",
+        &format!("wss://{}", alice.fed_addr),
+        "--host-pubkey-hex",
+        &alice_host_pk,
+        "--agent-pubkey-hex",
+        &alice_agent_pk,
+    ]);
+    alice.run(&["peer", "trust", &bob_id, "verified"]);
+    bob.run(&["peer", "trust", &alice_id, "verified"]);
+
+    // Sanity — advertise to a live bob succeeds (and exits 0).
+    let (rc, out) = alice.run(&["peer", "advertise", "--target", &bob_id]);
+    assert_eq!(rc, 0, "advertise to live peer should exit 0; got: {out}");
+    assert!(
+        out.contains("\"status\": \"delivered\""),
+        "live advertise must report delivered: {out}"
+    );
+    assert!(
+        out.contains(&format!("\"target\": \"{bob_id}\"")),
+        "delivery row must carry target id: {out}"
+    );
+
+    // Kill bob so the pool entry's next dial fails.
+    drop(bob);
+    // Give the OS a moment to release bob's listening socket so the
+    // next `peer advertise` actually hits a refused connection
+    // rather than racing on shutdown.
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Honest failure: per-target row reports failed + exit non-zero.
+    let (rc, out) = alice.run(&["peer", "advertise", "--target", &bob_id]);
+    assert_ne!(
+        rc, 0,
+        "advertise to down peer must exit non-zero; got: {out}"
+    );
+    assert!(
+        out.contains("\"status\": \"failed\""),
+        "down-peer advertise must report failed: {out}"
+    );
+    assert!(
+        out.contains("\"error\":"),
+        "failed delivery must carry an error string: {out}"
+    );
+
+    // Audit row reflects the same outcome — no `fanout > 0` lie.
+    let (_, audit_out) = alice.run(&[
+        "audit",
+        "query",
+        "--action",
+        "peer.advertise",
+        "--limit",
+        "1",
+    ]);
+    assert!(
+        audit_out.contains("\"failed\":") && audit_out.contains("\"delivered\":"),
+        "audit must record per-status counts (delivered + failed): {audit_out}"
+    );
+}

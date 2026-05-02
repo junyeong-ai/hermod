@@ -1,11 +1,12 @@
 use hermod_core::{
     AdvertisedAgent, AgentAddress, AgentAlias, AgentId, Endpoint, MessageBody, MessagePriority,
-    PubkeyBytes, Timestamp, TrustLevel,
+    MessageStatus, PubkeyBytes, Timestamp, TrustLevel,
 };
 use hermod_protocol::ipc::methods::{
-    AliasOutcomeView, MessageSendParams, PeerAddParams, PeerAddResult, PeerAdvertiseParams,
-    PeerAdvertiseResult, PeerListResult, PeerRemoveParams, PeerRemoveResult, PeerRepinParams,
-    PeerRepinResult, PeerSummary, PeerTrustParams,
+    AliasOutcomeView, MessageSendParams, MessageSendResult, PeerAddParams, PeerAddResult,
+    PeerAdvertiseDelivery, PeerAdvertiseParams, PeerAdvertiseResult, PeerListResult,
+    PeerRemoveParams, PeerRemoveResult, PeerRepinParams, PeerRepinResult, PeerSummary,
+    PeerTrustParams,
 };
 use hermod_routing::PeerPool;
 use hermod_storage::{AuditEntry, AuditSink, Database};
@@ -168,13 +169,17 @@ impl PeerService {
     ) -> Result<PeerAdvertiseResult, ServiceError> {
         let agents = self.advertised_agents();
         let agent_count = agents.len() as u32;
-        let mut fanout: u32 = 0;
+        // One row per resolved target; status mirrors what
+        // `MessageService::send` actually saw on the wire (not just
+        // the queue ack), so the operator/script can tell apart
+        // "delivered" from "looks delivered, was actually queued
+        // against a dead pool entry". Mirrors the honesty contract
+        // of `MessageSendResult`.
+        let mut deliveries: Vec<PeerAdvertiseDelivery> = Vec::new();
         match params.target {
             Some(reference) => {
                 let target = self.resolve_target(&reference).await?;
-                if self.send_advertise(&target, agents.clone()).await.is_ok() {
-                    fanout = 1;
-                }
+                deliveries.push(self.dispatch_one(target, agents.clone()).await);
             }
             None => {
                 // Walk federated peers; pick one canonical local-agent
@@ -195,12 +200,19 @@ impl PeerService {
                     if !seen_hosts.insert(host) {
                         continue;
                     }
-                    if self.send_advertise(&r.id, agents.clone()).await.is_ok() {
-                        fanout = fanout.saturating_add(1);
-                    }
+                    deliveries.push(self.dispatch_one(r.id, agents.clone()).await);
                 }
             }
         }
+
+        let delivered = deliveries
+            .iter()
+            .filter(|d| d.status == MessageStatus::Delivered)
+            .count() as u32;
+        let failed = deliveries
+            .iter()
+            .filter(|d| d.status == MessageStatus::Failed)
+            .count() as u32;
 
         audit_or_warn(
             &*self.audit_sink,
@@ -211,7 +223,8 @@ impl PeerService {
                 action: "peer.advertise".into(),
                 target: None,
                 details: Some(serde_json::json!({
-                    "fanout": fanout,
+                    "delivered": delivered,
+                    "failed": failed,
                     "agents": agent_count,
                 })),
                 client_ip: None,
@@ -221,16 +234,62 @@ impl PeerService {
         .await;
 
         Ok(PeerAdvertiseResult {
-            fanout,
+            deliveries,
             agents: agent_count,
         })
     }
 
+    /// Dispatch one advertise envelope and synthesise the per-target
+    /// row. Wire failures land in `error: Some(...)` rather than
+    /// bubbling — the caller wants a populated row per attempted
+    /// target, even on failure (that's the whole point of the honest
+    /// response). `Pending` from the underlying `send` (transient
+    /// failure, queued for retry) is reported as `Failed` here: from
+    /// the advertise CLI's perspective the wire didn't ack, so the
+    /// operator should retry or investigate, not assume success.
+    async fn dispatch_one(
+        &self,
+        target: AgentId,
+        agents: Vec<AdvertisedAgent>,
+    ) -> PeerAdvertiseDelivery {
+        match self.send_advertise(&target, agents).await {
+            Ok(res) if res.status == MessageStatus::Delivered => PeerAdvertiseDelivery {
+                target,
+                status: MessageStatus::Delivered,
+                error: None,
+            },
+            Ok(res) => PeerAdvertiseDelivery {
+                target,
+                status: MessageStatus::Failed,
+                error: Some(format!(
+                    "advertise dispatch did not deliver (status={:?})",
+                    res.status
+                )),
+            },
+            Err(e) => PeerAdvertiseDelivery {
+                target,
+                status: MessageStatus::Failed,
+                error: Some(e.to_string()),
+            },
+        }
+    }
+
     /// Internal: advertise to a specific peer agent_id. Used by the
-    /// `peer.add` auto-trigger.
+    /// `peer.add` auto-trigger. Returns `Ok(())` only if the
+    /// underlying wire delivery succeeded — best-effort site, so a
+    /// `Pending` result (queued for retry) and outright errors both
+    /// surface as `Err` so the caller logs a warning the operator
+    /// can act on.
     async fn advertise_to_agent(&self, target: &AgentId) -> Result<(), ServiceError> {
         let agents = self.advertised_agents();
-        self.send_advertise(target, agents).await
+        let res = self.send_advertise(target, agents).await?;
+        if res.status != MessageStatus::Delivered {
+            return Err(ServiceError::InvalidParam(format!(
+                "advertise to {target} did not deliver (status={:?})",
+                res.status
+            )));
+        }
+        Ok(())
     }
 
     fn advertised_agents(&self) -> Vec<AdvertisedAgent> {
@@ -249,7 +308,7 @@ impl PeerService {
         &self,
         target: &AgentId,
         agents: Vec<AdvertisedAgent>,
-    ) -> Result<(), ServiceError> {
+    ) -> Result<MessageSendResult, ServiceError> {
         // Resolve recipient endpoint so the router knows whether to
         // dial direct or via a broker.
         let rec = self.db.agents().get(target).await?.ok_or_else(|| {
@@ -266,7 +325,10 @@ impl PeerService {
         // Self-inclusion proof: the caller (resolved by
         // `MessageService::send` from the IPC scope) must be one of
         // the listed agents — it already is, since `advertised_agents`
-        // walks our own registry.
+        // walks our own registry. Returns the inner send result so
+        // the dispatcher can map `(Ok, status)` cleanly to a
+        // `PeerAdvertiseDelivery` without shoehorning wire status
+        // into the error variants.
         self.messages
             .send(MessageSendParams {
                 to,
@@ -276,8 +338,7 @@ impl PeerService {
                 ttl_secs: Some(300),
                 caps: None,
             })
-            .await?;
-        Ok(())
+            .await
     }
 
     async fn resolve_target(&self, reference: &str) -> Result<AgentId, ServiceError> {

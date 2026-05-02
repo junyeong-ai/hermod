@@ -142,5 +142,15 @@ pub async fn advertise(args: AdvertiseArgs, target: &ClientTarget) -> Result<()>
         })
         .await?;
     println!("{}", serde_json::to_string_pretty(&r)?);
+    // Honesty contract: at least one target failed to deliver →
+    // exit non-zero so scripts react. Operators reading the JSON
+    // see the per-target rows; CI pipelines key off `$?`.
+    let any_failed = r
+        .deliveries
+        .iter()
+        .any(|d| d.status == hermod_core::MessageStatus::Failed);
+    if any_failed {
+        anyhow::bail!("one or more advertise targets failed; see deliveries[].status");
+    }
     Ok(())
 }

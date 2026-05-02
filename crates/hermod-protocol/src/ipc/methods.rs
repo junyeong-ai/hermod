@@ -513,11 +513,34 @@ pub struct PeerAdvertiseParams {
     pub target: Option<String>,
 }
 
+/// Per-target outcome of an advertise fan-out. One entry per
+/// resolved peer agent_id; ordering matches dispatch order. Mirrors
+/// [`MessageSendResult`]'s honesty contract — `status` reflects the
+/// actual wire delivery, not the queue ack.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PeerAdvertiseDelivery {
+    /// Peer agent the advertise envelope was addressed to.
+    pub target: AgentId,
+    /// Wire delivery status. `Delivered` means the recipient daemon
+    /// ack'd the envelope; `Failed` means dispatch erred (peer down,
+    /// TLS mismatch, rate limit). `Pending` is treated as `Failed`
+    /// here — for `peer advertise` the operator wants to know when
+    /// the wire didn't see an ack right now.
+    pub status: MessageStatus,
+    /// Failure reason, present iff `status == Failed`. Operator-
+    /// readable; scripts key off `status`, not the prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PeerAdvertiseResult {
-    /// Number of envelopes successfully enqueued (one per peer).
-    pub fanout: u32,
-    /// Number of agents listed in the body.
+    /// Per-target delivery outcomes. Empty when the directory had no
+    /// federated peers to advertise to (no-op success).
+    pub deliveries: Vec<PeerAdvertiseDelivery>,
+    /// Number of locally-hosted agents listed in the envelope body.
+    /// Independent of `deliveries.len()` — body content is the same
+    /// regardless of how many peers it fans out to.
     pub agents: u32,
 }
 
