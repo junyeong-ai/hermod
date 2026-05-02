@@ -31,6 +31,12 @@ pub enum HermodError {
 
     #[error("invalid session label: {0}")]
     InvalidSessionLabel(String),
+
+    #[error("invalid capability tag: {0}")]
+    InvalidCapabilityTag(String),
+
+    #[error("invalid git workspace url: {0}")]
+    InvalidGitWorkspaceUrl(String),
 }
 
 pub type Result<T, E = HermodError> = std::result::Result<T, E>;

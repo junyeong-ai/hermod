@@ -58,8 +58,14 @@ pub fn schemas() -> Value {
         },
         {
             "name": "agent_list",
-            "description": "List agents currently reachable for synchronous reply (live=true, i.e. they have an attached Claude Code session). Offline agents are not surfaced here — use agent_get on a known id, or check the audit log, when you need to inspect an offline identity.",
-            "inputSchema": { "type": "object", "properties": {} }
+            "description": "List agents currently reachable for synchronous reply (live=true, i.e. they have an attached Claude Code session). Filter by capability tags via tag_all (AND) and tag_any (OR) — operators set tags on hosted agents to label language/framework/role; peers receive tag updates via peer.advertise. Offline agents are not surfaced here — use agent_get on a known id, or check the audit log, when you need to inspect an offline identity.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tag_all": { "type":"array", "items":{ "type":"string" }, "description":"Match agents whose effective tag set contains every listed tag." },
+                    "tag_any": { "type":"array", "items":{ "type":"string" }, "description":"Match agents whose effective tag set contains at least one listed tag." }
+                }
+            }
         },
         {
             "name": "agent_get",
@@ -412,9 +418,27 @@ async fn do_message_ack(args: Value, target: &ClientTarget) -> Result<Value> {
     Ok(serde_json::to_value(r)?)
 }
 
-async fn do_agent_list(_args: Value, target: &ClientTarget) -> Result<Value> {
+async fn do_agent_list(args: Value, target: &ClientTarget) -> Result<Value> {
+    use std::str::FromStr;
+    let parse_tags = |key: &str| -> Result<Vec<hermod_core::CapabilityTag>> {
+        match args.get(key) {
+            Some(Value::Array(arr)) => arr
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| {
+                    hermod_core::CapabilityTag::from_str(s)
+                        .map_err(|e| anyhow!("invalid tag `{s}`: {e}"))
+                })
+                .collect(),
+            _ => Ok(Vec::new()),
+        }
+    };
+    let tags_all = parse_tags("tag_all")?;
+    let tags_any = parse_tags("tag_any")?;
     let mut client = target.connect().await?;
-    let r = client.agent_list(AgentListParams {}).await?;
+    let r = client
+        .agent_list(AgentListParams { tags_all, tags_any })
+        .await?;
     Ok(serde_json::to_value(r)?)
 }
 

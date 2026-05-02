@@ -22,7 +22,7 @@
 use hermod_core::{AgentAlias, AgentId, Timestamp, TrustLevel};
 use hermod_protocol::ipc::methods::{
     LocalAddParams, LocalAddResult, LocalAgentSummary, LocalListResult, LocalRemoveParams,
-    LocalRemoveResult, LocalRotateParams, LocalRotateResult,
+    LocalRemoveResult, LocalRotateParams, LocalRotateResult, LocalTagSetParams, LocalTagSetResult,
 };
 use hermod_storage::{AgentRecord, AuditEntry, AuditSink, Database, LocalAgentRecord};
 use std::path::PathBuf;
@@ -131,6 +131,10 @@ impl LocalAgentService {
             reputation: 0,
             first_seen: now,
             last_seen: Some(now),
+            // local agents have no peer-asserted facet (we host
+            // them) — the operator-set tags live on the
+            // `local_agents.tags` column instead.
+            peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
         };
         self.db
             .agents()
@@ -142,6 +146,7 @@ impl LocalAgentService {
             bearer_hash,
             workspace_root: None,
             created_at: now,
+            tags: hermod_core::CapabilityTagSet::empty(),
         };
         self.db
             .local_agents()
@@ -345,6 +350,51 @@ impl LocalAgentService {
         let id = AgentId::from_str(reference)
             .map_err(|e| ServiceError::InvalidParam(format!("invalid agent id: {e}")))?;
         self.registry.lookup(&id).ok_or(ServiceError::NotFound)
+    }
+
+    /// Replace the operator-set tag set on one local agent.
+    /// Validates cardinality + dedup through `from_validated`.
+    /// Audits `local.tag_set` so an operator review trail captures
+    /// the change.
+    pub async fn tag_set(
+        &self,
+        params: LocalTagSetParams,
+    ) -> Result<LocalTagSetResult, ServiceError> {
+        let agent = self.resolve(&params.reference).await?;
+        let tag_set = hermod_core::CapabilityTagSet::from_validated(params.tags)
+            .map_err(|e| ServiceError::InvalidParam(format!("tags: {e}")))?;
+        let updated = self
+            .db
+            .local_agents()
+            .set_tags(&agent.agent_id, &tag_set)
+            .await
+            .map_err(ServiceError::Storage)?;
+        if !updated {
+            return Err(ServiceError::NotFound);
+        }
+        audit_or_warn(
+            &*self.audit_sink,
+            AuditEntry {
+                id: None,
+                ts: Timestamp::now(),
+                actor: self.host_actor.clone(),
+                action: "local.tag_set".into(),
+                target: Some(agent.agent_id.to_string()),
+                details: Some(serde_json::json!({
+                    "tags": tag_set
+                        .iter()
+                        .map(|t| t.as_str().to_string())
+                        .collect::<Vec<_>>(),
+                })),
+                client_ip: None,
+                federation: hermod_storage::AuditFederationPolicy::Default,
+            },
+        )
+        .await;
+        Ok(LocalTagSetResult {
+            agent_id: agent.agent_id,
+            tags: tag_set.iter().cloned().collect(),
+        })
     }
 }
 

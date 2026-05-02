@@ -74,6 +74,11 @@ impl InboundProcessor {
         let mut upserted: u32 = 0;
         let mut rejected_self_cert: u32 = 0;
         let mut rejected_host_conflict: u32 = 0;
+        // Cumulative count of tag entries dropped during
+        // per-entry `CapabilityTag::parse` filter-map. Folded
+        // into the `peer.advertise.received` audit row so a peer
+        // shipping malformed tag strings is observable.
+        let mut total_invalid_tags: u32 = 0;
         for advertised in agents {
             // Self-cert: id == blake3(pubkey)[:26].
             let expected = agent_id_from_pubkey(&advertised.pubkey);
@@ -127,6 +132,15 @@ impl InboundProcessor {
                     reputation: existing.as_ref().map(|r| r.reputation).unwrap_or(0),
                     first_seen: existing.as_ref().map(|r| r.first_seen).unwrap_or(now),
                     last_seen: Some(now),
+                    // peer_asserted_tags: the *latest* advertise
+                    // is authoritative for this peer-side facet
+                    // (same model as `peer_asserted_alias`).
+                    // Per-entry parse-failure drop so a single
+                    // bad string doesn't reject the whole row;
+                    // the dropped count is folded into the
+                    // `peer.advertise.received` audit detail
+                    // alongside `dropped_invalid_tags`.
+                    peer_asserted_tags: parsed_tags_for(advertised, &mut total_invalid_tags),
                 })
                 .await
                 .map_err(|e| FederationRejection::Storage(e.to_string()))?;
@@ -146,6 +160,7 @@ impl InboundProcessor {
                     "agents_upserted": upserted,
                     "rejected_self_cert": rejected_self_cert,
                     "rejected_host_conflict": rejected_host_conflict,
+                    "dropped_invalid_tags": total_invalid_tags,
                 })),
                 client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
@@ -155,4 +170,17 @@ impl InboundProcessor {
 
         Ok(())
     }
+}
+
+/// Per-advertised-agent tag parse with cumulative-drop counter.
+/// Splitting this out keeps the upsert site readable and gives a
+/// single place future variants of `AdvertisedAgent.tags` (e.g. a
+/// stricter validator in v2) plug in.
+fn parsed_tags_for(
+    advertised: &AdvertisedAgent,
+    total_dropped: &mut u32,
+) -> hermod_core::CapabilityTagSet {
+    let (set, dropped) = hermod_core::CapabilityTagSet::parse_lossy(advertised.tags.clone());
+    *total_dropped = total_dropped.saturating_add(dropped);
+    set
 }

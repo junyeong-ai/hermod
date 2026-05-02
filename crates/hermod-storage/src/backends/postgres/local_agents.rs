@@ -6,7 +6,7 @@
 //! method's behaviour is byte-identical with the SQLite variant.
 
 use async_trait::async_trait;
-use hermod_core::{AgentId, Timestamp};
+use hermod_core::{AgentId, CapabilityTagSet, Timestamp};
 use sqlx::{PgPool, Row};
 use std::str::FromStr;
 
@@ -29,16 +29,18 @@ impl PostgresLocalAgentRepository {
 #[async_trait]
 impl LocalAgentRepository for PostgresLocalAgentRepository {
     async fn insert(&self, record: &LocalAgentRecord) -> Result<LocalAgentInsertOutcome> {
+        let tags_json = serde_json::to_string(&record.tags)?;
         let res = sqlx::query(
             r#"INSERT INTO local_agents
-               (agent_id, bearer_hash, workspace_root, created_at)
-               VALUES ($1, $2, $3, $4)
+               (agent_id, bearer_hash, workspace_root, created_at, tags)
+               VALUES ($1, $2, $3, $4, $5)
                ON CONFLICT (agent_id) DO NOTHING"#,
         )
         .bind(record.agent_id.as_str())
         .bind(record.bearer_hash.as_slice())
         .bind(record.workspace_root.as_deref())
         .bind(record.created_at.unix_ms())
+        .bind(&tags_json)
         .execute(&self.pool)
         .await?;
         Ok(if res.rows_affected() == 0 {
@@ -50,7 +52,7 @@ impl LocalAgentRepository for PostgresLocalAgentRepository {
 
     async fn list(&self) -> Result<Vec<LocalAgentRecord>> {
         let rows = sqlx::query(
-            r#"SELECT agent_id, bearer_hash, workspace_root, created_at
+            r#"SELECT agent_id, bearer_hash, workspace_root, created_at, tags
                FROM local_agents
                ORDER BY created_at ASC"#,
         )
@@ -61,7 +63,7 @@ impl LocalAgentRepository for PostgresLocalAgentRepository {
 
     async fn lookup_by_id(&self, id: &AgentId) -> Result<Option<LocalAgentRecord>> {
         let row = sqlx::query(
-            r#"SELECT agent_id, bearer_hash, workspace_root, created_at
+            r#"SELECT agent_id, bearer_hash, workspace_root, created_at, tags
                FROM local_agents WHERE agent_id = $1"#,
         )
         .bind(id.as_str())
@@ -100,6 +102,16 @@ impl LocalAgentRepository for PostgresLocalAgentRepository {
             LocalAgentRemoveOutcome::Removed
         })
     }
+
+    async fn set_tags(&self, id: &AgentId, tags: &CapabilityTagSet) -> Result<bool> {
+        let json = serde_json::to_string(tags)?;
+        let res = sqlx::query(r#"UPDATE local_agents SET tags = $1 WHERE agent_id = $2"#)
+            .bind(&json)
+            .bind(id.as_str())
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
+    }
 }
 
 fn row_to_local_agent(row: sqlx::postgres::PgRow) -> Result<LocalAgentRecord> {
@@ -117,10 +129,14 @@ fn row_to_local_agent(row: sqlx::postgres::PgRow) -> Result<LocalAgentRecord> {
     let workspace_root: Option<String> = row.try_get("workspace_root")?;
     let created_at_ms: i64 = row.try_get("created_at")?;
     let created_at = Timestamp::from_unix_ms(created_at_ms).map_err(StorageError::Core)?;
+    let tags_json: String = row.try_get("tags")?;
+    let raw: Vec<String> = serde_json::from_str(&tags_json)?;
+    let (tags, _dropped) = CapabilityTagSet::parse_lossy(raw);
     Ok(LocalAgentRecord {
         agent_id,
         bearer_hash,
         workspace_root,
         created_at,
+        tags,
     })
 }

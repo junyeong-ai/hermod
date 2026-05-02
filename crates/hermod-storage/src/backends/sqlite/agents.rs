@@ -1,7 +1,9 @@
 //! SQLite implementation of `AgentRepository`.
 
 use async_trait::async_trait;
-use hermod_core::{AgentAlias, AgentId, Endpoint, PubkeyBytes, Timestamp, TrustLevel};
+use hermod_core::{
+    AgentAlias, AgentId, CapabilityTagSet, Endpoint, PubkeyBytes, Timestamp, TrustLevel,
+};
 use sqlx::{Row, SqlitePool};
 use std::str::FromStr;
 
@@ -253,6 +255,16 @@ impl AgentRepository for SqliteAgentRepository {
         rows.into_iter().map(row_to_agent).collect()
     }
 
+    async fn set_peer_asserted_tags(&self, id: &AgentId, tags: &CapabilityTagSet) -> Result<()> {
+        let json = serde_json::to_string(tags)?;
+        sqlx::query(r#"UPDATE agents SET peer_asserted_tags = ? WHERE id = ?"#)
+            .bind(&json)
+            .bind(id.as_str())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     async fn count_with_effective_alias(
         &self,
         alias: &hermod_core::AgentAlias,
@@ -359,7 +371,8 @@ impl AgentRepository for SqliteAgentRepository {
 }
 
 const COLUMNS: &str = "id, pubkey, host_pubkey, endpoint, via_agent, local_alias, \
-     peer_asserted_alias, trust_level, tls_fingerprint, reputation, first_seen, last_seen";
+     peer_asserted_alias, trust_level, tls_fingerprint, reputation, first_seen, last_seen, \
+     peer_asserted_tags";
 
 fn select(predicate: &str, order_by: Option<&str>) -> String {
     let order = order_by
@@ -408,6 +421,8 @@ fn row_to_agent(row: sqlx::sqlite::SqliteRow) -> Result<AgentRecord> {
         .transpose()
         .map_err(StorageError::Core)?;
 
+    let peer_asserted_tags = decode_tag_set(row.try_get::<String, _>("peer_asserted_tags")?)?;
+
     Ok(AgentRecord {
         id,
         pubkey,
@@ -421,7 +436,17 @@ fn row_to_agent(row: sqlx::sqlite::SqliteRow) -> Result<AgentRecord> {
         reputation,
         first_seen,
         last_seen,
+        peer_asserted_tags,
     })
+}
+
+/// Decode the JSON-encoded `peer_asserted_tags` column. Uses
+/// `parse_lossy` so a row with corrupted / future-format entries
+/// reads as a smaller set rather than failing the whole row read.
+fn decode_tag_set(json: String) -> Result<hermod_core::CapabilityTagSet> {
+    let raw: Vec<String> = serde_json::from_str(&json)?;
+    let (set, _dropped) = hermod_core::CapabilityTagSet::parse_lossy(raw);
+    Ok(set)
 }
 
 fn decode_pubkey(bytes: Vec<u8>, column: &'static str) -> Result<PubkeyBytes> {
@@ -481,6 +506,7 @@ mod tests {
             reputation: 0,
             first_seen: now,
             last_seen: Some(now),
+            peer_asserted_tags: CapabilityTagSet::empty(),
         }
     }
 

@@ -144,6 +144,7 @@ session pinned to a removed/rotated bearer is force-closed.
 | `local.remove` | Operator `local remove` (IPC). Agent archived from disk + dropped from DB + registry; active sessions force-closed. | `archive` |
 | `local.rotate` | Operator `local rotate` (IPC). Bearer regenerated; active sessions on the previous bearer force-closed. | none |
 | `local_agent.bearer_rotated_on_drift` | Boot-time `merge_with_db` reconciliation: on-disk bearer hash differs from DB row (e.g. operator wrote a fresh token while the daemon was offline). | `previous_hash_prefix`, `current_hash_prefix` |
+| `local.tag_set` | Operator replaced the capability tag set on a local agent via `hermod local tag set`. Tags are discovery metadata only — never trust-bearing (`scripts/check_trust_boundaries.sh` grep contract). | `tags` (the new set, post-validation) |
 
 ### permission.*
 

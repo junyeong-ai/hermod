@@ -69,6 +69,16 @@ CREATE TABLE agents (
     reputation          INTEGER NOT NULL DEFAULT 0,
     first_seen          INTEGER NOT NULL,
     last_seen           INTEGER,
+    -- Capability tags the *peer* claims about themselves —
+    -- propagated via `MessageBody::PeerAdvertise`. Discovery
+    -- metadata only (NEVER trust-bearing — see
+    -- `hermod_core::capability_tag` module docs and the
+    -- `scripts/check_trust_boundaries.sh` grep contract). JSON-
+    -- encoded `Vec<String>` validated through
+    -- `CapabilityTagSet::parse_lossy` on read; per-entry parse
+    -- failures drop the entry, never reject the row. Default
+    -- `'[]'` so existing rows pre-PR-4 read as empty.
+    peer_asserted_tags  TEXT NOT NULL DEFAULT '[]',
     -- Endpoint XOR via_agent (or both NULL = directory-only,
     -- not yet routable). Observed agents start NULL/NULL and become
     -- routable once an endpoint or broker hint arrives.
@@ -96,7 +106,14 @@ CREATE TABLE local_agents (
     -- directory this agent represents — surfaced in MCP `instructions`
     -- so Claude Code knows what this agent is about.
     workspace_root      TEXT,
-    created_at          INTEGER NOT NULL
+    created_at          INTEGER NOT NULL,
+    -- Capability tags the operator set on this hosted agent.
+    -- Discovery metadata only — propagated to peers via
+    -- `peer.advertise`; `agent.list --tag-{any,all}` filters on
+    -- the union of these and `agents.peer_asserted_tags`.
+    -- Bounded by `CapabilityTagSet` (≤16 entries, each
+    -- `[a-z0-9:_.-]{1,64}`). JSON-encoded `Vec<String>`.
+    tags                TEXT NOT NULL DEFAULT '[]'
 );
 -- Bearer hash is the auth lookup key — index for O(log n) handshake.
 CREATE UNIQUE INDEX idx_local_agents_bearer_hash ON local_agents(bearer_hash);

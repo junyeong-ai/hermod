@@ -260,6 +260,20 @@ impl AgentRepository for PostgresAgentRepository {
         rows.into_iter().map(row_to_agent).collect()
     }
 
+    async fn set_peer_asserted_tags(
+        &self,
+        id: &AgentId,
+        tags: &hermod_core::CapabilityTagSet,
+    ) -> Result<()> {
+        let json = serde_json::to_string(tags)?;
+        sqlx::query(r#"UPDATE agents SET peer_asserted_tags = $1 WHERE id = $2"#)
+            .bind(&json)
+            .bind(id.as_str())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     async fn count_with_effective_alias(
         &self,
         alias: &hermod_core::AgentAlias,
@@ -367,7 +381,8 @@ impl AgentRepository for PostgresAgentRepository {
 }
 
 const COLUMNS: &str = "id, pubkey, host_pubkey, endpoint, via_agent, local_alias, \
-     peer_asserted_alias, trust_level, tls_fingerprint, reputation, first_seen, last_seen";
+     peer_asserted_alias, trust_level, tls_fingerprint, reputation, first_seen, last_seen, \
+     peer_asserted_tags";
 
 fn select(predicate: &str, order_by: Option<&str>) -> String {
     let order = order_by
@@ -416,6 +431,8 @@ fn row_to_agent(row: sqlx::postgres::PgRow) -> Result<AgentRecord> {
         .transpose()
         .map_err(StorageError::Core)?;
 
+    let peer_asserted_tags = decode_tag_set(row.try_get::<String, _>("peer_asserted_tags")?)?;
+
     Ok(AgentRecord {
         id,
         pubkey,
@@ -429,7 +446,16 @@ fn row_to_agent(row: sqlx::postgres::PgRow) -> Result<AgentRecord> {
         reputation,
         first_seen,
         last_seen,
+        peer_asserted_tags,
     })
+}
+
+/// Decode the JSON-encoded `peer_asserted_tags` column. Lossy
+/// per-entry — same semantics as the sqlite backend.
+fn decode_tag_set(json: String) -> Result<hermod_core::CapabilityTagSet> {
+    let raw: Vec<String> = serde_json::from_str(&json)?;
+    let (set, _dropped) = hermod_core::CapabilityTagSet::parse_lossy(raw);
+    Ok(set)
 }
 
 fn decode_pubkey(bytes: Vec<u8>, column: &'static str) -> Result<PubkeyBytes> {

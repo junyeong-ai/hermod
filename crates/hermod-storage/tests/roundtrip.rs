@@ -48,6 +48,7 @@ async fn message_roundtrip() {
                 reputation: 0,
                 first_seen: now,
                 last_seen: Some(now),
+                peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
             })
             .await
             .expect("upsert agent");
@@ -127,6 +128,7 @@ async fn priority_min_filter_binds_correctly() {
                 reputation: 0,
                 first_seen: now,
                 last_seen: Some(now),
+                peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
             })
             .await
             .unwrap();
@@ -214,6 +216,7 @@ async fn wrong_recipient_cannot_ack() {
                 reputation: 0,
                 first_seen: now,
                 last_seen: Some(now),
+                peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
             })
             .await
             .unwrap();
@@ -268,6 +271,7 @@ async fn agent_upsert_preserves_operator_trust() {
             reputation: 0,
             first_seen: now,
             last_seen: Some(now),
+            peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
         })
         .await
         .unwrap();
@@ -293,6 +297,7 @@ async fn agent_upsert_preserves_operator_trust() {
             reputation: 0,
             first_seen: now,
             last_seen: Some(now),
+            peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
         })
         .await
         .unwrap();
@@ -334,6 +339,7 @@ async fn broadcast_hmac_end_to_end() {
                 reputation: 0,
                 first_seen: now,
                 last_seen: Some(now),
+                peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
             })
             .await
             .unwrap();
@@ -460,6 +466,7 @@ async fn fail_pending_to_clears_invisible_pending() {
                 reputation: 0,
                 first_seen: now,
                 last_seen: Some(now),
+                peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
             })
             .await
             .unwrap();
@@ -539,6 +546,7 @@ async fn list_distinct_excluding_is_deterministic() {
                 reputation: 0,
                 first_seen: now,
                 last_seen: Some(now),
+                peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
             })
             .await
             .unwrap();
@@ -611,6 +619,7 @@ async fn forget_peer_returns_prior_endpoint_atomically() {
             reputation: 0,
             first_seen: now,
             last_seen: Some(now),
+            peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
         })
         .await
         .unwrap();
@@ -663,6 +672,7 @@ async fn repin_returns_endpoint_snapshot_for_pool_eviction() {
             reputation: 0,
             first_seen: now,
             last_seen: Some(now),
+            peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
         })
         .await
         .unwrap();
@@ -707,6 +717,7 @@ async fn repin_atomic_against_trust_change() {
             reputation: 0,
             first_seen: now,
             last_seen: Some(now),
+            peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
         })
         .await
         .unwrap();
@@ -796,6 +807,7 @@ async fn claim_pending_remote_no_double_claims_under_race() {
             reputation: 0,
             first_seen: now,
             last_seen: Some(now),
+            peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
         })
         .await
         .unwrap();
@@ -813,6 +825,7 @@ async fn claim_pending_remote_no_double_claims_under_race() {
             reputation: 0,
             first_seen: now,
             last_seen: Some(now),
+            peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
         })
         .await
         .unwrap();
@@ -907,6 +920,7 @@ async fn claim_pending_remote_reclaims_stale_owners() {
                 reputation: 0,
                 first_seen: now,
                 last_seen: Some(now),
+                peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
             })
             .await
             .unwrap();
@@ -987,6 +1001,7 @@ async fn mcp_session_label_attach_resume_and_cursor_advance() {
             reputation: 0,
             first_seen: now,
             last_seen: Some(now),
+            peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
         })
         .await
         .unwrap();
@@ -1115,6 +1130,7 @@ async fn count_with_effective_alias_excludes_self_and_counts_collisions() {
             reputation: 0,
             first_seen: now,
             last_seen: Some(now),
+            peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
         }
     };
 
@@ -1171,6 +1187,7 @@ async fn inbox_disposition_filter_and_promote() {
                 reputation: 0,
                 first_seen: now,
                 last_seen: Some(now),
+                peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
             })
             .await
             .unwrap();
@@ -1307,6 +1324,7 @@ async fn notification_enqueue_respects_cap_atomically() {
                 reputation: 0,
                 first_seen: now,
                 last_seen: Some(now),
+                peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
             })
             .await
             .unwrap();

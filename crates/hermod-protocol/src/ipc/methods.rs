@@ -6,9 +6,9 @@
 //! grammar is small, and adapters (CLI, MCP, audit log) all assume it.
 
 use hermod_core::{
-    AgentAddress, AgentAlias, AgentId, CapabilityDirection, CapabilityToken, Endpoint,
-    McpSessionId, MessageBody, MessageDisposition, MessageId, MessageKind, MessagePriority,
-    MessageStatus, NotificationStatus, SessionLabel, Timestamp, TrustLevel,
+    AgentAddress, AgentAlias, AgentId, CapabilityDirection, CapabilityTag, CapabilityToken,
+    Endpoint, McpSessionId, MessageBody, MessageDisposition, MessageId, MessageKind,
+    MessagePriority, MessageStatus, NotificationStatus, SessionLabel, Timestamp, TrustLevel,
 };
 use serde::{Deserialize, Serialize};
 
@@ -78,6 +78,9 @@ pub mod method {
     pub const LOCAL_ADD: &str = "local.add";
     pub const LOCAL_REMOVE: &str = "local.remove";
     pub const LOCAL_ROTATE: &str = "local.rotate";
+    /// Replace the operator-set capability tag set on one local
+    /// agent. Discovery metadata only — never trust-bearing.
+    pub const LOCAL_TAG_SET: &str = "local.tag_set";
     /// Live MCP sessions for the caller agent — used by the operator
     /// to see which Claude Code windows are currently attached and
     /// under which `session_label`.
@@ -480,7 +483,17 @@ pub struct MessageAckResult {
 /// (you can't talk to them), and listing all known identities for forensic
 /// purposes is the audit log's job.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct AgentListParams {}
+pub struct AgentListParams {
+    /// Match agents whose effective tag set contains *every* tag
+    /// listed here (AND). Empty / absent ⇒ no constraint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags_all: Vec<CapabilityTag>,
+    /// Match agents whose effective tag set contains *at least one*
+    /// of these tags (OR). Empty / absent ⇒ no constraint. Combined
+    /// with `tags_all` via AND: a row must satisfy both filters.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags_any: Vec<CapabilityTag>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentSummary {
@@ -507,6 +520,12 @@ pub struct AgentSummary {
     /// current status. See `presence.get` for the derivation rules.
     pub status: hermod_core::PresenceStatus,
     pub manual_status: Option<hermod_core::PresenceStatus>,
+    /// Effective tag set — local tags (operator-set on hosted
+    /// agents) merged with peer-asserted tags (from inbound
+    /// `peer.advertise`), local-first and deduplicated. Discovery
+    /// metadata only — never trust-bearing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<CapabilityTag>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -538,6 +557,18 @@ pub struct AgentGetResult {
     pub status: hermod_core::PresenceStatus,
     pub live: bool,
     pub manual_status: Option<hermod_core::PresenceStatus>,
+    /// Operator-set local tags (only populated for agents this
+    /// daemon hosts — peers have no `local_agents` row).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_tags: Vec<CapabilityTag>,
+    /// Tags the peer asserted in their most recent `peer.advertise`.
+    /// Empty for peers that haven't advertised yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peer_asserted_tags: Vec<CapabilityTag>,
+    /// `effective_tags(local, peer_asserted)` — local-first, deduped.
+    /// Discovery metadata only — never trust-bearing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effective_tags: Vec<CapabilityTag>,
 }
 
 /// Register an agent (typically another local identity or a known peer's agent).
@@ -626,6 +657,24 @@ pub struct LocalRotateResult {
     /// New plaintext bearer. Surfaced once at rotation time;
     /// subsequent reads must come from `bearer_file`.
     pub bearer_token: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalTagSetParams {
+    /// Local agent to retag — `agent_id` or `@<alias>`.
+    pub reference: String,
+    /// Replacement tag set (NOT additive). Each entry is parsed
+    /// through `CapabilityTag::parse`; daemon validates the
+    /// cardinality (≤16) before persisting.
+    pub tags: Vec<CapabilityTag>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalTagSetResult {
+    pub agent_id: AgentId,
+    /// What's now stored — echo so the caller can verify the
+    /// validator's dedup / parse pass against what they sent.
+    pub tags: Vec<CapabilityTag>,
 }
 
 // ---------- peer.* ----------

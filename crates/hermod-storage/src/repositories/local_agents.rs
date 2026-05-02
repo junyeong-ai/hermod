@@ -13,7 +13,7 @@
 //! rotate`) touch `LocalAgentRepository`.
 
 use async_trait::async_trait;
-use hermod_core::{AgentId, Timestamp};
+use hermod_core::{AgentId, CapabilityTagSet, Timestamp};
 
 use crate::error::Result;
 
@@ -32,6 +32,10 @@ pub struct LocalAgentRecord {
     /// which project this agent represents.
     pub workspace_root: Option<String>,
     pub created_at: Timestamp,
+    /// Operator-set capability tags. Discovery metadata only —
+    /// propagated to peers via `peer.advertise`; never trust-bearing.
+    /// Empty for agents the operator hasn't tagged yet.
+    pub tags: CapabilityTagSet,
 }
 
 /// Outcome of `LocalAgentRepository::insert` — distinguishes the two
@@ -75,6 +79,12 @@ pub trait LocalAgentRepository: Send + Sync + std::fmt::Debug {
     /// any in-flight IPC session held under the previous bearer
     /// (see `LocalAgentRegistry::rotate_bearer` in the daemon).
     async fn rotate_bearer(&self, id: &AgentId, new_hash: [u8; 32]) -> Result<bool>;
+
+    /// Replace the operator-set tag set for one local agent. Used
+    /// by `hermod local tag set <agent> <tags…>`. Returns `true` if
+    /// the row exists and was updated, `false` if no such agent.
+    /// Caller has already validated through `CapabilityTagSet::from_validated`.
+    async fn set_tags(&self, id: &AgentId, tags: &CapabilityTagSet) -> Result<bool>;
 
     /// Remove the local-agent row. The matching `agents` row is *not*
     /// touched here — operator policy decides whether to also forget

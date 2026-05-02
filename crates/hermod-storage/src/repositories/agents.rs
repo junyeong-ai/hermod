@@ -1,7 +1,9 @@
 //! Agent directory contract.
 
 use async_trait::async_trait;
-use hermod_core::{AgentAlias, AgentId, Endpoint, PubkeyBytes, Timestamp, TrustLevel};
+use hermod_core::{
+    AgentAlias, AgentId, CapabilityTagSet, Endpoint, PubkeyBytes, Timestamp, TrustLevel,
+};
 
 use crate::error::Result;
 
@@ -52,6 +54,13 @@ pub struct AgentRecord {
     pub reputation: i64,
     pub first_seen: Timestamp,
     pub last_seen: Option<Timestamp>,
+    /// Capability tags the *peer* claimed about themselves in
+    /// their most recent `PeerAdvertise`. Discovery-only metadata,
+    /// **never trust-bearing** (see
+    /// `hermod_core::capability_tag` module docs +
+    /// `scripts/check_trust_boundaries.sh`). Empty for peers that
+    /// have never advertised.
+    pub peer_asserted_tags: CapabilityTagSet,
 }
 
 impl AgentRecord {
@@ -115,6 +124,14 @@ pub trait AgentRepository: Send + Sync + std::fmt::Debug {
 
     /// Peers with a federation endpoint registered.
     async fn list_federated(&self) -> Result<Vec<AgentRecord>>;
+
+    /// Replace `peer_asserted_tags` for one row. Used by the
+    /// inbound `peer.advertise` acceptor on every advertise — the
+    /// sender's most-recent claim is authoritative for the
+    /// peer-side facet, just like `peer_asserted_alias`. Tags are
+    /// validated through `CapabilityTagSet::parse_lossy` upstream;
+    /// this method just persists the result.
+    async fn set_peer_asserted_tags(&self, id: &AgentId, tags: &CapabilityTagSet) -> Result<()>;
 
     /// Count agents whose effective alias (local override winning,
     /// peer-asserted as fallback) equals `alias`, *excluding* the

@@ -236,6 +236,7 @@ pub async fn record_host_peer(
             reputation: 0,
             first_seen: now,
             last_seen: Some(now),
+            peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
         })
         .await?;
     let rec = db
@@ -279,6 +280,7 @@ pub async fn record_agent_peer(
             reputation: 0,
             first_seen: now,
             last_seen: None,
+            peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
         })
         .await?;
     let rec = db
@@ -340,6 +342,7 @@ pub async fn record_brokered_peer(
             reputation: 0,
             first_seen: now,
             last_seen: None,
+            peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
         })
         .await?;
     let rec = db

@@ -15,12 +15,13 @@
 //! at the agent's bearer file, so Claude Code launching from that
 //! project connects to the daemon as the project's agent.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::Args;
-use hermod_core::{AgentAlias, AgentId};
+use hermod_core::{AgentAlias, AgentId, CapabilityTag};
 use hermod_daemon::local_agent;
 use hermod_protocol::ipc::methods::{
-    LocalAddParams, LocalRemoveParams, LocalRotateParams, LocalSessionsParams,
+    AgentGetParams, LocalAddParams, LocalRemoveParams, LocalRotateParams, LocalSessionsParams,
+    LocalTagSetParams,
 };
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -259,4 +260,67 @@ fn mask(s: &str) -> String {
         return "*".repeat(n);
     }
     format!("{}…{}", &s[..4], &s[n - 4..])
+}
+
+#[derive(Args, Debug)]
+pub struct TagSetArgs {
+    /// Either the agent_id or alias.
+    pub reference: String,
+    /// Replacement tag list (NOT additive). Each tag is parsed
+    /// against `^[a-z0-9:_.-]{1,64}$`. Empty list clears.
+    pub tags: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct TagGetArgs {
+    /// Either the agent_id or alias.
+    pub reference: String,
+}
+
+#[derive(Args, Debug)]
+pub struct TagClearArgs {
+    /// Either the agent_id or alias.
+    pub reference: String,
+}
+
+pub async fn tag_set(args: TagSetArgs, target: &ClientTarget) -> Result<()> {
+    let tags: Vec<CapabilityTag> = args
+        .tags
+        .iter()
+        .map(|s| CapabilityTag::from_str(s).map_err(|e| anyhow!("invalid tag `{s}`: {e}")))
+        .collect::<Result<_>>()?;
+    let mut c = target.connect().await?;
+    let r = c
+        .local_tag_set(LocalTagSetParams {
+            reference: args.reference,
+            tags,
+        })
+        .await?;
+    println!("{}", serde_json::to_string_pretty(&r)?);
+    Ok(())
+}
+
+pub async fn tag_get(args: TagGetArgs, target: &ClientTarget) -> Result<()> {
+    // Reuse `agent.get` for the read path — it already returns
+    // the union of local + peer-asserted tags as `effective_tags`.
+    let mut c = target.connect().await?;
+    let r = c
+        .agent_get(AgentGetParams {
+            agent: args.reference,
+        })
+        .await?;
+    println!("{}", serde_json::to_string_pretty(&r)?);
+    Ok(())
+}
+
+pub async fn tag_clear(args: TagClearArgs, target: &ClientTarget) -> Result<()> {
+    let mut c = target.connect().await?;
+    let r = c
+        .local_tag_set(LocalTagSetParams {
+            reference: args.reference,
+            tags: vec![],
+        })
+        .await?;
+    println!("{}", serde_json::to_string_pretty(&r)?);
+    Ok(())
 }

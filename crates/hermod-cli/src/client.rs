@@ -314,6 +314,13 @@ impl DaemonClient {
         self.call(methods::method::LOCAL_SESSIONS, params).await
     }
 
+    pub async fn local_tag_set(
+        &mut self,
+        params: methods::LocalTagSetParams,
+    ) -> Result<methods::LocalTagSetResult> {
+        self.call(methods::method::LOCAL_TAG_SET, params).await
+    }
+
     pub async fn workspace_create(
         &mut self,
         params: methods::WorkspaceCreateParams,

@@ -268,6 +268,10 @@ impl Dispatcher {
                 let p = parse_params(params)?;
                 to_value(self.local_agents.rotate(p).await)
             }
+            method::LOCAL_TAG_SET => {
+                let p = parse_params(params)?;
+                to_value(self.local_agents.tag_set(p).await)
+            }
             method::LOCAL_SESSIONS => {
                 let p = parse_params_or_default(params)?;
                 to_value(self.mcp.list_sessions(p).await)

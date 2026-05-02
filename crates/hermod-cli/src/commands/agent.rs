@@ -1,6 +1,6 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use clap::Args;
-use hermod_core::{AgentAlias, Endpoint, TrustLevel};
+use hermod_core::{AgentAlias, CapabilityTag, Endpoint, TrustLevel};
 use hermod_protocol::ipc::methods::{AgentGetParams, AgentListParams, AgentRegisterParams};
 
 use std::str::FromStr;
@@ -10,7 +10,18 @@ use crate::client::ClientTarget;
 /// `agent list` returns only live agents — see [`AgentListParams`] for the
 /// design rationale. There is no `--include-offline` flag.
 #[derive(Args, Debug)]
-pub struct ListArgs {}
+pub struct ListArgs {
+    /// Filter to agents whose effective tag set contains every
+    /// listed tag (AND). Repeatable. Tags are exact lowercase
+    /// strings; unrecognised forms abort with a clear error.
+    #[arg(long = "tag-all")]
+    pub tags_all: Vec<String>,
+    /// Filter to agents whose effective tag set contains at least
+    /// one listed tag (OR). Repeatable. Combined with `--tag-all`
+    /// via AND.
+    #[arg(long = "tag-any")]
+    pub tags_any: Vec<String>,
+}
 
 #[derive(Args, Debug)]
 pub struct GetArgs {
@@ -34,9 +45,16 @@ pub struct RegisterArgs {
     pub trust: String,
 }
 
-pub async fn list(_args: ListArgs, target: &ClientTarget) -> Result<()> {
+pub async fn list(args: ListArgs, target: &ClientTarget) -> Result<()> {
+    let parse_tags = |raw: &[String]| -> Result<Vec<CapabilityTag>> {
+        raw.iter()
+            .map(|s| CapabilityTag::from_str(s).map_err(|e| anyhow!("invalid tag `{s}`: {e}")))
+            .collect()
+    };
+    let tags_all = parse_tags(&args.tags_all)?;
+    let tags_any = parse_tags(&args.tags_any)?;
     let mut c = target.connect().await?;
-    let r = c.agent_list(AgentListParams {}).await?;
+    let r = c.agent_list(AgentListParams { tags_all, tags_any }).await?;
     println!("{}", serde_json::to_string_pretty(&r)?);
     Ok(())
 }

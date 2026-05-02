@@ -120,6 +120,7 @@ impl InboundProcessor {
                     reputation: 0,
                     first_seen: now,
                     last_seen: Some(now),
+                    peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
                 })
                 .await
                 .map_err(|e| FederationRejection::Storage(e.to_string()))?;

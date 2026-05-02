@@ -184,7 +184,7 @@ impl PeerService {
         &self,
         params: PeerAdvertiseParams,
     ) -> Result<PeerAdvertiseResult, ServiceError> {
-        let agents = self.advertised_agents();
+        let agents = self.advertised_agents().await;
         let agent_count = agents.len() as u32;
         // One row per resolved target; status mirrors what
         // `MessageService::send` actually saw on the wire (not just
@@ -298,7 +298,7 @@ impl PeerService {
     /// surface as `Err` so the caller logs a warning the operator
     /// can act on.
     async fn advertise_to_agent(&self, target: &AgentId) -> Result<(), ServiceError> {
-        let agents = self.advertised_agents();
+        let agents = self.advertised_agents().await;
         let res = self.send_advertise(target, agents).await?;
         if res.status != MessageStatus::Delivered {
             return Err(ServiceError::InvalidParam(format!(
@@ -309,16 +309,27 @@ impl PeerService {
         Ok(())
     }
 
-    fn advertised_agents(&self) -> Vec<AdvertisedAgent> {
-        self.registry
-            .list()
-            .iter()
-            .map(|a| AdvertisedAgent {
+    /// Build the `AdvertisedAgent` list for an outbound
+    /// `peer.advertise` envelope. Reads operator-set tags from
+    /// `local_agents.tags` so peers receive the discovery
+    /// metadata alongside the identity. Failures during the tag
+    /// read fall through to empty — the directory entry still
+    /// propagates, which is the existing pre-PR-4 behaviour.
+    async fn advertised_agents(&self) -> Vec<AdvertisedAgent> {
+        let mut out = Vec::with_capacity(self.registry.list().len());
+        for a in self.registry.list().iter() {
+            let tags = match self.db.local_agents().lookup_by_id(&a.agent_id).await {
+                Ok(Some(rec)) => rec.tags.into_strings(),
+                _ => Vec::new(),
+            };
+            out.push(AdvertisedAgent {
                 id: a.agent_id.clone(),
                 pubkey: a.keypair.to_pubkey_bytes(),
                 alias: a.local_alias.clone(),
-            })
-            .collect()
+                tags,
+            });
+        }
+        out
     }
 
     async fn send_advertise(

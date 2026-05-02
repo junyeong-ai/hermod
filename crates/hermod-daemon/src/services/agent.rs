@@ -35,12 +35,28 @@ impl AgentService {
     /// synchronously — so the live filter is the design, not a flag. Use
     /// [`AgentService::get`] to inspect a specific id regardless of state,
     /// and the audit log for forensic enumeration.
-    pub async fn list(&self, _params: AgentListParams) -> Result<AgentListResult, ServiceError> {
+    pub async fn list(&self, params: AgentListParams) -> Result<AgentListResult, ServiceError> {
         let all = self.db.agents().list().await?;
         let mut agents = Vec::with_capacity(all.len());
         for a in all {
             let view = self.presence.view_for(&a.id).await?;
             if !view.live {
+                continue;
+            }
+            // Effective tags = local (from `local_agents.tags` if
+            // we host this agent) ∪ peer-asserted (from peer.advertise).
+            // Single source of truth via `effective_tags()`.
+            let local_tags = self.local_tags_for(&a.id).await;
+            let effective: Vec<hermod_core::CapabilityTag> =
+                hermod_core::effective_tags(&local_tags, &a.peer_asserted_tags);
+            // Apply tag filters AFTER computing effective set so
+            // operator-side filters match peer-asserted entries too.
+            if !params.tags_all.is_empty() && !params.tags_all.iter().all(|t| effective.contains(t))
+            {
+                continue;
+            }
+            if !params.tags_any.is_empty() && !params.tags_any.iter().any(|t| effective.contains(t))
+            {
                 continue;
             }
             let effective_alias = a.effective_alias().cloned();
@@ -54,6 +70,7 @@ impl AgentService {
                 last_seen: a.last_seen,
                 status: view.status,
                 manual_status: view.manual_status,
+                tags: effective,
             });
         }
         Ok(AgentListResult { agents })
@@ -64,6 +81,8 @@ impl AgentService {
         let view = self.presence.view_for(&record.id).await?;
         let fingerprint = fingerprint_from_pubkey(&record.pubkey).to_human_prefix(8);
         let effective_alias = record.effective_alias().cloned();
+        let local_tags = self.local_tags_for(&record.id).await;
+        let effective_tags = hermod_core::effective_tags(&local_tags, &record.peer_asserted_tags);
         Ok(AgentGetResult {
             id: record.id,
             local_alias: record.local_alias,
@@ -77,7 +96,20 @@ impl AgentService {
             status: view.status,
             live: view.live,
             manual_status: view.manual_status,
+            local_tags: local_tags.iter().cloned().collect(),
+            peer_asserted_tags: record.peer_asserted_tags.iter().cloned().collect(),
+            effective_tags,
         })
+    }
+
+    /// Read operator-set tags from `local_agents.tags` if we host
+    /// this agent. Empty for peers — only locally-hosted agents
+    /// have a `local_agents` row.
+    async fn local_tags_for(&self, id: &hermod_core::AgentId) -> hermod_core::CapabilityTagSet {
+        match self.db.local_agents().lookup_by_id(id).await {
+            Ok(Some(rec)) => rec.tags,
+            _ => hermod_core::CapabilityTagSet::empty(),
+        }
     }
 
     pub async fn register(
@@ -112,6 +144,7 @@ impl AgentService {
             reputation: 0,
             first_seen: now,
             last_seen: Some(now),
+            peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
         };
         // `upsert_observed` is the receiver-sovereignty path — if the
         // proposed `local_alias` collides with an existing different agent's

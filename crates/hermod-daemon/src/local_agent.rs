@@ -644,6 +644,7 @@ pub async fn merge_with_db(
                 bearer_hash,
                 workspace_root: agent.workspace_root.clone(),
                 created_at: agent.created_at,
+                tags: hermod_core::CapabilityTagSet::empty(),
             };
             db.local_agents()
                 .insert(&record)

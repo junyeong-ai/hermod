@@ -1,7 +1,7 @@
 //! SQLite implementation of [`LocalAgentRepository`].
 
 use async_trait::async_trait;
-use hermod_core::{AgentId, Timestamp};
+use hermod_core::{AgentId, CapabilityTagSet, Timestamp};
 use sqlx::{Row, SqlitePool};
 use std::str::FromStr;
 
@@ -27,15 +27,17 @@ impl LocalAgentRepository for SqliteLocalAgentRepository {
         // INSERT OR IGNORE — silent no-op when the row already exists,
         // surfaced as `AlreadyHosted`. Bearer rotation is the explicit
         // path for refreshing credentials.
+        let tags_json = serde_json::to_string(&record.tags)?;
         let res = sqlx::query(
             r#"INSERT OR IGNORE INTO local_agents
-               (agent_id, bearer_hash, workspace_root, created_at)
-               VALUES (?, ?, ?, ?)"#,
+               (agent_id, bearer_hash, workspace_root, created_at, tags)
+               VALUES (?, ?, ?, ?, ?)"#,
         )
         .bind(record.agent_id.as_str())
         .bind(record.bearer_hash.as_slice())
         .bind(record.workspace_root.as_deref())
         .bind(record.created_at.unix_ms())
+        .bind(&tags_json)
         .execute(&self.pool)
         .await?;
         Ok(if res.rows_affected() == 0 {
@@ -47,7 +49,7 @@ impl LocalAgentRepository for SqliteLocalAgentRepository {
 
     async fn list(&self) -> Result<Vec<LocalAgentRecord>> {
         let rows = sqlx::query(
-            r#"SELECT agent_id, bearer_hash, workspace_root, created_at
+            r#"SELECT agent_id, bearer_hash, workspace_root, created_at, tags
                FROM local_agents
                ORDER BY created_at ASC"#,
         )
@@ -58,7 +60,7 @@ impl LocalAgentRepository for SqliteLocalAgentRepository {
 
     async fn lookup_by_id(&self, id: &AgentId) -> Result<Option<LocalAgentRecord>> {
         let row = sqlx::query(
-            r#"SELECT agent_id, bearer_hash, workspace_root, created_at
+            r#"SELECT agent_id, bearer_hash, workspace_root, created_at, tags
                FROM local_agents WHERE agent_id = ?"#,
         )
         .bind(id.as_str())
@@ -97,6 +99,16 @@ impl LocalAgentRepository for SqliteLocalAgentRepository {
             LocalAgentRemoveOutcome::Removed
         })
     }
+
+    async fn set_tags(&self, id: &AgentId, tags: &CapabilityTagSet) -> Result<bool> {
+        let json = serde_json::to_string(tags)?;
+        let res = sqlx::query(r#"UPDATE local_agents SET tags = ? WHERE agent_id = ?"#)
+            .bind(&json)
+            .bind(id.as_str())
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
+    }
 }
 
 fn row_to_local_agent(row: sqlx::sqlite::SqliteRow) -> Result<LocalAgentRecord> {
@@ -114,11 +126,15 @@ fn row_to_local_agent(row: sqlx::sqlite::SqliteRow) -> Result<LocalAgentRecord> 
     let workspace_root: Option<String> = row.try_get("workspace_root")?;
     let created_at_ms: i64 = row.try_get("created_at")?;
     let created_at = Timestamp::from_unix_ms(created_at_ms).map_err(StorageError::Core)?;
+    let tags_json: String = row.try_get("tags")?;
+    let raw: Vec<String> = serde_json::from_str(&tags_json)?;
+    let (tags, _dropped) = CapabilityTagSet::parse_lossy(raw);
     Ok(LocalAgentRecord {
         agent_id,
         bearer_hash,
         workspace_root,
         created_at,
+        tags,
     })
 }
 
@@ -156,6 +172,7 @@ mod tests {
             bearer_hash,
             workspace_root: Some("/tmp/proj".into()),
             created_at: Timestamp::from_unix_ms(Timestamp::now().unix_ms()).unwrap(),
+            tags: CapabilityTagSet::empty(),
         }
     }
 
@@ -182,6 +199,7 @@ mod tests {
                 reputation: 0,
                 first_seen: record.created_at,
                 last_seen: Some(record.created_at),
+                peer_asserted_tags: CapabilityTagSet::empty(),
             })
             .await
             .unwrap();

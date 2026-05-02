@@ -148,6 +148,11 @@ pub async fn ensure_local_agents(
                 reputation: 0,
                 first_seen: now,
                 last_seen: Some(now),
+                // Boot path — operator-configured tags arrive
+                // later via `local.tag_set`. Empty set is the
+                // correct sentinel; the directory row will be
+                // updated by the dedicated tag service.
+                peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
             })
             .await?;
     }

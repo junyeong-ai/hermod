@@ -516,6 +516,7 @@ mod tests {
                 reputation: 0,
                 first_seen: now,
                 last_seen: Some(now),
+                peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
             })
             .await
             .unwrap();

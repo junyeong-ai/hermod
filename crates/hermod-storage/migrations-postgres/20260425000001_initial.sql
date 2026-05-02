@@ -37,6 +37,8 @@ CREATE TABLE agents (
     reputation          BIGINT NOT NULL DEFAULT 0,
     first_seen          BIGINT NOT NULL,
     last_seen           BIGINT,
+    -- See sqlite migration for column purpose. Postgres parity.
+    peer_asserted_tags  TEXT NOT NULL DEFAULT '[]',
     CHECK (endpoint IS NULL OR via_agent IS NULL)
 );
 CREATE INDEX idx_agents_with_endpoint ON agents(id) WHERE endpoint IS NOT NULL;
@@ -46,7 +48,9 @@ CREATE TABLE local_agents (
                         REFERENCES agents(id) ON DELETE CASCADE,
     bearer_hash         BYTEA NOT NULL,
     workspace_root      TEXT,
-    created_at          BIGINT NOT NULL
+    created_at          BIGINT NOT NULL,
+    -- See sqlite migration for column purpose. Postgres parity.
+    tags                TEXT NOT NULL DEFAULT '[]'
 );
 CREATE UNIQUE INDEX idx_local_agents_bearer_hash ON local_agents(bearer_hash);
 

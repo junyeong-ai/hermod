@@ -124,6 +124,44 @@ if grep -Eq "Verdict::Reject.*check_confirmation|Verdict::Accept.*check_confirma
     fail=1
 fi
 
+# ─────────────────────────────────────────────────────────────────
+# 7. Capability tags (axis 5) are discovery metadata only — never
+#    trust-bearing. The contract: `hermod-routing/src/` imports
+#    zero `capability_tag` / `CapabilityTag` symbols. A future
+#    commit that consults a tag inside the routing crate (e.g. an
+#    access decision branch on `peer.tags.contains("verified")`)
+#    fails here before review.
+#
+#    Exception: this guard is intentional. Tags are propagated via
+#    `peer.advertise` and surfaced in `agent.list` / `agent.get`
+#    for *discovery* (find me a rust+tokio peer); they have no
+#    place in the access-control / confirmation / dispatch /
+#    auto-approve decision paths.
+# ─────────────────────────────────────────────────────────────────
+# Test-only references (constructing `AgentRecord { peer_asserted_tags:
+# CapabilityTagSet::empty(), … }` for fixtures) are accepted —
+# the gate is that *production* code paths must not consult tag
+# semantics. We strip `#[cfg(test)]` mod blocks before scanning;
+# inside those, anything goes.
+routing_prod_files=$(find crates/hermod-routing/src -name '*.rs' -type f)
+violations=0
+for f in $routing_prod_files; do
+    # Truncate at the first `#[cfg(test)]` marker so test
+    # construction sites don't trip the contract. Production
+    # references still surface.
+    head=$(awk '/#\[cfg\(test\)\]/ { exit } { print }' "$f")
+    if echo "$head" | grep -Eq "capability_tag|CapabilityTag"; then
+        echo "trust-boundaries: $f references capability_tag in production code" >&2
+        echo "$head" | grep -nE "capability_tag|CapabilityTag" | sed "s|^|  $f:|" >&2
+        violations=$((violations + 1))
+    fi
+done
+if [ "$violations" -gt 0 ]; then
+    echo "  Tags are discovery metadata only — never trust-bearing." >&2
+    echo "  Routing/access decisions must NOT branch on a peer's tags." >&2
+    fail=1
+fi
+
 if [ "$fail" -eq 0 ]; then
     echo "trust-boundaries: ok"
 fi

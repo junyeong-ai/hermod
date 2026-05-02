@@ -209,6 +209,20 @@ enum LocalCmd {
     /// attached Claude Code window). Surfaces `session_label` so
     /// operators can tell which window is which.
     Sessions,
+    /// Manage capability tags on a local agent. Tags are
+    /// discovery metadata only — never trust-bearing.
+    #[command(subcommand)]
+    Tag(LocalTagCmd),
+}
+
+#[derive(Subcommand, Debug)]
+enum LocalTagCmd {
+    /// Replace the agent's tag set (NOT additive).
+    Set(commands::local::TagSetArgs),
+    /// Show one agent's tags.
+    Get(commands::local::TagGetArgs),
+    /// Clear all tags from the agent. Equivalent to `set` with empty.
+    Clear(commands::local::TagClearArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -502,6 +516,11 @@ async fn main() -> anyhow::Result<()> {
             LocalCmd::Rotate(a) => commands::local::rotate(a, &target).await,
             LocalCmd::SetupMcp(a) => commands::local::setup_mcp(a, &home).await,
             LocalCmd::Sessions => commands::local::sessions(&target).await,
+            LocalCmd::Tag(sub) => match sub {
+                LocalTagCmd::Set(a) => commands::local::tag_set(a, &target).await,
+                LocalTagCmd::Get(a) => commands::local::tag_get(a, &target).await,
+                LocalTagCmd::Clear(a) => commands::local::tag_clear(a, &target).await,
+            },
         },
         Command::Audit(sub) => match sub {
             AuditCmd::Query(a) => commands::audit::query(a, &target).await,

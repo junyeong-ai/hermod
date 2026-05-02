@@ -247,6 +247,7 @@ mod tests {
                 reputation: 0,
                 first_seen: Timestamp::now(),
                 last_seen: None,
+                peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
             })
             .await
             .unwrap();
@@ -456,6 +457,7 @@ mod tests {
                 reputation: 0,
                 first_seen: Timestamp::now(),
                 last_seen: None,
+                peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
             })
             .await
             .unwrap();

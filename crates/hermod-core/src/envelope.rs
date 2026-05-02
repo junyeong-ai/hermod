@@ -691,6 +691,16 @@ pub struct AdvertisedAgent {
     pub pubkey: PubkeyBytes,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alias: Option<AgentAlias>,
+    /// Capability tags the *origin* claims about this agent.
+    /// Wire form is `Vec<String>` (forward-compat — a future
+    /// version's stricter validator can extend rules without
+    /// breaking older receivers; per-entry parse failures drop
+    /// the entry rather than the envelope). Inbound goes through
+    /// `CapabilityTagSet::parse_lossy` and the dropped count
+    /// folds into the `peer.advertise.received` audit row.
+    /// Empty Vec is the wire default (skip-serialize).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 impl MessageBody {
