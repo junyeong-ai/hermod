@@ -73,7 +73,8 @@ pub async fn serve(
     // itself.
     let upstream_broker = match config.federation.upstream_broker.as_deref() {
         Some(raw) if !raw.trim().is_empty() => Some(
-            UpstreamBroker::from_descriptor(raw.trim()).context("[federation] upstream_broker")?,
+            UpstreamBrokerConfig::from_descriptor(raw.trim())
+                .context("[federation] upstream_broker")?,
         ),
         _ => None,
     };
@@ -113,7 +114,7 @@ pub async fn serve(
             // the broker's directory row above.
             let broker_id = hermod_crypto::agent_id_from_pubkey(&ub.pubkey);
             Router::new(local_ids.clone(), db.clone()).with_upstream_broker(
-                hermod_routing::UpstreamBrokerHint {
+                hermod_routing::UpstreamBroker {
                     agent_id: broker_id,
                     endpoint: hermod_core::Endpoint::Wss(ub.endpoint.clone()),
                 },
@@ -827,12 +828,12 @@ async fn wait_shutdown() -> &'static str {
 /// silently disabling on parse error would let a typo slip past the
 /// operator.
 #[derive(Clone, Debug)]
-struct UpstreamBroker {
+struct UpstreamBrokerConfig {
     endpoint: hermod_core::WssEndpoint,
     pubkey: hermod_core::PubkeyBytes,
 }
 
-impl UpstreamBroker {
+impl UpstreamBrokerConfig {
     fn from_descriptor(raw: &str) -> Result<Self> {
         let (endpoint_str, pubkey_hex) = raw.split_once('#').ok_or_else(|| {
             anyhow::anyhow!("missing `#<pubkey_hex>` (expected `wss://host:port#<hex>`)")
@@ -1065,13 +1066,13 @@ mod federation_pin_tests {
 
 #[cfg(test)]
 mod upstream_broker_tests {
-    use super::UpstreamBroker;
+    use super::UpstreamBrokerConfig;
 
     #[test]
     fn parses_canonical_descriptor() {
         let pk_hex = "00".repeat(32);
         let raw = format!("wss://broker.example:7823#{pk_hex}");
-        let ub = UpstreamBroker::from_descriptor(&raw).unwrap();
+        let ub = UpstreamBrokerConfig::from_descriptor(&raw).unwrap();
         assert_eq!(ub.endpoint.host, "broker.example");
         assert_eq!(ub.endpoint.port, 7823);
         assert_eq!(ub.pubkey.0, [0u8; 32]);
@@ -1079,7 +1080,7 @@ mod upstream_broker_tests {
 
     #[test]
     fn rejects_missing_hash_separator() {
-        let err = UpstreamBroker::from_descriptor("wss://broker:7823").unwrap_err();
+        let err = UpstreamBrokerConfig::from_descriptor("wss://broker:7823").unwrap_err();
         assert!(format!("{err:#}").contains("missing `#<pubkey_hex>`"));
     }
 
@@ -1087,20 +1088,20 @@ mod upstream_broker_tests {
     fn rejects_non_wss_scheme() {
         let pk_hex = "00".repeat(32);
         let raw = format!("unix:///tmp/sock#{pk_hex}");
-        let err = UpstreamBroker::from_descriptor(&raw).unwrap_err();
+        let err = UpstreamBrokerConfig::from_descriptor(&raw).unwrap_err();
         assert!(format!("{err:#}").contains("must be wss://"));
     }
 
     #[test]
     fn rejects_short_pubkey() {
-        let err = UpstreamBroker::from_descriptor("wss://broker:7823#deadbeef").unwrap_err();
+        let err = UpstreamBrokerConfig::from_descriptor("wss://broker:7823#deadbeef").unwrap_err();
         assert!(format!("{err:#}").contains("pubkey must be 32 bytes"));
     }
 
     #[test]
     fn rejects_non_hex_pubkey() {
         let raw = "wss://broker:7823#zzzznothex";
-        let err = UpstreamBroker::from_descriptor(raw).unwrap_err();
+        let err = UpstreamBrokerConfig::from_descriptor(raw).unwrap_err();
         assert!(format!("{err:#}").contains("pubkey hex"));
     }
 }

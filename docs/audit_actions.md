@@ -104,7 +104,7 @@ runs it on every PR.
 ### message.*
 | Action | Trigger | Details |
 | --- | --- | --- |
-| `message.sent` | Local `message.send` IPC call enqueued / delivered an envelope. Tagged `AuditFederationPolicy::Skip` so it never feeds back through outbound audit federation. | `id`, `kind`, `priority`, `status`, `route` |
+| `message.sent` | Local `message.send` IPC call enqueued / delivered an envelope. Tagged `AuditFederationPolicy::Skip` so it never feeds back through outbound audit federation. `via` carries the broker `agent_id` when `route="brokered"`, `null` otherwise. | `id`, `kind`, `priority`, `status`, `route`, `via` |
 | `message.delivered` | Inbound `Direct` envelope applied to local inbox. | `id`, `kind` |
 | `message.read` | Operator `message.ack`. | `ids` |
 | `message.failed` | Outbox gave up after exhausted retries / remote rejected / corrupt CBOR. | `id`, `reason`, `detail`, `attempts` |
@@ -112,13 +112,25 @@ runs it on every PR.
 ### peer.*
 | Action | Trigger | Details |
 | --- | --- | --- |
-| `peer.add` | Operator `peer.add`. Exactly one of `endpoint` / `via_agent_id` is non-null per the schema CHECK; `alias_outcome` carries the `AliasOutcome` view. | `fingerprint`, `endpoint`, `via_agent_id`, `alias_outcome` |
+| `peer.add` | Operator `peer.add`. Exactly one of `endpoint` / `via_agent` is non-null per the schema CHECK; `alias_outcome` carries the `AliasOutcome` view. | `fingerprint`, `endpoint`, `via_agent`, `alias_outcome` |
 | `peer.alias_collision` | Local alias requested in `peer.add` collides with an existing peer. | `proposed`, `for_id` |
 | `peer.trust` | `peer.trust` (operator promotes / demotes). | `level` |
 | `peer.remove` | `peer.remove` (clears endpoint and TLS pin). | none |
 | `peer.repin` | `peer.repin` (operator-confirmed cert rotation). | `previous`, `new` |
 | `peer.advertise` | Operator pushed a `PeerAdvertise` (or `peer.add` auto-trigger). Per-target wire status reflected in the `delivered` / `failed` counts. | `delivered`, `failed`, `agents` |
 | `peer.advertise.received` | Inbound `PeerAdvertise` from a peer. | `agents_advertised`, `agents_upserted`, `rejected_self_cert`, `rejected_host_conflict` |
+
+### routing.*
+
+Dispatch-time misconfiguration signals. Emitted on every send to the
+affected target until the operator repairs — same per-event pattern
+as wire-level rejections so forensic queries can answer "from when
+did messages to X stop routing?".
+
+| Action | Trigger | Details |
+| --- | --- | --- |
+| `routing.cycle_detected` | `Router::resolve` walked an `agents.via_agent` chain that looped back to a previously-visited agent. `target` is the original recipient; `chain` is the visit order ending at the cycle. | `chain` |
+| `routing.via_too_deep` | `Router::resolve` walked `MAX_VIA_DEPTH` hops without reaching a directly-dialable endpoint (no cycle, just depth). `target` is the original recipient; `limit` is `MAX_VIA_DEPTH`. | `limit` |
 
 ### local.*
 

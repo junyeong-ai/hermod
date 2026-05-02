@@ -163,11 +163,11 @@ pub async fn advertise(args: AdvertiseArgs, target: &ClientTarget) -> Result<()>
     // exit non-zero so scripts react. Operators reading the JSON
     // see the per-target rows; CI pipelines key off `$?`.
     let any_failed = r
-        .deliveries
+        .outcomes
         .iter()
-        .any(|d| d.status == hermod_core::MessageStatus::Failed);
+        .any(|o| o.status == hermod_core::MessageStatus::Failed);
     if any_failed {
-        anyhow::bail!("one or more advertise targets failed; see deliveries[].status");
+        anyhow::bail!("one or more advertise targets failed; see outcomes[].status");
     }
     Ok(())
 }

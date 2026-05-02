@@ -40,7 +40,7 @@ pub struct AgentRecord {
     /// the broker's `BrokerMode::RelayOnly` fall-through relays the
     /// second hop. Mutually exclusive with `endpoint` at the schema
     /// level — operators choose direct OR brokered, never both.
-    pub via_agent_id: Option<AgentId>,
+    pub via_agent: Option<AgentId>,
     pub local_alias: Option<AgentAlias>,
     pub peer_asserted_alias: Option<AgentAlias>,
     pub trust_level: TrustLevel,

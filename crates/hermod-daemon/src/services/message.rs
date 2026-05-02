@@ -9,7 +9,7 @@ use hermod_protocol::ipc::methods::{
     MessageSendResult, MessageView,
 };
 use hermod_routing::remote::DeliveryOutcome;
-use hermod_routing::{AccessController, RateLimiter, RemoteDeliverer, RouteDecision, Router};
+use hermod_routing::{AccessController, RateLimiter, RemoteDeliverer, RouteOutcome, Router};
 use hermod_storage::{AuditEntry, AuditSink, Database, InboxFilter, MessageRecord};
 use std::sync::Arc;
 
@@ -153,7 +153,50 @@ impl MessageService {
             }
         }
 
-        let decision = self.router.resolve(&params.to).await?;
+        let decision = match self.router.resolve(&params.to).await {
+            Ok(d) => d,
+            Err(hermod_routing::RoutingError::ViaCycle { chain }) => {
+                // Operator misconfigured the directory's via chain.
+                // Per-send audit row so forensic queries can answer
+                // "from when did messages to X stop routing?". The
+                // condition persists until the operator repairs, so
+                // every send to the affected target re-emits — same
+                // pattern as wire-level rejections.
+                audit_or_warn(
+                    &*self.audit_sink,
+                    AuditEntry {
+                        id: None,
+                        ts: Timestamp::now(),
+                        actor: caller.clone(),
+                        action: "routing.cycle_detected".into(),
+                        target: Some(params.to.id.to_string()),
+                        details: Some(serde_json::json!({ "chain": chain.clone() })),
+                        client_ip: None,
+                        federation: hermod_storage::AuditFederationPolicy::Default,
+                    },
+                )
+                .await;
+                return Err(hermod_routing::RoutingError::ViaCycle { chain }.into());
+            }
+            Err(hermod_routing::RoutingError::ViaTooDeep { target, limit }) => {
+                audit_or_warn(
+                    &*self.audit_sink,
+                    AuditEntry {
+                        id: None,
+                        ts: Timestamp::now(),
+                        actor: caller.clone(),
+                        action: "routing.via_too_deep".into(),
+                        target: Some(target.clone()),
+                        details: Some(serde_json::json!({ "limit": limit })),
+                        client_ip: None,
+                        federation: hermod_storage::AuditFederationPolicy::Default,
+                    },
+                )
+                .await;
+                return Err(hermod_routing::RoutingError::ViaTooDeep { target, limit }.into());
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         // Outbound: sender is the calling agent, AccessController
         // short-circuits for self. Caps are only required at inbound
@@ -169,10 +212,8 @@ impl MessageService {
             .map_err(|e| ServiceError::InvalidParam(format!("serialize envelope: {e}")))?;
 
         let (status, schedule_retry) = match &decision {
-            RouteDecision::Loopback | RouteDecision::LocalKnown => {
-                (MessageStatus::Delivered, false)
-            }
-            RouteDecision::Remote(endpoint) | RouteDecision::Brokered { endpoint, .. } => {
+            RouteOutcome::Loopback | RouteOutcome::LocalKnown => (MessageStatus::Delivered, false),
+            RouteOutcome::Remote(endpoint) | RouteOutcome::Brokered { endpoint, .. } => {
                 // First attempt is synchronous; on transient failure, leave Pending
                 // and let the outbox worker retry with exponential backoff. The
                 // broker case uses the same outbound deliverer — the broker is just
@@ -210,7 +251,7 @@ impl MessageService {
         // it without re-resolving — covers brokered envelopes whose
         // recipient has no `agents.endpoint` of their own.
         record.delivery_endpoint = match &decision {
-            RouteDecision::Remote(ep) | RouteDecision::Brokered { endpoint: ep, .. } => {
+            RouteOutcome::Remote(ep) | RouteOutcome::Brokered { endpoint: ep, .. } => {
                 Some(ep.to_string())
             }
             _ => None,
@@ -234,10 +275,8 @@ impl MessageService {
         // the inbound `accept_file` rollback discipline: blob put
         // first, then enqueue; on enqueue failure, delete the blob to
         // prevent orphans (storage row gone but bytes still on disk).
-        let blob_location = if matches!(
-            decision,
-            RouteDecision::Loopback | RouteDecision::LocalKnown
-        ) && let MessageBody::File { name, data, .. } = &envelope.body
+        let blob_location = if matches!(decision, RouteOutcome::Loopback | RouteOutcome::LocalKnown)
+            && let MessageBody::File { name, data, .. } = &envelope.body
         {
             let key = format!("{}-{}", envelope.id, name);
             let loc = self
@@ -381,13 +420,21 @@ impl MessageService {
         actor: AgentId,
         envelope: &Envelope,
         status: MessageStatus,
-        decision: &RouteDecision,
+        decision: &RouteOutcome,
     ) {
         let route = match decision {
-            RouteDecision::Loopback => "loopback",
-            RouteDecision::LocalKnown => "local",
-            RouteDecision::Remote(_) => "remote",
-            RouteDecision::Brokered { .. } => "brokered",
+            RouteOutcome::Loopback => "loopback",
+            RouteOutcome::LocalKnown => "local",
+            RouteOutcome::Remote(_) => "remote",
+            RouteOutcome::Brokered { .. } => "brokered",
+        };
+        // For brokered routes, surface the broker's agent_id so
+        // operators tracing a misrouted envelope can see WHICH broker
+        // it traversed. Omitted for non-brokered routes to keep the
+        // audit row lean.
+        let via = match decision {
+            RouteOutcome::Brokered { via, .. } => Some(via.to_string()),
+            _ => None,
         };
         audit_or_warn(
             &*self.audit_sink,
@@ -403,6 +450,7 @@ impl MessageService {
                     "priority": envelope.priority.as_str(),
                     "status": status.as_str(),
                     "route": route,
+                    "via": via,
                 })),
                 // Federation audit shipping itself emits `message.sent`
                 // for every aggregator-bound envelope. Skipping breaks

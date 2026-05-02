@@ -49,11 +49,11 @@ impl SqliteAgentRepository {
         let endpoint = record.endpoint.as_ref().map(|e| e.to_string());
         let pubkey = record.pubkey.as_slice().to_vec();
         let host_pubkey = record.host_pubkey.as_ref().map(|h| h.as_slice().to_vec());
-        let via_agent_id = record.via_agent_id.as_ref().map(|a| a.as_str().to_string());
+        let via_agent = record.via_agent.as_ref().map(|a| a.as_str().to_string());
         sqlx::query(
             r#"
             INSERT INTO agents
-                (id, pubkey, host_pubkey, endpoint, via_agent_id, local_alias,
+                (id, pubkey, host_pubkey, endpoint, via_agent, local_alias,
                  peer_asserted_alias, trust_level, tls_fingerprint, reputation,
                  first_seen, last_seen)
             VALUES
@@ -62,7 +62,7 @@ impl SqliteAgentRepository {
                 pubkey              = excluded.pubkey,
                 host_pubkey         = COALESCE(excluded.host_pubkey, agents.host_pubkey),
                 endpoint            = COALESCE(excluded.endpoint, agents.endpoint),
-                via_agent_id        = COALESCE(excluded.via_agent_id, agents.via_agent_id),
+                via_agent        = COALESCE(excluded.via_agent, agents.via_agent),
                 local_alias         = COALESCE(excluded.local_alias, agents.local_alias),
                 peer_asserted_alias = COALESCE(excluded.peer_asserted_alias, agents.peer_asserted_alias),
                 last_seen           = excluded.last_seen
@@ -72,7 +72,7 @@ impl SqliteAgentRepository {
         .bind(pubkey)
         .bind(host_pubkey)
         .bind(endpoint)
-        .bind(via_agent_id)
+        .bind(via_agent)
         .bind(effective_local.as_ref().map(|a| a.as_str()))
         .bind(record.peer_asserted_alias.as_ref().map(|a| a.as_str()))
         .bind(record.trust_level.as_str())
@@ -163,11 +163,11 @@ impl AgentRepository for SqliteAgentRepository {
         //   * `tls_fingerprint` — pinned by `pin_or_match_tls_fingerprint`.
         //   * `reputation` — adjusted by an explicit operator action.
         //   * `first_seen` — fixed by definition of "first".
-        let via_agent_id = record.via_agent_id.as_ref().map(|a| a.as_str().to_string());
+        let via_agent = record.via_agent.as_ref().map(|a| a.as_str().to_string());
         sqlx::query(
             r#"
             INSERT INTO agents
-                (id, pubkey, host_pubkey, endpoint, via_agent_id, local_alias,
+                (id, pubkey, host_pubkey, endpoint, via_agent, local_alias,
                  peer_asserted_alias, trust_level, tls_fingerprint, reputation,
                  first_seen, last_seen)
             VALUES
@@ -176,7 +176,7 @@ impl AgentRepository for SqliteAgentRepository {
                 pubkey              = excluded.pubkey,
                 host_pubkey         = COALESCE(excluded.host_pubkey, agents.host_pubkey),
                 endpoint            = COALESCE(excluded.endpoint, agents.endpoint),
-                via_agent_id        = COALESCE(excluded.via_agent_id, agents.via_agent_id),
+                via_agent        = COALESCE(excluded.via_agent, agents.via_agent),
                 local_alias         = COALESCE(excluded.local_alias, agents.local_alias),
                 peer_asserted_alias = COALESCE(excluded.peer_asserted_alias, agents.peer_asserted_alias),
                 last_seen           = excluded.last_seen
@@ -186,7 +186,7 @@ impl AgentRepository for SqliteAgentRepository {
         .bind(pubkey)
         .bind(host_pubkey)
         .bind(endpoint)
-        .bind(via_agent_id)
+        .bind(via_agent)
         .bind(record.local_alias.as_ref().map(|a| a.as_str()))
         .bind(record.peer_asserted_alias.as_ref().map(|a| a.as_str()))
         .bind(record.trust_level.as_str())
@@ -337,7 +337,7 @@ impl AgentRepository for SqliteAgentRepository {
     }
 }
 
-const COLUMNS: &str = "id, pubkey, host_pubkey, endpoint, via_agent_id, local_alias, \
+const COLUMNS: &str = "id, pubkey, host_pubkey, endpoint, via_agent, local_alias, \
      peer_asserted_alias, trust_level, tls_fingerprint, reputation, first_seen, last_seen";
 
 fn select(predicate: &str, order_by: Option<&str>) -> String {
@@ -363,8 +363,8 @@ fn row_to_agent(row: sqlx::sqlite::SqliteRow) -> Result<AgentRecord> {
         .transpose()
         .map_err(StorageError::Core)?;
 
-    let via_str: Option<String> = row.try_get("via_agent_id")?;
-    let via_agent_id = via_str
+    let via_str: Option<String> = row.try_get("via_agent")?;
+    let via_agent = via_str
         .map(|s| AgentId::from_str(&s))
         .transpose()
         .map_err(StorageError::Core)?;
@@ -392,7 +392,7 @@ fn row_to_agent(row: sqlx::sqlite::SqliteRow) -> Result<AgentRecord> {
         pubkey,
         host_pubkey,
         endpoint,
-        via_agent_id,
+        via_agent,
         local_alias,
         peer_asserted_alias,
         trust_level,
@@ -452,7 +452,7 @@ mod tests {
             pubkey: PubkeyBytes([1u8; 32]),
             host_pubkey: None,
             endpoint: None,
-            via_agent_id: None,
+            via_agent: None,
             local_alias: local.map(|s| AgentAlias::from_str(s).unwrap()),
             peer_asserted_alias: peer.map(|s| AgentAlias::from_str(s).unwrap()),
             trust_level: TrustLevel::Tofu,

@@ -4,7 +4,7 @@ use hermod_core::{
 };
 use hermod_protocol::ipc::methods::{
     AliasOutcomeView, MessageSendParams, MessageSendResult, PeerAddParams, PeerAddResult,
-    PeerAdvertiseDelivery, PeerAdvertiseParams, PeerAdvertiseResult, PeerListResult,
+    PeerAdvertiseOutcome, PeerAdvertiseParams, PeerAdvertiseResult, PeerListResult,
     PeerRemoveParams, PeerRemoveResult, PeerRepinParams, PeerRepinResult, PeerSummary,
     PeerTrustParams,
 };
@@ -136,7 +136,7 @@ impl PeerService {
                 details: Some(serde_json::json!({
                     "fingerprint": fingerprint,
                     "endpoint": rec.endpoint.as_ref().map(|e| e.to_string()),
-                    "via_agent_id": rec.via_agent_id.as_ref().map(|a| a.to_string()),
+                    "via_agent": rec.via_agent.as_ref().map(|a| a.to_string()),
                     "alias_outcome": match &outcome {
                         hermod_storage::AliasOutcome::Accepted => "accepted",
                         hermod_storage::AliasOutcome::LocalDropped { .. } => "local_dropped",
@@ -192,11 +192,11 @@ impl PeerService {
         // "delivered" from "looks delivered, was actually queued
         // against a dead pool entry". Mirrors the honesty contract
         // of `MessageSendResult`.
-        let mut deliveries: Vec<PeerAdvertiseDelivery> = Vec::new();
+        let mut outcomes: Vec<PeerAdvertiseOutcome> = Vec::new();
         match params.target {
             Some(reference) => {
                 let target = self.resolve_target(&reference).await?;
-                deliveries.push(self.dispatch_one(target, agents.clone()).await);
+                outcomes.push(self.dispatch_one(target, agents.clone()).await);
             }
             None => {
                 // Walk federated peers; pick one canonical local-agent
@@ -217,18 +217,18 @@ impl PeerService {
                     if !seen_hosts.insert(host) {
                         continue;
                     }
-                    deliveries.push(self.dispatch_one(r.id, agents.clone()).await);
+                    outcomes.push(self.dispatch_one(r.id, agents.clone()).await);
                 }
             }
         }
 
-        let delivered = deliveries
+        let delivered = outcomes
             .iter()
-            .filter(|d| d.status == MessageStatus::Delivered)
+            .filter(|o| o.status == MessageStatus::Delivered)
             .count() as u32;
-        let failed = deliveries
+        let failed = outcomes
             .iter()
-            .filter(|d| d.status == MessageStatus::Failed)
+            .filter(|o| o.status == MessageStatus::Failed)
             .count() as u32;
 
         audit_or_warn(
@@ -251,7 +251,7 @@ impl PeerService {
         .await;
 
         Ok(PeerAdvertiseResult {
-            deliveries,
+            outcomes,
             agents: agent_count,
         })
     }
@@ -268,14 +268,14 @@ impl PeerService {
         &self,
         target: AgentId,
         agents: Vec<AdvertisedAgent>,
-    ) -> PeerAdvertiseDelivery {
+    ) -> PeerAdvertiseOutcome {
         match self.send_advertise(&target, agents).await {
-            Ok(res) if res.status == MessageStatus::Delivered => PeerAdvertiseDelivery {
+            Ok(res) if res.status == MessageStatus::Delivered => PeerAdvertiseOutcome {
                 target,
                 status: MessageStatus::Delivered,
                 error: None,
             },
-            Ok(res) => PeerAdvertiseDelivery {
+            Ok(res) => PeerAdvertiseOutcome {
                 target,
                 status: MessageStatus::Failed,
                 error: Some(format!(
@@ -283,7 +283,7 @@ impl PeerService {
                     res.status
                 )),
             },
-            Err(e) => PeerAdvertiseDelivery {
+            Err(e) => PeerAdvertiseOutcome {
                 target,
                 status: MessageStatus::Failed,
                 error: Some(e.to_string()),
@@ -344,7 +344,7 @@ impl PeerService {
         // the listed agents — it already is, since `advertised_agents`
         // walks our own registry. Returns the inner send result so
         // the dispatcher can map `(Ok, status)` cleanly to a
-        // `PeerAdvertiseDelivery` without shoehorning wire status
+        // `PeerAdvertiseOutcome` without shoehorning wire status
         // into the error variants.
         self.messages
             .send(MessageSendParams {

@@ -53,7 +53,7 @@ pub enum RoutingError {
     #[error("peer link is dead (heartbeat timed out)")]
     DeadLink,
 
-    /// A `via_agent_id` chain looped back to an already-visited
+    /// A `via_agent` chain looped back to an already-visited
     /// agent. The dispatch path refuses to forward — the operator's
     /// directory is misconfigured. `chain` lists the visit order
     /// (oldest first) ending at the cycle target so the audit row

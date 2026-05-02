@@ -261,7 +261,7 @@ mod tests {
                     pubkey: PubkeyBytes(*pk),
                     host_pubkey: None,
                     endpoint: None,
-                    via_agent_id: None,
+                    via_agent: None,
                     local_alias: None,
                     peer_asserted_alias: None,
                     trust_level: TrustLevel::Tofu,

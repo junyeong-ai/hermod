@@ -510,9 +510,9 @@ fn peer_advertise_reports_failed_when_target_down() {
 ///         broker (relay_only, public endpoint)
 /// ```
 ///
-/// Alice's directory has `bob` registered with `via_agent_id =
+/// Alice's directory has `bob` registered with `via_agent =
 /// broker.id` (no endpoint). The dispatcher resolves to
-/// `RouteDecision::Brokered { endpoint: broker.endpoint, via:
+/// `RouteOutcome::Brokered { endpoint: broker.endpoint, via:
 /// broker.id }`; the broker's `RelayOnly` fall-through forwards to
 /// bob.
 #[test]

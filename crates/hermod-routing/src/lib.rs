@@ -19,7 +19,7 @@ pub use error::{Result, RoutingError};
 pub use pool::{PeerPool, spawn_sweeper};
 pub use rate_limit::RateLimiter;
 pub use remote::{InboundDelivery, RemoteDeliverer};
-pub use router::{MAX_VIA_DEPTH, RouteDecision, Router, UpstreamBrokerHint};
+pub use router::{MAX_VIA_DEPTH, RouteOutcome, Router, UpstreamBroker};
 pub use transport::{
     PeerIdentity, PeerTransportError, Transport, TransportConnection, TransportListener,
 };

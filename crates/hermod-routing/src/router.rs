@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::error::{Result, RoutingError};
 
-/// Cap on how many `via_agent_id` indirections the resolver will
+/// Cap on how many `via_agent` indirections the resolver will
 /// walk before giving up. Mirrors `wire::MAX_RELAY_HOPS` — a
 /// brokered envelope must reach a dialable endpoint within the
 /// same hop budget the inbound side will accept on the wire, or
@@ -13,7 +13,7 @@ use crate::error::{Result, RoutingError};
 pub const MAX_VIA_DEPTH: u32 = hermod_protocol::wire::MAX_RELAY_HOPS as u32;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RouteDecision {
+pub enum RouteOutcome {
     /// Target is one of this daemon's hosted local agents — the
     /// envelope short-circuits the federation transport and applies
     /// to that agent's inbox directly.
@@ -31,20 +31,20 @@ pub enum RouteDecision {
     /// audit can record the full hop. The broker's `BrokerMode`
     /// fall-through forwards `to.id` to the actual recipient.
     /// Two paths produce this:
-    ///   * Per-peer `agents.via_agent_id` — operator pinned this
+    ///   * Per-peer `agents.via_agent` — operator pinned this
     ///     specific recipient to a specific broker.
     ///   * Daemon-wide `upstream_broker` — fallback for any
-    ///     directory entry without an endpoint or `via_agent_id`.
+    ///     directory entry without an endpoint or `via_agent`.
     Brokered { endpoint: Endpoint, via: AgentId },
 }
 
 /// Daemon-wide fallback broker — used for any directory entry that
-/// has neither a direct `endpoint` nor a per-peer `via_agent_id`.
+/// has neither a direct `endpoint` nor a per-peer `via_agent`.
 /// Both fields are needed: `endpoint` to dial, `agent_id` to record
-/// in audit (and so the resulting `RouteDecision::Brokered` carries
+/// in audit (and so the resulting `RouteOutcome::Brokered` carries
 /// the broker's identity uniformly with the per-peer case).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UpstreamBrokerHint {
+pub struct UpstreamBroker {
     pub agent_id: AgentId,
     pub endpoint: Endpoint,
 }
@@ -56,7 +56,7 @@ pub struct Router {
     /// there's exactly one entry, in multi-tenant there are N.
     local_ids: Arc<HashSet<AgentId>>,
     db: Arc<dyn Database>,
-    upstream_broker: Option<UpstreamBrokerHint>,
+    upstream_broker: Option<UpstreamBroker>,
 }
 
 impl std::fmt::Debug for Router {
@@ -79,11 +79,11 @@ impl Router {
 
     /// Configure a daemon-wide fallback broker. Recipients registered
     /// without a remote endpoint of their own AND without a per-peer
-    /// `via_agent_id` route via this broker — the daemon does not need
+    /// `via_agent` route via this broker — the daemon does not need
     /// to know peer endpoints itself (Matrix homeserver / SMTP
     /// smarthost / IMAP relay pattern). For per-recipient brokering,
-    /// set `agents.via_agent_id` instead.
-    pub fn with_upstream_broker(mut self, broker: UpstreamBrokerHint) -> Self {
+    /// set `agents.via_agent` instead.
+    pub fn with_upstream_broker(mut self, broker: UpstreamBroker) -> Self {
         self.upstream_broker = Some(broker);
         self
     }
@@ -98,9 +98,9 @@ impl Router {
     /// Resolution order:
     ///   1. Loopback (target is a hosted local agent).
     ///   2. Direct endpoint hint on the address itself.
-    ///   3. Walk `agents.via_agent_id` chain — each hop must have
+    ///   3. Walk `agents.via_agent` chain — each hop must have
     ///      either an endpoint (terminal: dial it as broker) or
-    ///      another `via_agent_id` (recurse). Cap at
+    ///      another `via_agent` (recurse). Cap at
     ///      [`MAX_VIA_DEPTH`]; cycles fail with [`RoutingError::ViaCycle`].
     ///   4. Fall back to the daemon-wide upstream broker.
     ///   5. `LocalKnown` (directory entry exists but has no path —
@@ -110,14 +110,14 @@ impl Router {
     /// verification on replies requires the peer's pubkey, which
     /// must be ingested first (`agent register` or the workspace
     /// invite flow).
-    pub async fn resolve(&self, target: &AgentAddress) -> Result<RouteDecision> {
+    pub async fn resolve(&self, target: &AgentAddress) -> Result<RouteOutcome> {
         if self.is_local(&target.id) {
-            return Ok(RouteDecision::Loopback);
+            return Ok(RouteOutcome::Loopback);
         }
         if let Some(ep) = &target.endpoint
             && !ep.is_local()
         {
-            return Ok(RouteDecision::Remote(ep.clone()));
+            return Ok(RouteOutcome::Remote(ep.clone()));
         }
         let record = match self.db.agents().get(&target.id).await? {
             Some(r) => r,
@@ -126,7 +126,7 @@ impl Router {
         if let Some(ep) = record.endpoint
             && !ep.is_local()
         {
-            return Ok(RouteDecision::Remote(ep));
+            return Ok(RouteOutcome::Remote(ep));
         }
         // Walk the via chain. We carry the IMMEDIATE next hop's
         // agent_id ("via") — that's what audit + the outbox will
@@ -135,21 +135,21 @@ impl Router {
         // dialable endpoint is the dial target, but `via` stays
         // pinned to the FIRST hop so the audit trail names the
         // broker the operator configured (not the deepest leaf).
-        if let Some(first_via) = record.via_agent_id {
+        if let Some(first_via) = record.via_agent {
             let resolved = self.resolve_via_chain(&target.id, first_via).await?;
             return Ok(resolved);
         }
         // No per-peer broker — fall back to the daemon-wide hint.
         if let Some(broker) = &self.upstream_broker {
-            return Ok(RouteDecision::Brokered {
+            return Ok(RouteOutcome::Brokered {
                 endpoint: broker.endpoint.clone(),
                 via: broker.agent_id.clone(),
             });
         }
-        Ok(RouteDecision::LocalKnown)
+        Ok(RouteOutcome::LocalKnown)
     }
 
-    /// Walk `via_agent_id` indirections from `first_via` until a
+    /// Walk `via_agent` indirections from `first_via` until a
     /// directly-dialable endpoint surfaces, or fail with
     /// `ViaCycle` / `ViaTooDeep`. The returned decision's `via`
     /// is `first_via` itself — the broker the operator pinned for
@@ -159,7 +159,7 @@ impl Router {
         &self,
         target: &AgentId,
         first_via: AgentId,
-    ) -> Result<RouteDecision> {
+    ) -> Result<RouteOutcome> {
         let mut visited: HashSet<AgentId> = HashSet::new();
         visited.insert(target.clone());
         let mut chain: Vec<String> = vec![target.to_string()];
@@ -179,12 +179,12 @@ impl Router {
             if let Some(ep) = hop.endpoint
                 && !ep.is_local()
             {
-                return Ok(RouteDecision::Brokered {
+                return Ok(RouteOutcome::Brokered {
                     endpoint: ep,
                     via: first_via,
                 });
             }
-            current = match hop.via_agent_id {
+            current = match hop.via_agent {
                 Some(next) => next,
                 None => {
                     return Err(RoutingError::Rejected(format!(
@@ -239,7 +239,7 @@ mod tests {
                 pubkey: pk,
                 host_pubkey: None,
                 endpoint,
-                via_agent_id: None,
+                via_agent: None,
                 local_alias: None,
                 peer_asserted_alias: None,
                 trust_level: TrustLevel::Tofu,
@@ -257,7 +257,7 @@ mod tests {
         let me = agent_id(1);
         let (router, _) = fresh_router(me.clone()).await;
         let dec = router.resolve(&AgentAddress::local(me)).await.unwrap();
-        assert_eq!(dec, RouteDecision::Loopback);
+        assert_eq!(dec, RouteOutcome::Loopback);
     }
 
     #[tokio::test]
@@ -265,7 +265,7 @@ mod tests {
         let (router, _) = fresh_router(agent_id(1)).await;
         let target = AgentAddress::with_endpoint(agent_id(2), wss("peer", 7823));
         let dec = router.resolve(&target).await.unwrap();
-        assert_eq!(dec, RouteDecision::Remote(wss("peer", 7823)));
+        assert_eq!(dec, RouteOutcome::Remote(wss("peer", 7823)));
     }
 
     #[tokio::test]
@@ -276,7 +276,7 @@ mod tests {
             .resolve(&AgentAddress::local(agent_id(2)))
             .await
             .unwrap();
-        assert_eq!(dec, RouteDecision::Remote(wss("peer", 7823)));
+        assert_eq!(dec, RouteOutcome::Remote(wss("peer", 7823)));
     }
 
     #[tokio::test]
@@ -287,11 +287,11 @@ mod tests {
             .resolve(&AgentAddress::local(agent_id(2)))
             .await
             .unwrap();
-        assert_eq!(dec, RouteDecision::LocalKnown);
+        assert_eq!(dec, RouteOutcome::LocalKnown);
     }
 
-    fn upstream_hint(seed: u8, ep: Endpoint) -> UpstreamBrokerHint {
-        UpstreamBrokerHint {
+    fn upstream_hint(seed: u8, ep: Endpoint) -> UpstreamBroker {
+        UpstreamBroker {
             agent_id: agent_id(seed),
             endpoint: ep,
         }
@@ -308,7 +308,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             dec,
-            RouteDecision::Brokered {
+            RouteOutcome::Brokered {
                 endpoint: wss("broker", 7823),
                 via: agent_id(99),
             }
@@ -326,7 +326,7 @@ mod tests {
             .resolve(&AgentAddress::local(agent_id(2)))
             .await
             .unwrap();
-        assert_eq!(dec, RouteDecision::Remote(wss("peer", 9000)));
+        assert_eq!(dec, RouteOutcome::Remote(wss("peer", 9000)));
     }
 
     #[tokio::test]
@@ -339,11 +339,11 @@ mod tests {
         assert!(matches!(dec, Err(RoutingError::RecipientNotFound(_))));
     }
 
-    /// Per-peer `via_agent_id` overrides the daemon-wide upstream
+    /// Per-peer `via_agent` overrides the daemon-wide upstream
     /// fallback. Operator pinning a specific recipient to a specific
     /// broker beats the global default.
     #[tokio::test]
-    async fn via_agent_id_overrides_upstream_broker() {
+    async fn via_agent_overrides_upstream_broker() {
         let (router, db) = fresh_router(agent_id(1)).await;
         let router = router.with_upstream_broker(upstream_hint(99, wss("upstream", 1)));
         // broker has its own endpoint — insert FIRST so the FK target
@@ -357,7 +357,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             dec,
-            RouteDecision::Brokered {
+            RouteOutcome::Brokered {
                 endpoint: wss("specific-broker", 7823),
                 via: agent_id(50),
             }
@@ -382,7 +382,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             dec,
-            RouteDecision::Brokered {
+            RouteOutcome::Brokered {
                 endpoint: wss("broker-b", 7823),
                 via: agent_id(50),
             }
@@ -397,7 +397,7 @@ mod tests {
         let (router, db) = fresh_router(agent_id(1)).await;
         // FK ordering: insert empty rows first so each via target
         // exists before the via reference is set. Then upsert the
-        // via fields, which `COALESCE(excluded.via_agent_id, …)`
+        // via fields, which `COALESCE(excluded.via_agent, …)`
         // will fill in (NULL → Some, no-op for already-set).
         upsert(&db, agent_id(50), None).await;
         upsert(&db, agent_id(60), None).await;
@@ -448,7 +448,7 @@ mod tests {
                 pubkey: pk,
                 host_pubkey: None,
                 endpoint: None,
-                via_agent_id: Some(via),
+                via_agent: Some(via),
                 local_alias: None,
                 peer_asserted_alias: None,
                 trust_level: TrustLevel::Tofu,

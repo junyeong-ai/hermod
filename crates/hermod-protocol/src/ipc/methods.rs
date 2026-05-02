@@ -439,7 +439,7 @@ pub struct LocalRotateResult {
 /// Reachability hint: a peer is either dialed directly or reached
 /// through a broker that's already in the directory. Mutually
 /// exclusive at the schema level (`agents.endpoint` XOR
-/// `agents.via_agent_id`); the wire enum mirrors that XOR so the
+/// `agents.via_agent`); the wire enum mirrors that XOR so the
 /// operator can't accidentally ask for both.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -535,7 +535,7 @@ pub struct PeerAdvertiseParams {
 /// [`MessageSendResult`]'s honesty contract — `status` reflects the
 /// actual wire delivery, not the queue ack.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PeerAdvertiseDelivery {
+pub struct PeerAdvertiseOutcome {
     /// Peer agent the advertise envelope was addressed to.
     pub target: AgentId,
     /// Wire delivery status. `Delivered` means the recipient daemon
@@ -552,11 +552,11 @@ pub struct PeerAdvertiseDelivery {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PeerAdvertiseResult {
-    /// Per-target delivery outcomes. Empty when the directory had no
-    /// federated peers to advertise to (no-op success).
-    pub deliveries: Vec<PeerAdvertiseDelivery>,
+    /// Per-target outcomes. Empty when the directory had no federated
+    /// peers to advertise to (no-op success).
+    pub outcomes: Vec<PeerAdvertiseOutcome>,
     /// Number of locally-hosted agents listed in the envelope body.
-    /// Independent of `deliveries.len()` — body content is the same
+    /// Independent of `outcomes.len()` — body content is the same
     /// regardless of how many peers it fans out to.
     pub agents: u32,
 }

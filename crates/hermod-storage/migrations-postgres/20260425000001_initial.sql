@@ -28,7 +28,7 @@ CREATE TABLE agents (
     host_pubkey         BYTEA,
     endpoint            TEXT,
     -- Mirrors sqlite migration; see comment there for semantics.
-    via_agent_id        TEXT REFERENCES agents(id) ON DELETE SET NULL,
+    via_agent        TEXT REFERENCES agents(id) ON DELETE SET NULL,
     local_alias         TEXT UNIQUE,
     peer_asserted_alias TEXT,
     trust_level         TEXT NOT NULL
@@ -37,7 +37,7 @@ CREATE TABLE agents (
     reputation          BIGINT NOT NULL DEFAULT 0,
     first_seen          BIGINT NOT NULL,
     last_seen           BIGINT,
-    CHECK (endpoint IS NULL OR via_agent_id IS NULL)
+    CHECK (endpoint IS NULL OR via_agent IS NULL)
 );
 CREATE INDEX idx_agents_with_endpoint ON agents(id) WHERE endpoint IS NOT NULL;
 

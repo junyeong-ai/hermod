@@ -228,7 +228,7 @@ pub async fn record_host_peer(
             pubkey: host_pubkey,
             host_pubkey: Some(host_pubkey),
             endpoint: endpoint.map(Endpoint::Wss),
-            via_agent_id: None,
+            via_agent: None,
             local_alias: None,
             peer_asserted_alias,
             trust_level: TrustLevel::Tofu,
@@ -271,7 +271,7 @@ pub async fn record_agent_peer(
             pubkey: agent_pubkey,
             host_pubkey: Some(host_pubkey),
             endpoint: Some(Endpoint::Wss(endpoint)),
-            via_agent_id: None,
+            via_agent: None,
             local_alias,
             peer_asserted_alias: None,
             trust_level: TrustLevel::Tofu,
@@ -293,7 +293,7 @@ pub async fn record_agent_peer(
 ///
 /// Mirror of [`record_agent_peer`] for the brokered case: instead
 /// of pinning an `endpoint`, the new agent's row points at
-/// `via_agent_id`. The broker's directory row must already exist
+/// `via_agent`. The broker's directory row must already exist
 /// (FK enforces it) — typically from a prior `peer add --endpoint`
 /// of the broker itself, or `record_host_peer` during inbound
 /// federation handshake.
@@ -307,7 +307,7 @@ pub async fn record_agent_peer(
 /// case.
 pub async fn record_brokered_peer(
     db: &dyn Database,
-    via_agent_id: hermod_core::AgentId,
+    via_agent: hermod_core::AgentId,
     host_pubkey: PubkeyBytes,
     agent_pubkey: PubkeyBytes,
     local_alias: Option<hermod_core::AgentAlias>,
@@ -316,9 +316,9 @@ pub async fn record_brokered_peer(
     // Verify the broker exists in the directory — FK will reject
     // otherwise, but a friendly error here saves the operator a
     // round-trip to the SQL log.
-    if db.agents().get(&via_agent_id).await?.is_none() {
+    if db.agents().get(&via_agent).await?.is_none() {
         anyhow::bail!(
-            "via target {via_agent_id} not in directory; add the broker first \
+            "via target {via_agent} not in directory; add the broker first \
              (`peer add --endpoint <broker_url> --host-pubkey-hex … --agent-pubkey-hex …`)"
         );
     }
@@ -332,7 +332,7 @@ pub async fn record_brokered_peer(
             pubkey: agent_pubkey,
             host_pubkey: Some(host_pubkey),
             endpoint: None,
-            via_agent_id: Some(via_agent_id),
+            via_agent: Some(via_agent),
             local_alias,
             peer_asserted_alias: None,
             trust_level: TrustLevel::Tofu,
