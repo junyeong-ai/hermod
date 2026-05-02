@@ -36,10 +36,13 @@ impl InboundProcessor {
             .await
             .map_err(|e| FederationRejection::Storage(format!("blob put: {e}")))?;
 
+        // Routing decision before storage write — same as Direct.
+        let decision = self.route_envelope(envelope, &envelope.to.id).await;
         let cbor = serialize_envelope(envelope)
             .map_err(|e| FederationRejection::Invalid(format!("serialize: {e}")))?;
         let mut record = MessageRecord::from_envelope(envelope, cbor, MessageStatus::Delivered)
-            .with_file_blob_location(location.clone());
+            .with_file_blob_location(location.clone())
+            .with_disposition(decision.disposition);
         record.delivered_at = Some(Timestamp::now());
         if let Err(e) = self.db.messages().enqueue(&record).await {
             // Storage failed — release the blob to avoid orphaning.
@@ -66,6 +69,8 @@ impl InboundProcessor {
             },
         )
         .await;
+        self.finalize_routing(envelope, &envelope.to.id, &decision)
+            .await;
         Ok(())
     }
 

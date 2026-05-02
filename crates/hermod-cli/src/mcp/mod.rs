@@ -32,6 +32,7 @@
 mod channel;
 mod initialize;
 mod notification;
+mod notifier;
 mod permission;
 mod session;
 mod tools;

@@ -146,6 +146,11 @@ async fn main() -> anyhow::Result<()> {
         registry.list().iter().map(|a| a.agent_id.clone()).collect();
     home_layout::enforce(&home, &storage_dsn, &blob_dsn, &agent_ids).context("home layout")?;
 
+    // Routing config validation — fail-loud at boot so an operator
+    // typo (out-of-range UTC offset, duplicate rule names,
+    // oversized keyword) never silently degrades routing behaviour.
+    config.routing.validate().context("routing config")?;
+
     serve(
         effective_socket,
         db,

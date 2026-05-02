@@ -70,15 +70,14 @@ CREATE TABLE messages (
     read_at         BIGINT,
     expires_at      BIGINT,
     file_blob_location TEXT,
-    -- Resolved delivery endpoint, captured at send time by the router.
-    -- Decouples the outbox retry path from the live `agents.endpoint`
-    -- so brokered envelopes (recipient registered without an endpoint,
-    -- delivered via the configured `[federation] upstream_broker`)
-    -- and standard remote envelopes share one retry mechanism. NULL
-    -- for purely-local destinations (loopback / `local-known`).
-    delivery_endpoint TEXT
+    delivery_endpoint TEXT,
+    -- See sqlite migration for column purpose. Postgres parity.
+    disposition     TEXT NOT NULL DEFAULT 'push'
+                    CHECK (disposition IN ('push','silent'))
 );
 CREATE INDEX idx_messages_inbox ON messages(to_agent, status, created_at);
+CREATE INDEX idx_messages_pushed_inbox
+    ON messages(to_agent, disposition, status, created_at);
 CREATE INDEX idx_messages_thread ON messages(thread_id, created_at);
 CREATE INDEX idx_messages_expiry ON messages(expires_at)
     WHERE status IN ('pending','delivered');
@@ -246,6 +245,24 @@ CREATE TABLE audit_archive_index (
 );
 CREATE INDEX idx_audit_archive_index_archived
     ON audit_archive_index(archived_at);
+
+-- See sqlite migration for column-purpose detail. Postgres parity.
+CREATE TABLE notifications (
+    id                  TEXT NOT NULL PRIMARY KEY,
+    recipient_agent_id  TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    message_id          TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    status              TEXT NOT NULL
+                        CHECK (status IN ('pending','dispatched','failed','dismissed')),
+    sound               TEXT,
+    attempts            BIGINT NOT NULL DEFAULT 0,
+    claim_token         TEXT,
+    claimed_at          BIGINT,
+    dispatched_at       BIGINT,
+    failed_reason       TEXT,
+    created_at          BIGINT NOT NULL
+);
+CREATE INDEX idx_notifications_dispatch
+    ON notifications(recipient_agent_id, status, created_at);
 
 CREATE TABLE discovered_channels (
     workspace_id   TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,

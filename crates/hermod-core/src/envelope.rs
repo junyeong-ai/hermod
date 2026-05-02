@@ -140,6 +140,94 @@ impl MessageKind {
             MessageKind::PeerAdvertise => "PeerAdvertise",
         }
     }
+
+    /// `true` iff this kind lives in the `messages` table (carries a
+    /// `disposition` column). Drives audit-truthfulness — for kinds
+    /// without a column the dispatch decision is coerced to the
+    /// kind-default (`Push`) when the audit row is emitted, so a
+    /// rule that names e.g. `KindIn { kinds: [Brief] }` can't claim
+    /// to have set a disposition that the storage layer dropped.
+    pub fn has_disposition_column(&self) -> bool {
+        matches!(self, MessageKind::Direct | MessageKind::File)
+    }
+}
+
+/// Recipient-side delivery disposition. Decided per-envelope by the
+/// `DispatchPolicy` immediately after the confirmation gate accepts
+/// the inbound. Persisted on `messages.disposition` for kinds that
+/// have a column (see [`MessageKind::has_disposition_column`]) and
+/// gates whether the MCP channel emitter ever sees the row.
+///
+/// Two values, no `Default`. Every storage write supplies an
+/// explicit choice — no global default that could quietly drift.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, strum::EnumIter)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageDisposition {
+    /// Push to the AI-agent channel (the standard delivery path).
+    Push,
+    /// Land in the inbox only — no `notifications/claude/channel`
+    /// frame. Operator can promote later via `inbox.promote`.
+    Silent,
+}
+
+impl MessageDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MessageDisposition::Push => "push",
+            MessageDisposition::Silent => "silent",
+        }
+    }
+}
+
+impl FromStr for MessageDisposition {
+    type Err = HermodError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "push" => Ok(MessageDisposition::Push),
+            "silent" => Ok(MessageDisposition::Silent),
+            other => Err(HermodError::InvalidEnvelope(format!(
+                "unknown disposition `{other}`"
+            ))),
+        }
+    }
+}
+
+/// Notification-queue row state. The OS-notification dispatcher claims
+/// `Pending`, transitions to `Dispatched` on success or `Failed` on
+/// terminal error; operators move rows to `Dismissed`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, strum::EnumIter)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationStatus {
+    Pending,
+    Dispatched,
+    Failed,
+    Dismissed,
+}
+
+impl NotificationStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NotificationStatus::Pending => "pending",
+            NotificationStatus::Dispatched => "dispatched",
+            NotificationStatus::Failed => "failed",
+            NotificationStatus::Dismissed => "dismissed",
+        }
+    }
+}
+
+impl FromStr for NotificationStatus {
+    type Err = HermodError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(NotificationStatus::Pending),
+            "dispatched" => Ok(NotificationStatus::Dispatched),
+            "failed" => Ok(NotificationStatus::Failed),
+            "dismissed" => Ok(NotificationStatus::Dismissed),
+            other => Err(HermodError::InvalidEnvelope(format!(
+                "unknown notification status `{other}`"
+            ))),
+        }
+    }
 }
 
 /// Hard ceiling on a `MessageBody::File` payload, in bytes. The
@@ -648,6 +736,23 @@ impl MessageBody {
             }),
             // Other variants have no binary fan-out; serialize as-is.
             other => serde_json::to_value(other).unwrap_or(serde_json::Value::Null),
+        }
+    }
+
+    /// Natural-language surface for substring matching by routing
+    /// rules. `Direct.text`, `File.name`, `Brief.summary`,
+    /// `ChannelBroadcast.text`. `None` for kinds whose body is
+    /// purely structural (Presence, capability grants, workspace
+    /// gossip RPCs, peer advertise) — `RuleCondition::BodyContainsAny`
+    /// against those falls through `false` rather than matching by
+    /// accident on JSON-serialised structure.
+    pub fn searchable_text(&self) -> Option<&str> {
+        match self {
+            MessageBody::Direct { text } => Some(text.as_str()),
+            MessageBody::File { name, .. } => Some(name.as_str()),
+            MessageBody::Brief { summary, .. } => Some(summary.as_str()),
+            MessageBody::ChannelBroadcast { text, .. } => Some(text.as_str()),
+            _ => None,
         }
     }
 }

@@ -20,6 +20,7 @@ use crate::repositories::{
     confirmations::ConfirmationRepository,
     local_agents::LocalAgentRepository,
     messages::MessageRepository,
+    notifications::NotificationRepository,
     presence::{AgentPresenceRepository, McpSessionRepository},
     rate_limit::RateLimitRepository,
     workspaces::{
@@ -83,6 +84,7 @@ pub trait Database: Send + Sync + std::fmt::Debug + 'static {
     fn local_agents(&self) -> &dyn LocalAgentRepository;
     fn mcp_sessions(&self) -> &dyn McpSessionRepository;
     fn messages(&self) -> &dyn MessageRepository;
+    fn notifications(&self) -> &dyn NotificationRepository;
     fn presences(&self) -> &dyn AgentPresenceRepository;
     fn rate_limits(&self) -> &dyn RateLimitRepository;
     fn workspaces(&self) -> &dyn WorkspaceRepository;

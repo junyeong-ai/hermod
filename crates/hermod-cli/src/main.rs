@@ -120,9 +120,17 @@ enum Command {
     /// audit chain integrity, peer health.
     Doctor,
 
-    /// Send, list, and ack messages.
+    /// Send and ack messages.
     #[command(subcommand)]
     Message(MessageCmd),
+
+    /// Recipient-side inbox — list and promote.
+    #[command(subcommand)]
+    Inbox(InboxCmd),
+
+    /// OS-notification queue — list, dismiss, purge.
+    #[command(subcommand)]
+    Notification(NotificationCmd),
 
     /// Agent directory operations.
     #[command(subcommand)]
@@ -211,10 +219,28 @@ enum MessageCmd {
     /// default 1 MiB).
     #[command(name = "send-file")]
     SendFile(commands::message::SendFileArgs),
-    /// List inbox.
-    List(commands::message::ListArgs),
     /// Mark messages as read.
     Ack(commands::message::AckArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum InboxCmd {
+    /// List inbox rows. Defaults to all dispositions; pass
+    /// `--disposition silent` to focus on rows the routing engine
+    /// held back from AI-agent context.
+    List(commands::inbox::ListArgs),
+    /// Flip a silent row to push so the channel emitter surfaces it.
+    Promote(commands::inbox::PromoteArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum NotificationCmd {
+    /// List the OS-notification queue. Newest first.
+    List(commands::notification::ListArgs),
+    /// Operator-driven dismissal of a live notification.
+    Dismiss(commands::notification::DismissArgs),
+    /// Reap terminal rows older than the operator's retention window.
+    Purge(commands::notification::PurgeArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -391,8 +417,16 @@ async fn main() -> anyhow::Result<()> {
         Command::Message(sub) => match sub {
             MessageCmd::Send(a) => commands::message::send(a, &target).await,
             MessageCmd::SendFile(a) => commands::message::send_file(a, &target).await,
-            MessageCmd::List(a) => commands::message::list(a, &target).await,
             MessageCmd::Ack(a) => commands::message::ack(a, &target).await,
+        },
+        Command::Inbox(sub) => match sub {
+            InboxCmd::List(a) => commands::inbox::list(a, &target).await,
+            InboxCmd::Promote(a) => commands::inbox::promote(a, &target).await,
+        },
+        Command::Notification(sub) => match sub {
+            NotificationCmd::List(a) => commands::notification::list(a, &target).await,
+            NotificationCmd::Dismiss(a) => commands::notification::dismiss(a, &target).await,
+            NotificationCmd::Purge(a) => commands::notification::purge(a, &target).await,
         },
         Command::Agent(sub) => match sub {
             AgentCmd::List(a) => commands::agent::list(a, &target).await,

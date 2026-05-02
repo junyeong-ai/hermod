@@ -81,6 +81,9 @@ pub use repositories::local_agents::{
 pub use repositories::messages::{
     InboxFilter, MessagePruneOutcome, MessageRecord, MessageRepository, TransitionOutcome,
 };
+pub use repositories::notifications::{
+    EnqueueOutcome, EnqueueRequest, NotificationRecord, NotificationRepository,
+};
 pub use repositories::presence::{
     AgentPresenceRecord, AgentPresenceRepository, AttachOutcome, AttachParams, CursorAdvance,
     DetachOutcome, HEARTBEAT_INTERVAL_SECS, McpSession, McpSessionRepository, ObservedPresence,

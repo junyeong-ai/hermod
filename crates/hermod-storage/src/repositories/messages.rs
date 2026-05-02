@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 use hermod_core::{
-    AgentId, Envelope, MessageBody, MessageId, MessageKind, MessagePriority, MessageStatus,
-    Timestamp,
+    AgentId, Envelope, MessageBody, MessageDisposition, MessageId, MessageKind, MessagePriority,
+    MessageStatus, Timestamp,
 };
 
 use crate::error::Result;
@@ -55,6 +55,13 @@ pub struct MessageRecord {
     /// with one (standard remote case) share one retry mechanism.
     /// `None` for loopback / local-known destinations.
     pub delivery_endpoint: Option<String>,
+    /// Recipient-side delivery disposition. Set by the routing
+    /// engine immediately after the confirmation gate accepts an
+    /// inbound. `Push` reaches the AI-agent channel; `Silent` is
+    /// inbox-only. Outbound rows (rows we send) carry `Push` —
+    /// disposition is a recipient-side concept and the field is
+    /// only meaningful on rows where `to_agent` is local.
+    pub disposition: MessageDisposition,
 }
 
 impl MessageRecord {
@@ -85,12 +92,23 @@ impl MessageRecord {
                 None
             },
             delivery_endpoint: None,
+            // Default to `Push` at construction; the daemon's inbound
+            // pipeline overrides via `with_disposition` for kinds with
+            // a column when the routing engine decides `Silent`.
+            disposition: MessageDisposition::Push,
         }
     }
 
     /// Attach a BlobStore location for File-kind records.
     pub fn with_file_blob_location(mut self, location: String) -> Self {
         self.file_blob_location = Some(location);
+        self
+    }
+
+    /// Override the recipient-side disposition. Used by the inbound
+    /// pipeline after the routing engine's [`crate::dispatch`] decision.
+    pub fn with_disposition(mut self, disposition: MessageDisposition) -> Self {
+        self.disposition = disposition;
         self
     }
 }
@@ -101,6 +119,11 @@ pub struct InboxFilter {
     pub priority_min: Option<MessagePriority>,
     pub limit: Option<u32>,
     pub after_id: Option<MessageId>,
+    /// Restrict to rows whose `disposition` is in this set. `None` =
+    /// all dispositions. The MCP channel poller filters to `Push` only
+    /// (silent rows must not reach AI-agent context); the operator CLI
+    /// `inbox list` defaults to all.
+    pub dispositions: Option<Vec<MessageDisposition>>,
 }
 
 /// Side-effect summary of a `messages` prune call. `rows` is how many
@@ -166,4 +189,21 @@ pub trait MessageRepository: Send + Sync + std::fmt::Debug {
     async fn ack(&self, id: &MessageId, recipient: &AgentId, at: Timestamp) -> Result<bool>;
 
     async fn count_pending_to(&self, to: &AgentId) -> Result<i64>;
+
+    /// Flip `disposition` from `silent` to `push` for one inbox row
+    /// owned by `recipient`. `Applied` ⇒ the row was silent and is
+    /// now push (so the channel emitter will surface it on the next
+    /// poll). `NoOp` ⇒ row missing, owned by another agent, or
+    /// already `push`.
+    async fn promote_to_push(
+        &self,
+        id: &MessageId,
+        recipient: &AgentId,
+    ) -> Result<TransitionOutcome>;
+
+    /// Count `pending`/`delivered` rows for `recipient` whose
+    /// disposition is `silent`. Surfaced by `/metrics` so operators
+    /// see how much non-interrupt traffic the routing engine is
+    /// holding back from the AI agent's context.
+    async fn count_silent_to(&self, to: &AgentId) -> Result<i64>;
 }

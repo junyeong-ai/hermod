@@ -156,11 +156,62 @@ impl DaemonClient {
         self.call(methods::method::MESSAGE_SEND, params).await
     }
 
-    pub async fn message_list(
+    pub async fn inbox_list(
         &mut self,
-        params: methods::MessageListParams,
-    ) -> Result<methods::MessageListResult> {
-        self.call(methods::method::MESSAGE_LIST, params).await
+        params: methods::InboxListParams,
+    ) -> Result<methods::InboxListResult> {
+        self.call(methods::method::INBOX_LIST, params).await
+    }
+
+    pub async fn inbox_promote(
+        &mut self,
+        params: methods::InboxPromoteParams,
+    ) -> Result<methods::InboxPromoteResult> {
+        self.call(methods::method::INBOX_PROMOTE, params).await
+    }
+
+    pub async fn notification_list(
+        &mut self,
+        params: methods::NotificationListParams,
+    ) -> Result<methods::NotificationListResult> {
+        self.call(methods::method::NOTIFICATION_LIST, params).await
+    }
+
+    pub async fn notification_claim(
+        &mut self,
+        params: methods::NotificationClaimParams,
+    ) -> Result<methods::NotificationClaimResult> {
+        self.call(methods::method::NOTIFICATION_CLAIM, params).await
+    }
+
+    pub async fn notification_complete(
+        &mut self,
+        params: methods::NotificationCompleteParams,
+    ) -> Result<methods::NotificationCompleteResult> {
+        self.call(methods::method::NOTIFICATION_COMPLETE, params)
+            .await
+    }
+
+    pub async fn notification_fail(
+        &mut self,
+        params: methods::NotificationFailParams,
+    ) -> Result<methods::NotificationFailResult> {
+        self.call(methods::method::NOTIFICATION_FAIL, params).await
+    }
+
+    pub async fn notification_dismiss(
+        &mut self,
+        params: methods::NotificationDismissParams,
+    ) -> Result<methods::NotificationDismissResult> {
+        self.call(methods::method::NOTIFICATION_DISMISS, params)
+            .await
+    }
+
+    pub async fn notification_purge(
+        &mut self,
+        params: methods::NotificationPurgeParams,
+    ) -> Result<methods::NotificationPurgeResult> {
+        self.call(methods::method::NOTIFICATION_PURGE, params).await
     }
 
     pub async fn message_ack(

@@ -166,6 +166,26 @@ silently-timed-out one in post-incident review.
 | `permission.relay.observed` | Inbound `PermissionPrompt` from a delegating peer landed in the local permission queue. | `envelope_id`, `request_id`, `tool_name`, `description`, `input_preview`, `expires_at` |
 | `permission.relay.responded` | Inbound `PermissionResponse` verdict from a delegate was applied (or no-op'd if the prompt was already resolved). | `envelope_id`, `request_id`, `behavior` |
 
+### routing.* / inbox.* / notification.*
+
+Recipient-side delivery surface. After the confirmation gate accepts an
+inbound (Direct/File), `hermod_routing::DispatchPolicy` chooses
+`MessageDisposition::{Push, Silent}` and (optionally)
+`NotifyPreference::Os`. The result lands here so an operator can audit
+both the routing decision and every life-cycle transition of the
+OS-notification queue.
+
+| Action | Trigger | Details |
+| --- | --- | --- |
+| `routing.dispositioned` | Routing engine made a decision for an accepted inbound (one row per envelope). | `kind`, `disposition`, `rule` (matched rule name or `null` for kind-default), `notify` (`"none"` \| `"os"`) |
+| `inbox.promote` | Operator flipped a silent inbox row to push via `inbox.promote`. | `null` (target carries the message id) |
+| `notification.queued` | Atomic enqueue succeeded; the dispatcher will pick this row up on its next poll. | `message_id`, `recipient` |
+| `notification.suppressed` | Atomic enqueue refused — `[routing.notification] max_pending` cap reached for the recipient. The routing decision still applied; only the OS ping was dropped. | `recipient`, `reason` |
+| `notification.dispatched` | Dispatcher invoked the platform notifier successfully and acknowledged via `notification.complete`. | `null` |
+| `notification.failed` | Dispatcher's platform notifier returned a terminal error and acknowledged via `notification.fail`. | `reason` |
+| `notification.dismissed` | Operator dismissed a live row via `hermod notification dismiss`. | `null` |
+| `notification.purged` | Janitor / operator-driven `notification.purge` reaped terminal rows past the retention window. | `rows` |
+
 ### presence.*
 | Action | Trigger | Details |
 | --- | --- | --- |

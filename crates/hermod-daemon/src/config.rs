@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use hermod_crypto::SecretString;
+use hermod_routing::RoutingConfig;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -19,6 +20,17 @@ pub struct Config {
     pub audit: AuditConfig,
     #[serde(default)]
     pub broker: BrokerConfig,
+    /// Recipient-side routing engine. `[routing]` block: rules
+    /// (first-match-wins), `[routing.notification]` master switch +
+    /// cap + retention, `routing.utc_offset_minutes` for time-window
+    /// rules. Empty `[routing]` ⇒ daemon constructs `PassthroughPolicy`
+    /// and behaviour matches a pre-routing daemon.
+    ///
+    /// Boot validation lives at `RoutingConfig::validate()`; the
+    /// daemon refuses to start on any error so operator typos never
+    /// silently degrade routing.
+    #[serde(default)]
+    pub routing: RoutingConfig,
 }
 
 /// Broker daemon role.

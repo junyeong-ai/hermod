@@ -43,6 +43,15 @@ pub struct InboundProcessor {
     pub(super) local_agents: hermod_daemon::local_agent::LocalAgentRegistry,
     access: AccessController,
     rate_limit: RateLimiter,
+    /// Recipient-side dispatch policy. Decides
+    /// `MessageDisposition::{Push, Silent}` and the operator's
+    /// OS-notification preference for every accepted inbound. Default
+    /// (no `[routing]` config) is `PassthroughPolicy` — every kind
+    /// reaches the channel emitter as before.
+    pub(super) dispatch_policy: Arc<dyn hermod_routing::DispatchPolicy>,
+    /// Per-recipient cap on `pending` + `failed` notification rows.
+    /// Pulled from `[routing.notification] max_pending` at boot.
+    pub(super) notification_max_pending: u32,
     replay_window_secs: u32,
     /// Held envelopes older than this are refused on accept (Phase 3 —
     /// closes the "operator parks for days, then accepts a stale
@@ -112,6 +121,8 @@ impl InboundProcessor {
             local_agents,
             access,
             rate_limit,
+            dispatch_policy: Arc::new(hermod_routing::PassthroughPolicy),
+            notification_max_pending: hermod_routing::NotificationConfig::default().max_pending,
             replay_window_secs,
             held_envelope_max_age_secs,
             max_file_payload_bytes,
@@ -119,6 +130,158 @@ impl InboundProcessor {
             permission: None,
             observability: None,
             broker: None,
+        }
+    }
+
+    /// Wire the routing engine. Same consume-on-set discipline as
+    /// the other `with_*` methods — clones after this call observe
+    /// the policy; clones before do not.
+    pub fn with_dispatch_policy(
+        mut self,
+        policy: Arc<dyn hermod_routing::DispatchPolicy>,
+        notification_max_pending: u32,
+    ) -> Self {
+        self.dispatch_policy = policy;
+        self.notification_max_pending = notification_max_pending;
+        self
+    }
+
+    /// Build the [`hermod_routing::RouteContext`] for an inbound
+    /// envelope and run [`DispatchPolicy::decide`]. The trust level
+    /// comes from the receiver's `agents` directory; session
+    /// activity is the `mcp_sessions` count for the recipient.
+    /// Both are O(1) indexed lookups.
+    async fn route_envelope(
+        &self,
+        envelope: &Envelope,
+        recipient: &AgentId,
+    ) -> hermod_routing::DispatchDecision {
+        let trust = self
+            .db
+            .agents()
+            .get(&envelope.from.id)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.trust_level)
+            .unwrap_or(hermod_core::TrustLevel::Tofu);
+        let ttl_ms = (hermod_storage::SESSION_TTL_SECS * 1_000) as i64;
+        let now = Timestamp::now();
+        let session_active = self
+            .db
+            .mcp_sessions()
+            .count_live_for(recipient, now, ttl_ms)
+            .await
+            .unwrap_or(0)
+            > 0;
+        let ctx = hermod_routing::RouteContext {
+            message_id: envelope.id,
+            from: &envelope.from.id,
+            recipient,
+            kind: envelope.kind,
+            priority: envelope.priority,
+            trust,
+            body: &envelope.body,
+            session_active,
+            now_unix_ms: now.unix_ms(),
+        };
+        self.dispatch_policy.decide(&ctx)
+    }
+
+    /// Audit the routing decision + (when `Os`) enqueue a
+    /// notification row. Called by per-kind acceptors *after* the
+    /// `messages` write commits — audit truthfulness rules out
+    /// emitting `routing.dispositioned` for a row that didn't
+    /// actually land.
+    pub(super) async fn finalize_routing(
+        &self,
+        envelope: &Envelope,
+        recipient: &AgentId,
+        decision: &hermod_routing::DispatchDecision,
+    ) {
+        // Audit: every accepted inbound that went through the
+        // routing engine logs its disposition + any matched rule.
+        let now = Timestamp::now();
+        audit_or_warn(
+            &*self.audit_sink,
+            AuditEntry {
+                id: None,
+                ts: now,
+                actor: envelope.from.id.clone(),
+                action: "routing.dispositioned".into(),
+                target: Some(envelope.id.to_string()),
+                details: Some(serde_json::json!({
+                    "kind": envelope.kind.as_str(),
+                    "disposition": decision.disposition.as_str(),
+                    "rule": decision.matched_rule,
+                    "notify": match &decision.notify {
+                        hermod_routing::NotifyPreference::None => "none",
+                        hermod_routing::NotifyPreference::Os { .. } => "os",
+                    },
+                })),
+                client_ip: None,
+                federation: hermod_storage::AuditFederationPolicy::Default,
+            },
+        )
+        .await;
+        // OS-notification enqueue (atomic with cap — no race
+        // between count and insert).
+        if let hermod_routing::NotifyPreference::Os { sound } = &decision.notify {
+            let req = hermod_storage::EnqueueRequest {
+                id: ulid::Ulid::new().to_string(),
+                recipient_agent_id: recipient.clone(),
+                message_id: envelope.id,
+                sound: sound.clone(),
+                created_at: now,
+            };
+            match self
+                .db
+                .notifications()
+                .enqueue(&req, self.notification_max_pending)
+                .await
+            {
+                Ok(hermod_storage::EnqueueOutcome::Inserted) => {
+                    audit_or_warn(
+                        &*self.audit_sink,
+                        AuditEntry {
+                            id: None,
+                            ts: now,
+                            actor: self.host_actor.clone(),
+                            action: "notification.queued".into(),
+                            target: Some(req.id),
+                            details: Some(serde_json::json!({
+                                "message_id": envelope.id.to_string(),
+                                "recipient": recipient.to_string(),
+                            })),
+                            client_ip: None,
+                            federation: hermod_storage::AuditFederationPolicy::Default,
+                        },
+                    )
+                    .await;
+                }
+                Ok(hermod_storage::EnqueueOutcome::BackPressure) => {
+                    audit_or_warn(
+                        &*self.audit_sink,
+                        AuditEntry {
+                            id: None,
+                            ts: now,
+                            actor: self.host_actor.clone(),
+                            action: "notification.suppressed".into(),
+                            target: Some(envelope.id.to_string()),
+                            details: Some(serde_json::json!({
+                                "recipient": recipient.to_string(),
+                                "reason": "max_pending_cap_reached",
+                            })),
+                            client_ip: None,
+                            federation: hermod_storage::AuditFederationPolicy::Default,
+                        },
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "notification enqueue failed");
+                }
+            }
         }
     }
 
@@ -590,9 +753,17 @@ impl InboundProcessor {
             hermod_core::MessageBody::Direct { .. } => {}
         }
 
+        // Recipient-side dispatch decision. Direct/File carry a
+        // `messages.disposition` column; the rule engine's choice
+        // is honoured. For audit truthfulness on kinds without a
+        // column the engine itself coerces to Push (see
+        // `RuleBasedPolicy::decide`), so the audit row matches what
+        // storage actually persisted.
+        let decision = self.route_envelope(envelope, &envelope.to.id).await;
         let cbor = serialize_envelope(envelope)
             .map_err(|e| FederationRejection::Invalid(format!("serialize: {e}")))?;
-        let mut record = MessageRecord::from_envelope(envelope, cbor, MessageStatus::Delivered);
+        let mut record = MessageRecord::from_envelope(envelope, cbor, MessageStatus::Delivered)
+            .with_disposition(decision.disposition);
         record.delivered_at = Some(Timestamp::now());
         self.db
             .messages()
@@ -617,6 +788,11 @@ impl InboundProcessor {
             },
         )
         .await;
+        // Routing audit + (when Os) notification enqueue. Fires
+        // AFTER the storage write so a failed enqueue doesn't leave
+        // a misleading "decision recorded" trail.
+        self.finalize_routing(envelope, &envelope.to.id, &decision)
+            .await;
         Ok(())
     }
 

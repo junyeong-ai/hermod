@@ -60,7 +60,7 @@ cross-host disambiguation when local aliases collide.
   - `priority`           For `direct` events only.
 
 When in doubt, prefer reading state with `agent_list` / `presence_get` / \
-`message_list` over guessing.";
+`inbox_list` over guessing.";
 
 /// Build the per-session instructions string. Prepends an identity
 /// stanza so Claude knows which agent it speaks for on this stdio,
@@ -177,7 +177,7 @@ mod tests {
             "message_send",
             "presence_get",
             "agent_list",
-            "message_list",
+            "inbox_list",
             // Permission-relay vocabulary so Claude knows the format.
             "request_id",
             "yes <id>",

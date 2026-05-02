@@ -5,8 +5,10 @@
 //!
 //! The MCP server reads inbox + held-confirmation state from the daemon and
 //! emits one notification per *new* item. New-ness is determined by ULID
-//! cursor — `MessageListParams.after_id` and `ConfirmationListParams.after_id`
+//! cursor — `InboxListParams.after_id` and `ConfirmationListParams.after_id`
 //! filter to "id > last seen", and the cursor advances after each batch.
+//! `inbox.list` is filtered to `dispositions: [Push]` so silent rows
+//! (held by the routing engine) never enter AI-agent context.
 //! The cursor is also persisted to the daemon via `mcp.cursor_advance` so a
 //! Claude Code restart with the same `HERMOD_SESSION_LABEL` resumes mid-stream.
 //!
@@ -29,9 +31,10 @@
 
 use anyhow::Result;
 use hermod_core::{
-    AgentAlias, AgentId, McpSessionId, MessageBody, MessageId, MessagePriority, MessageStatus,
+    AgentAlias, AgentId, McpSessionId, MessageBody, MessageDisposition, MessageId, MessagePriority,
+    MessageStatus,
 };
-use hermod_protocol::ipc::methods::{ConfirmationListParams, MessageListParams, PresenceGetParams};
+use hermod_protocol::ipc::methods::{ConfirmationListParams, InboxListParams, PresenceGetParams};
 use std::collections::HashMap;
 use std::time::Duration;
 use tracing::warn;
@@ -122,7 +125,7 @@ pub trait ChannelSource: Send {
     async fn next_batch(&mut self) -> Result<Vec<ChannelEvent>>;
 }
 
-/// Cursor-based pulling source. Polls the daemon's `message.list` and
+/// Cursor-based pulling source. Polls the daemon's `inbox.list` and
 /// `confirmation.list` at [`POLL_INTERVAL`], advancing per-stream cursors
 /// so every event is emitted exactly once across the MCP subprocess
 /// lifetime, and persisting the advanced cursor to the daemon after each
@@ -196,11 +199,16 @@ impl PollingChannelSource {
         let mut client = self.take_client().await?;
 
         let inbox = match client
-            .message_list(MessageListParams {
+            .inbox_list(InboxListParams {
                 statuses: Some(vec![MessageStatus::Delivered]),
                 priority_min: None,
                 limit: Some(BATCH_LIMIT),
                 after_id: after_msg,
+                // Push only — silent rows must never reach AI-agent
+                // context. Operators see them via `hermod inbox list`
+                // (default `--disposition all`) and can promote with
+                // `hermod inbox promote <id>`.
+                dispositions: Some(vec![MessageDisposition::Push]),
             })
             .await
         {

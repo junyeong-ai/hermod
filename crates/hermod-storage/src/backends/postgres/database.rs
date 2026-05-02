@@ -20,6 +20,7 @@ use crate::repositories::{
     confirmations::ConfirmationRepository,
     local_agents::LocalAgentRepository,
     messages::MessageRepository,
+    notifications::NotificationRepository,
     presence::{AgentPresenceRepository, McpSessionRepository},
     rate_limit::RateLimitRepository,
     workspaces::{
@@ -35,6 +36,7 @@ use super::capabilities::PostgresCapabilityRepository;
 use super::confirmations::PostgresConfirmationRepository;
 use super::local_agents::PostgresLocalAgentRepository;
 use super::messages::PostgresMessageRepository;
+use super::notifications::PostgresNotificationRepository;
 use super::pool::{open_pool, run_migrations};
 use super::presence::{PostgresAgentPresenceRepository, PostgresMcpSessionRepository};
 use super::rate_limit::PostgresRateLimitRepository;
@@ -57,6 +59,7 @@ pub struct PostgresDatabase {
     local_agents: PostgresLocalAgentRepository,
     mcp_sessions: PostgresMcpSessionRepository,
     messages: PostgresMessageRepository,
+    notifications: PostgresNotificationRepository,
     presences: PostgresAgentPresenceRepository,
     rate_limits: PostgresRateLimitRepository,
     workspaces: PostgresWorkspaceRepository,
@@ -93,6 +96,7 @@ impl PostgresDatabase {
             local_agents: PostgresLocalAgentRepository::new(pool.clone()),
             mcp_sessions: PostgresMcpSessionRepository::new(pool.clone()),
             messages: PostgresMessageRepository::new(pool.clone()),
+            notifications: PostgresNotificationRepository::new(pool.clone()),
             presences: PostgresAgentPresenceRepository::new(pool.clone()),
             rate_limits: PostgresRateLimitRepository::new(pool.clone()),
             workspaces: PostgresWorkspaceRepository::new(pool.clone()),
@@ -145,6 +149,9 @@ impl Database for PostgresDatabase {
     }
     fn messages(&self) -> &dyn MessageRepository {
         &self.messages
+    }
+    fn notifications(&self) -> &dyn NotificationRepository {
+        &self.notifications
     }
     fn presences(&self) -> &dyn AgentPresenceRepository {
         &self.presences

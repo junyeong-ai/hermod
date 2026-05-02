@@ -11,6 +11,7 @@ pub mod capabilities;
 pub mod confirmations;
 pub mod local_agents;
 pub mod messages;
+pub mod notifications;
 pub mod presence;
 pub mod rate_limit;
 pub mod workspaces;

@@ -17,6 +17,7 @@ use crate::repositories::{
     confirmations::ConfirmationRepository,
     local_agents::LocalAgentRepository,
     messages::MessageRepository,
+    notifications::NotificationRepository,
     presence::{AgentPresenceRepository, McpSessionRepository},
     rate_limit::RateLimitRepository,
     workspaces::{
@@ -32,6 +33,7 @@ use super::capabilities::SqliteCapabilityRepository;
 use super::confirmations::SqliteConfirmationRepository;
 use super::local_agents::SqliteLocalAgentRepository;
 use super::messages::SqliteMessageRepository;
+use super::notifications::SqliteNotificationRepository;
 use super::pool::{open_pool, run_migrations};
 use super::presence::{SqliteAgentPresenceRepository, SqliteMcpSessionRepository};
 use super::rate_limit::SqliteRateLimitRepository;
@@ -54,6 +56,7 @@ pub struct SqliteDatabase {
     local_agents: SqliteLocalAgentRepository,
     mcp_sessions: SqliteMcpSessionRepository,
     messages: SqliteMessageRepository,
+    notifications: SqliteNotificationRepository,
     presences: SqliteAgentPresenceRepository,
     rate_limits: SqliteRateLimitRepository,
     workspaces: SqliteWorkspaceRepository,
@@ -90,6 +93,7 @@ impl SqliteDatabase {
             local_agents: SqliteLocalAgentRepository::new(pool.clone()),
             mcp_sessions: SqliteMcpSessionRepository::new(pool.clone()),
             messages: SqliteMessageRepository::new(pool.clone()),
+            notifications: SqliteNotificationRepository::new(pool.clone()),
             presences: SqliteAgentPresenceRepository::new(pool.clone()),
             rate_limits: SqliteRateLimitRepository::new(pool.clone()),
             workspaces: SqliteWorkspaceRepository::new(pool.clone()),
@@ -143,6 +147,9 @@ impl Database for SqliteDatabase {
     }
     fn messages(&self) -> &dyn MessageRepository {
         &self.messages
+    }
+    fn notifications(&self) -> &dyn NotificationRepository {
+        &self.notifications
     }
     fn presences(&self) -> &dyn AgentPresenceRepository {
         &self.presences

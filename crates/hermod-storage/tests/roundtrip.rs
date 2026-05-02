@@ -1143,3 +1143,210 @@ async fn count_with_effective_alias_excludes_self_and_counts_collisions() {
         .unwrap();
     assert_eq!(n, 0);
 }
+
+/// PR-2 axis-8 storage integration: a `Silent` row is invisible to a
+/// `disposition: [Push]` filter but visible to `[Silent]` and to no
+/// filter at all. After `promote_to_push`, it surfaces in `[Push]`.
+#[tokio::test]
+async fn inbox_disposition_filter_and_promote() {
+    use hermod_core::MessageDisposition;
+    use hermod_storage::{Database, InboxFilter, MessageRecord, TransitionOutcome};
+
+    let db = fresh_db().await;
+    let kp_a = Keypair::generate();
+    let kp_b = Keypair::generate();
+    let now = Timestamp::now();
+    for kp in [&kp_a, &kp_b] {
+        db.agents()
+            .upsert(&AgentRecord {
+                id: kp.agent_id(),
+                pubkey: kp.to_pubkey_bytes(),
+                host_pubkey: None,
+                endpoint: None,
+                via_agent: None,
+                local_alias: None,
+                peer_asserted_alias: None,
+                trust_level: TrustLevel::Local,
+                tls_fingerprint: None,
+                reputation: 0,
+                first_seen: now,
+                last_seen: Some(now),
+            })
+            .await
+            .unwrap();
+    }
+
+    // Two envelopes A→B: one Push, one Silent.
+    let mk = |kp: &Keypair, text: &str, disp: MessageDisposition| -> MessageRecord {
+        let mut env = Envelope::draft(
+            AgentAddress::local(kp_a.agent_id()),
+            AgentAddress::local(kp_b.agent_id()),
+            MessageBody::Direct { text: text.into() },
+            MessagePriority::Normal,
+            3600,
+        );
+        kp.sign_envelope(&mut env).unwrap();
+        let cbor = canonical_envelope_bytes(&env).unwrap();
+        MessageRecord::from_envelope(&env, cbor, MessageStatus::Delivered).with_disposition(disp)
+    };
+
+    let push_rec = mk(&kp_a, "loud", MessageDisposition::Push);
+    let silent_rec = mk(&kp_a, "quiet", MessageDisposition::Silent);
+    let silent_id = silent_rec.id;
+    db.messages().enqueue(&push_rec).await.unwrap();
+    db.messages().enqueue(&silent_rec).await.unwrap();
+
+    // Push-only filter (MCP channel poller): excludes Silent.
+    let push_only = db
+        .messages()
+        .list_inbox(
+            &kp_b.agent_id(),
+            &InboxFilter {
+                dispositions: Some(vec![MessageDisposition::Push]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(push_only.len(), 1);
+    assert_eq!(push_only[0].disposition, MessageDisposition::Push);
+
+    // Silent-only filter (operator triage): excludes Push.
+    let silent_only = db
+        .messages()
+        .list_inbox(
+            &kp_b.agent_id(),
+            &InboxFilter {
+                dispositions: Some(vec![MessageDisposition::Silent]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(silent_only.len(), 1);
+    assert_eq!(silent_only[0].disposition, MessageDisposition::Silent);
+
+    // No filter (operator default): both.
+    let all = db
+        .messages()
+        .list_inbox(&kp_b.agent_id(), &InboxFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 2);
+
+    // Promote silent → push: row joins the push-only view, leaves silent-only.
+    let outcome = db
+        .messages()
+        .promote_to_push(&silent_id, &kp_b.agent_id())
+        .await
+        .unwrap();
+    assert_eq!(outcome, TransitionOutcome::Applied);
+
+    let push_after = db
+        .messages()
+        .list_inbox(
+            &kp_b.agent_id(),
+            &InboxFilter {
+                dispositions: Some(vec![MessageDisposition::Push]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(push_after.len(), 2);
+
+    // Promote-already-push is a NoOp.
+    let outcome = db
+        .messages()
+        .promote_to_push(&silent_id, &kp_b.agent_id())
+        .await
+        .unwrap();
+    assert_eq!(outcome, TransitionOutcome::NoOp);
+
+    // Cross-agent guard: A's bearer can't promote B's row.
+    let outcome = db
+        .messages()
+        .promote_to_push(&silent_id, &kp_a.agent_id())
+        .await
+        .unwrap();
+    assert_eq!(outcome, TransitionOutcome::NoOp);
+
+    // count_silent_to is consistent — after promotion, no silent.
+    let n = db
+        .messages()
+        .count_silent_to(&kp_b.agent_id())
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+}
+
+/// PR-2 atomic enqueue with cap: the storage layer's
+/// `INSERT … WHERE COUNT < cap` rejects writes once the cap is
+/// reached — no race window between count and insert.
+#[tokio::test]
+async fn notification_enqueue_respects_cap_atomically() {
+    use hermod_core::MessageDisposition;
+    use hermod_storage::{Database, EnqueueOutcome, EnqueueRequest, MessageRecord};
+
+    let db = fresh_db().await;
+    let kp_a = Keypair::generate();
+    let kp_b = Keypair::generate();
+    let now = Timestamp::now();
+    for kp in [&kp_a, &kp_b] {
+        db.agents()
+            .upsert(&AgentRecord {
+                id: kp.agent_id(),
+                pubkey: kp.to_pubkey_bytes(),
+                host_pubkey: None,
+                endpoint: None,
+                via_agent: None,
+                local_alias: None,
+                peer_asserted_alias: None,
+                trust_level: TrustLevel::Local,
+                tls_fingerprint: None,
+                reputation: 0,
+                first_seen: now,
+                last_seen: Some(now),
+            })
+            .await
+            .unwrap();
+    }
+
+    // Seed messages so the FK on notifications.message_id resolves.
+    let mut env = Envelope::draft(
+        AgentAddress::local(kp_a.agent_id()),
+        AgentAddress::local(kp_b.agent_id()),
+        MessageBody::Direct { text: "x".into() },
+        MessagePriority::Normal,
+        3600,
+    );
+    kp_a.sign_envelope(&mut env).unwrap();
+    let cbor = canonical_envelope_bytes(&env).unwrap();
+    let rec = MessageRecord::from_envelope(&env, cbor, MessageStatus::Delivered)
+        .with_disposition(MessageDisposition::Push);
+    let msg_id = rec.id;
+    db.messages().enqueue(&rec).await.unwrap();
+
+    let recipient = kp_b.agent_id();
+    let make_req = |i: usize| EnqueueRequest {
+        id: format!("notif-{i:04}"),
+        recipient_agent_id: recipient.clone(),
+        message_id: msg_id,
+        sound: None,
+        created_at: Timestamp::now(),
+    };
+
+    // First 3 inserts at cap=3 succeed.
+    for i in 0..3 {
+        let outcome = db.notifications().enqueue(&make_req(i), 3).await.unwrap();
+        assert_eq!(outcome, EnqueueOutcome::Inserted, "row {i} must land");
+    }
+    // 4th hits the cap atomically.
+    let outcome = db.notifications().enqueue(&make_req(99), 3).await.unwrap();
+    assert_eq!(outcome, EnqueueOutcome::BackPressure);
+
+    // Open count for the recipient is exactly 3 (pending) — the
+    // back-pressured row was never written.
+    let n = db.notifications().count_open_for(&recipient).await.unwrap();
+    assert_eq!(n, 3);
+}

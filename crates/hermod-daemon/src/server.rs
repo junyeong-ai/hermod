@@ -24,8 +24,9 @@ use crate::inbound::InboundProcessor;
 use crate::outbox::OutboxWorker;
 use crate::services::{
     AgentService, AuditService, BriefService, BroadcastService, CapabilityService, ChannelService,
-    ConfirmationService, McpService, MessageService, PeerService, PermissionService,
-    PresenceService, RemoteAuditSink, StatusService, WorkspaceService,
+    ConfirmationService, InboxService, McpService, MessageService, NotificationService,
+    PeerService, PermissionService, PresenceService, RemoteAuditSink, StatusService,
+    WorkspaceService,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -328,6 +329,16 @@ pub async fn serve(
     // forwarding fabric — the same connections used for our own
     // peers also carry relayed traffic. Off by default; opt-in via
     // config.
+    // Routing engine. `[routing]` config validated at boot — the
+    // daemon refuses to start on any rule misconfiguration. Empty
+    // `[routing]` ⇒ `PassthroughPolicy` and behaviour matches a
+    // pre-routing daemon.
+    let dispatch_policy: Arc<dyn hermod_routing::DispatchPolicy> =
+        if config.routing.rules.is_empty() {
+            Arc::new(hermod_routing::PassthroughPolicy)
+        } else {
+            Arc::new(hermod_routing::RuleBasedPolicy::new(config.routing.clone()))
+        };
     let inbound = {
         let base = InboundProcessor::new(
             db.clone(),
@@ -340,6 +351,10 @@ pub async fn serve(
             config.policy.held_envelope_max_age_secs,
             config.policy.max_file_payload_bytes as usize,
             config.audit.accept_federation,
+        )
+        .with_dispatch_policy(
+            dispatch_policy.clone(),
+            config.routing.notification.max_pending,
         )
         .with_permission_service(permissions.clone())
         .with_workspace_observability(observability.clone());
@@ -537,6 +552,13 @@ pub async fn serve(
     let dispatcher = Dispatcher {
         status: StatusService::new(db.clone(), registry.clone(), &host_public_key, started),
         messages: messages.clone(),
+        inbox: InboxService::new(db.clone(), audit_sink.clone(), host_id.clone()),
+        notifications: NotificationService::new(
+            db.clone(),
+            audit_sink.clone(),
+            host_id.clone(),
+            config.routing.notification.retention_days,
+        ),
         agents: AgentService::new(db.clone(), audit_sink.clone(), presence.clone()),
         briefs: BriefService::new(db.clone(), audit_sink.clone(), messages.clone()),
         presence: presence.clone(),

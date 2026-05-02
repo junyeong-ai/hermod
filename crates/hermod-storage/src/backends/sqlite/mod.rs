@@ -13,6 +13,7 @@ mod confirmations;
 mod database;
 mod local_agents;
 mod messages;
+mod notifications;
 mod pool;
 mod presence;
 mod rate_limit;

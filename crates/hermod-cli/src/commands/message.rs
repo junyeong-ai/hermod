@@ -3,7 +3,7 @@ use clap::Args;
 use hermod_core::{
     AgentAddress, AgentAlias, AgentId, CapabilityToken, MessageBody, MessageId, MessagePriority,
 };
-use hermod_protocol::ipc::methods::{MessageAckParams, MessageListParams, MessageSendParams};
+use hermod_protocol::ipc::methods::{MessageAckParams, MessageSendParams};
 use serde_bytes::ByteBuf;
 
 use std::path::PathBuf;
@@ -29,15 +29,6 @@ pub struct SendArgs {
     /// Hex-encoded capability token to attach to envelope.caps. Repeat for multiple.
     #[arg(long = "capability", value_name = "HEX")]
     pub capability: Vec<String>,
-}
-
-#[derive(Args, Debug)]
-pub struct ListArgs {
-    #[arg(long)]
-    pub limit: Option<u32>,
-    /// Minimum priority (low|normal|high|urgent).
-    #[arg(long)]
-    pub priority_min: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -202,26 +193,6 @@ fn guess_mime(path: &std::path::Path) -> String {
         _ => "application/octet-stream",
     }
     .to_string()
-}
-
-pub async fn list(args: ListArgs, target: &ClientTarget) -> Result<()> {
-    let mut c = target.connect().await?;
-    let priority_min = args
-        .priority_min
-        .as_deref()
-        .map(MessagePriority::from_str)
-        .transpose()
-        .map_err(|e| from_underlying("priority_min", e))?;
-    let r = c
-        .message_list(MessageListParams {
-            limit: args.limit,
-            priority_min,
-            statuses: None,
-            after_id: None,
-        })
-        .await?;
-    println!("{}", serde_json::to_string_pretty(&r)?);
-    Ok(())
 }
 
 pub async fn ack(args: AckArgs, target: &ClientTarget) -> Result<()> {

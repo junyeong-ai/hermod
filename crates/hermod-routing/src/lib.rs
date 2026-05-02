@@ -4,6 +4,7 @@
 
 pub mod access;
 pub mod confirmation;
+pub mod dispatch;
 pub mod error;
 pub(crate) mod peer;
 pub mod pool;
@@ -15,6 +16,11 @@ pub mod wss_noise;
 
 pub use access::{AccessController, AccessPolicy, AccessVerdict, scope};
 pub use confirmation::{Sensitivity, Verdict, classify, decide, summarize};
+pub use dispatch::{
+    BODY_KEYWORD_MAX_BYTES, BODY_KEYWORD_MAX_COUNT, DispatchDecision, DispatchPolicy,
+    NotificationConfig, NotifyPreference, PassthroughPolicy, RouteContext, RoutingConfig,
+    RoutingConfigError, Rule, RuleBasedPolicy, RuleCondition,
+};
 pub use error::{Result, RoutingError};
 pub use pool::{PeerPool, spawn_sweeper};
 pub use rate_limit::RateLimiter;

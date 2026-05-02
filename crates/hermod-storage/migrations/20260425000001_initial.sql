@@ -138,9 +138,23 @@ CREATE TABLE messages (
     -- delivered via the configured `[federation] upstream_broker`)
     -- and standard remote envelopes share one retry mechanism. NULL
     -- for purely-local destinations (loopback / `local-known`).
-    delivery_endpoint TEXT
+    delivery_endpoint TEXT,
+    -- Recipient-side delivery disposition. Set immediately after the
+    -- confirmation gate accepts an inbound, by the routing engine's
+    -- `DispatchPolicy::decide`. `push` = standard channel emit;
+    -- `silent` = inbox-only (no AI-agent context pollution). Operators
+    -- promote silent rows via `inbox.promote`. The DEFAULT documents
+    -- the kind-default for fresh inserts; application code always
+    -- supplies an explicit value (no `Default` derive on the Rust enum).
+    disposition     TEXT NOT NULL DEFAULT 'push'
+                    CHECK (disposition IN ('push','silent'))
 );
 CREATE INDEX idx_messages_inbox ON messages(to_agent, status, created_at);
+-- Channel-emitter hot path: only `push`-dispositioned rows reach the
+-- AI-agent stream, so the index keys on the filter the MCP poller
+-- applies on every poll.
+CREATE INDEX idx_messages_pushed_inbox
+    ON messages(to_agent, disposition, status, created_at);
 CREATE INDEX idx_messages_thread ON messages(thread_id, created_at);
 CREATE INDEX idx_messages_expiry ON messages(expires_at)
     WHERE status IN ('pending','delivered');
@@ -407,6 +421,34 @@ CREATE TABLE audit_archive_index (
 );
 CREATE INDEX idx_audit_archive_index_archived
     ON audit_archive_index(archived_at);
+
+-- OS-notification queue for routing decisions whose recipient-side
+-- `NotifyPreference` is `Os { sound }`. The MCP-side
+-- `NotificationDispatcher` claims rows atomically (claim_token +
+-- claimed_at, mirrors messages outbox) and transitions via
+-- `notification.complete` / `notification.fail`. Operators dismiss
+-- live rows via `notification.dismiss`. `purge_old` reaps dispatched
+-- and dismissed rows past the operator-configured retention window.
+--
+-- `recipient_agent_id` is the per-tenant scope: every IPC method on
+-- this table filters by caller_agent so sibling local agents never
+-- enumerate or claim each other's queues.
+CREATE TABLE notifications (
+    id                  TEXT NOT NULL PRIMARY KEY,
+    recipient_agent_id  TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    message_id          TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    status              TEXT NOT NULL
+                        CHECK (status IN ('pending','dispatched','failed','dismissed')),
+    sound               TEXT,
+    attempts            INTEGER NOT NULL DEFAULT 0,
+    claim_token         TEXT,
+    claimed_at          INTEGER,
+    dispatched_at       INTEGER,
+    failed_reason       TEXT,
+    created_at          INTEGER NOT NULL
+);
+CREATE INDEX idx_notifications_dispatch
+    ON notifications(recipient_agent_id, status, created_at);
 
 -- ChannelAdvertise envelopes from workspace members append here. Janitor
 -- sweeps stale rows by `last_seen`.

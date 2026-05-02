@@ -16,8 +16,8 @@ pub use bytes::{FingerprintBytes, PubkeyBytes, SignatureBytes};
 pub use capability::{CapabilityDirection, CapabilityScope, CapabilityToken};
 pub use envelope::{
     AdvertisedAgent, Envelope, MAX_CAPS_PER_ENVELOPE, MAX_FILE_PAYLOAD_BYTES, MessageBody,
-    MessageId, MessageKind, MessagePriority, MessageStatus, PROTOCOL_VERSION, PresenceStatus,
-    RosterMember, WorkspaceChannelEntry,
+    MessageDisposition, MessageId, MessageKind, MessagePriority, MessageStatus, NotificationStatus,
+    PROTOCOL_VERSION, PresenceStatus, RosterMember, WorkspaceChannelEntry,
 };
 pub use error::HermodError;
 pub use identity::{AgentAddress, AgentAlias, AgentId, Endpoint, TrustLevel, WssEndpoint};

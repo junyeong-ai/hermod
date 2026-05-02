@@ -116,6 +116,13 @@ async fn supervisor_loop(
     /// long enough not to thrash a permanently-down daemon.
     const ATTACH_RETRY: Duration = Duration::from_secs(5);
 
+    // Notification dispatcher is process-scoped — its worker_id
+    // identifies *this MCP process*, not any specific attach. It
+    // survives re-attach cleanly (claim_token semantics; no
+    // dependency on session_id). Spawned once; aborted on shutdown.
+    let worker_id = format!("mcp-{}", hermod_core::MessageId::new());
+    let (notifier_shutdown, notifier_handle) = super::notifier::spawn(target.clone(), worker_id);
+
     loop {
         let attach = tokio::select! {
             biased;
@@ -169,7 +176,13 @@ async fn supervisor_loop(
                     let _ = state_tx.send(None);
                     channel_handle.abort();
                     verdict_handle.abort();
+                    let _ = notifier_shutdown.send(());
+                    let _ = tokio::time::timeout(DETACH_TIMEOUT, notifier_handle).await;
                     return;
+                    // ↑ shutdown ⇒ exit the function entirely. No
+                    // outer-loop iteration after this.
+                    #[allow(unreachable_code)]
+                    {}
                 }
                 _ = ticker.tick() => {
                     match heartbeat_once(&target, &session.session_id).await {

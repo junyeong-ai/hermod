@@ -7,8 +7,8 @@
 
 use hermod_core::{
     AgentAddress, AgentAlias, AgentId, CapabilityDirection, CapabilityToken, Endpoint,
-    McpSessionId, MessageBody, MessageId, MessageKind, MessagePriority, MessageStatus,
-    SessionLabel, Timestamp, TrustLevel,
+    McpSessionId, MessageBody, MessageDisposition, MessageId, MessageKind, MessagePriority,
+    MessageStatus, NotificationStatus, SessionLabel, Timestamp, TrustLevel,
 };
 use serde::{Deserialize, Serialize};
 
@@ -30,10 +30,39 @@ pub mod method {
     pub const STATUS_GET: &str = "status.get";
     pub const IDENTITY_GET: &str = "identity.get";
 
-    // Messages
+    // Messages — `message.send` and `message.ack` are the sender-side
+    // and read-receipt surface. The inbox lister lives at `inbox.list`
+    // (richer projection: `MessageView` carries `from_alias` /
+    // `from_alias_ambiguous` / `from_host_pubkey` plus the recipient's
+    // `disposition` so operator CLI and MCP poller share one source).
     pub const MESSAGE_SEND: &str = "message.send";
-    pub const MESSAGE_LIST: &str = "message.list";
     pub const MESSAGE_ACK: &str = "message.ack";
+
+    // Inbox — recipient-side delivery surface.
+    //   `inbox.list`     — list inbox rows; defaults to all dispositions
+    //                      (operator CLI). MCP channel poller passes
+    //                      `dispositions: Some(vec![Push])` so silent
+    //                      rows never enter AI-agent context.
+    //   `inbox.promote`  — flip a silent row to push so the channel
+    //                      emitter surfaces it on the next poll.
+    pub const INBOX_LIST: &str = "inbox.list";
+    pub const INBOX_PROMOTE: &str = "inbox.promote";
+
+    // Notification queue — recipient-side OS-notification dispatch.
+    //   `notification.list`     — operator inspection.
+    //   `notification.claim`    — MCP NotificationDispatcher's atomic
+    //                             pull (mirrors messages outbox).
+    //   `notification.complete` — terminal success.
+    //   `notification.fail`     — terminal failure with reason.
+    //   `notification.dismiss`  — operator-driven dismissal.
+    //   `notification.purge`    — janitor / operator-triggered reap of
+    //                             terminal rows past retention.
+    pub const NOTIFICATION_LIST: &str = "notification.list";
+    pub const NOTIFICATION_CLAIM: &str = "notification.claim";
+    pub const NOTIFICATION_COMPLETE: &str = "notification.complete";
+    pub const NOTIFICATION_FAIL: &str = "notification.fail";
+    pub const NOTIFICATION_DISMISS: &str = "notification.dismiss";
+    pub const NOTIFICATION_PURGE: &str = "notification.purge";
 
     // Agents
     pub const AGENT_LIST: &str = "agent.list";
@@ -219,10 +248,14 @@ pub struct MessageSendResult {
     pub recipient_live: bool,
 }
 
-// ---------- message.list ----------
+// ---------- inbox.list ----------
 
+/// Canonical inbox lister. Used by `hermod inbox list` (operator CLI,
+/// no `dispositions` filter ⇒ all rows) and the MCP channel poller
+/// (passes `dispositions: Some(vec![Push])` so silent rows are kept
+/// out of AI-agent context).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct MessageListParams {
+pub struct InboxListParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub statuses: Option<Vec<MessageStatus>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -232,9 +265,16 @@ pub struct MessageListParams {
     /// Cursor for pagination / streaming readers. When set, only messages
     /// with `id > after_id` are returned. ULIDs are monotonic, so this is
     /// equivalent to "delivered after this point" for monotonic-time
-    /// readers like `mcp::channel::PollingChannelSource`.
+    /// readers like the MCP channel emitter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_id: Option<MessageId>,
+    /// Restrict to rows whose `disposition` is in this set. `None` ⇒
+    /// all dispositions (operator CLI default). The MCP channel
+    /// poller passes `Some(vec![Push])` — silent rows must never
+    /// reach AI-agent context. Operators promote silent → push via
+    /// `inbox.promote`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispositions: Option<Vec<MessageDisposition>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -266,6 +306,11 @@ pub struct MessageView {
     pub kind: MessageKind,
     pub priority: MessagePriority,
     pub status: MessageStatus,
+    /// Recipient-side delivery disposition assigned by the routing
+    /// engine. `Push` ⇒ surfaced on the AI-agent channel; `Silent`
+    /// ⇒ inbox-only. Operators see `Silent` rows in `inbox list`
+    /// and promote them via `inbox promote <id>`.
+    pub disposition: MessageDisposition,
     pub created_at: Timestamp,
     pub body: MessageBody,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -284,9 +329,135 @@ pub struct MessageView {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MessageListResult {
+pub struct InboxListResult {
     pub messages: Vec<MessageView>,
     pub total: i64,
+}
+
+// ---------- inbox.promote ----------
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InboxPromoteParams {
+    pub id: MessageId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InboxPromoteResult {
+    /// `true` iff a silent row was flipped to push. `false` for any
+    /// no-op (row missing, owned by another agent, already push).
+    /// CLI surfaces this as exit code 1 so scripts notice stale ids.
+    pub promoted: bool,
+}
+
+// ---------- notification.* ----------
+
+/// Wire-side projection of a `notifications` row. Hides storage
+/// internals (claim_token, claimed_at) the operator never needs;
+/// keeps observable fields the dispatcher and `hermod doctor` use.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NotificationView {
+    pub id: String,
+    pub recipient_agent_id: AgentId,
+    pub message_id: MessageId,
+    pub status: NotificationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sound: Option<String>,
+    pub attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatched_at: Option<Timestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_reason: Option<String>,
+    pub created_at: Timestamp,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct NotificationListParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statuses: Option<Vec<NotificationStatus>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NotificationListResult {
+    pub notifications: Vec<NotificationView>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NotificationClaimParams {
+    /// Worker identifier — the MCP NotificationDispatcher's
+    /// per-process UUID. Mirrors the messages outbox claim ownership.
+    pub worker_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NotificationClaimResult {
+    /// Claimed rows including their `claim_token` (for the subsequent
+    /// `complete` / `fail` call) and `message_id` (so the dispatcher
+    /// can fetch the body for the platform notifier).
+    pub notifications: Vec<NotificationClaimView>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NotificationClaimView {
+    pub id: String,
+    pub message_id: MessageId,
+    pub recipient_agent_id: AgentId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sound: Option<String>,
+    /// Echoed by the dispatcher on `complete` / `fail` so the daemon
+    /// rejects late completes from a stale worker.
+    pub claim_token: String,
+    pub created_at: Timestamp,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NotificationCompleteParams {
+    pub id: String,
+    pub claim_token: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NotificationCompleteResult {
+    pub matched: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NotificationFailParams {
+    pub id: String,
+    pub claim_token: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NotificationFailResult {
+    pub matched: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NotificationDismissParams {
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NotificationDismissResult {
+    pub matched: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct NotificationPurgeParams {
+    /// Maximum age in seconds for terminal rows to keep. `None`
+    /// uses the operator-configured `[routing.notification]
+    /// retention_days`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub older_than_secs: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NotificationPurgeResult {
+    pub purged: u64,
 }
 
 // ---------- message.ack ----------

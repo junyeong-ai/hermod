@@ -8,15 +8,17 @@ use tracing::{debug, warn};
 
 use crate::services::{
     AgentService, AuditService, BriefService, BroadcastService, CapabilityService, ChannelService,
-    ConfirmationService, LocalAgentService, McpService, MessageService, PeerService,
-    PermissionService, PresenceService, ServiceError, StatusService, WorkspaceObservabilityService,
-    WorkspaceService,
+    ConfirmationService, InboxService, LocalAgentService, McpService, MessageService,
+    NotificationService, PeerService, PermissionService, PresenceService, ServiceError,
+    StatusService, WorkspaceObservabilityService, WorkspaceService,
 };
 
 #[derive(Clone)]
 pub struct Dispatcher {
     pub status: StatusService,
     pub messages: MessageService,
+    pub inbox: InboxService,
+    pub notifications: NotificationService,
     pub agents: AgentService,
     pub briefs: BriefService,
     pub presence: PresenceService,
@@ -55,13 +57,43 @@ impl Dispatcher {
                 let p = parse_params(params)?;
                 to_value(self.messages.send(p).await)
             }
-            method::MESSAGE_LIST => {
-                let p = parse_params_or_default(params)?;
-                to_value(self.messages.list(p).await)
-            }
             method::MESSAGE_ACK => {
                 let p = parse_params(params)?;
                 to_value(self.messages.ack(p).await)
+            }
+
+            method::INBOX_LIST => {
+                let p = parse_params_or_default(params)?;
+                to_value(self.inbox.list(p).await)
+            }
+            method::INBOX_PROMOTE => {
+                let p = parse_params(params)?;
+                to_value(self.inbox.promote(p).await)
+            }
+
+            method::NOTIFICATION_LIST => {
+                let p = parse_params_or_default(params)?;
+                to_value(self.notifications.list(p).await)
+            }
+            method::NOTIFICATION_CLAIM => {
+                let p = parse_params(params)?;
+                to_value(self.notifications.claim(p).await)
+            }
+            method::NOTIFICATION_COMPLETE => {
+                let p = parse_params(params)?;
+                to_value(self.notifications.complete(p).await)
+            }
+            method::NOTIFICATION_FAIL => {
+                let p = parse_params(params)?;
+                to_value(self.notifications.fail(p).await)
+            }
+            method::NOTIFICATION_DISMISS => {
+                let p = parse_params(params)?;
+                to_value(self.notifications.dismiss(p).await)
+            }
+            method::NOTIFICATION_PURGE => {
+                let p = parse_params_or_default(params)?;
+                to_value(self.notifications.purge(p).await)
             }
 
             method::AGENT_LIST => {

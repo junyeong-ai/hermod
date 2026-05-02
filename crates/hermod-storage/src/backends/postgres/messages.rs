@@ -24,7 +24,8 @@
 
 use async_trait::async_trait;
 use hermod_core::{
-    AgentId, MessageBody, MessageId, MessageKind, MessagePriority, MessageStatus, Timestamp,
+    AgentId, MessageBody, MessageDisposition, MessageId, MessageKind, MessagePriority,
+    MessageStatus, Timestamp,
 };
 use sqlx::{PgPool, Row};
 use std::str::FromStr;
@@ -48,7 +49,7 @@ impl PostgresMessageRepository {
 const SELECT_BY_ID: &str = r#"
     SELECT id, thread_id, from_agent, to_agent, kind, priority, body_json,
            envelope_cbor, status, created_at, delivered_at, read_at, expires_at,
-           file_blob_location, delivery_endpoint
+           file_blob_location, delivery_endpoint, disposition
     FROM messages WHERE id = $1
 "#;
 
@@ -62,9 +63,9 @@ impl MessageRepository for PostgresMessageRepository {
             INSERT INTO messages
                 (id, thread_id, from_agent, to_agent, kind, priority, body_json,
                  envelope_cbor, status, created_at, delivered_at, read_at, expires_at,
-                 attempts, next_attempt_at, file_blob_location, delivery_endpoint)
+                 attempts, next_attempt_at, file_blob_location, delivery_endpoint, disposition)
             VALUES
-                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
             ON CONFLICT(id) DO NOTHING
             "#,
         )
@@ -85,6 +86,7 @@ impl MessageRepository for PostgresMessageRepository {
         .bind(record.next_attempt_at.map(|t| t.unix_ms()))
         .bind(record.file_blob_location.as_deref())
         .bind(record.delivery_endpoint.as_deref())
+        .bind(record.disposition.as_str())
         .execute(&self.pool)
         .await?;
 
@@ -135,7 +137,7 @@ impl MessageRepository for PostgresMessageRepository {
             RETURNING id, thread_id, from_agent, to_agent, kind, priority,
                       body_json, envelope_cbor, status, created_at,
                       delivered_at, read_at, expires_at, attempts, next_attempt_at,
-                      file_blob_location, delivery_endpoint
+                      file_blob_location, delivery_endpoint, disposition
             "#,
         )
         .bind(worker_id)
@@ -289,6 +291,16 @@ impl MessageRepository for PostgresMessageRepository {
             format!(" AND priority IN ({p}) ")
         };
 
+        let dispositions = filter.dispositions.clone();
+        let disposition_filter = match &dispositions {
+            Some(d) if !d.is_empty() => {
+                let p = numbered_placeholders(next_param as usize, d.len());
+                next_param += d.len() as u32;
+                format!(" AND disposition IN ({p}) ")
+            }
+            _ => String::new(),
+        };
+
         let cursor_filter = if filter.after_id.is_some() {
             let c = format!(" AND id > ${next_param} ");
             next_param += 1;
@@ -306,15 +318,15 @@ impl MessageRepository for PostgresMessageRepository {
             None => String::new(),
         };
 
-        let mut sql = String::with_capacity(384);
+        let mut sql = String::with_capacity(448);
         let _ = write!(
             sql,
             "SELECT id, thread_id, from_agent, to_agent, kind, priority, body_json, \
              envelope_cbor, status, created_at, delivered_at, read_at, expires_at, \
-             file_blob_location, delivery_endpoint \
+             file_blob_location, delivery_endpoint, disposition \
              FROM messages \
              WHERE to_agent = $1 AND status IN ({status_placeholders}) \
-             {priority_filter}{cursor_filter} \
+             {priority_filter}{disposition_filter}{cursor_filter} \
              ORDER BY id ASC{limit_clause}"
         );
 
@@ -324,6 +336,11 @@ impl MessageRepository for PostgresMessageRepository {
         }
         for p in &priorities {
             q = q.bind(p.as_str());
+        }
+        if let Some(d) = &dispositions {
+            for v in d {
+                q = q.bind(v.as_str());
+            }
         }
         if let Some(after) = &filter.after_id {
             q = q.bind(after.to_string());
@@ -354,6 +371,39 @@ impl MessageRepository for PostgresMessageRepository {
         let row = sqlx::query(
             r#"SELECT COUNT(*) AS n FROM messages
                WHERE to_agent = $1 AND status IN ('pending','delivered')"#,
+        )
+        .bind(to.as_str())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.try_get("n")?)
+    }
+
+    async fn promote_to_push(
+        &self,
+        id: &MessageId,
+        recipient: &AgentId,
+    ) -> Result<TransitionOutcome> {
+        let res = sqlx::query(
+            r#"UPDATE messages
+                  SET disposition = 'push'
+                WHERE id = $1 AND to_agent = $2 AND disposition = 'silent'"#,
+        )
+        .bind(id.to_string())
+        .bind(recipient.as_str())
+        .execute(&self.pool)
+        .await?;
+        Ok(if res.rows_affected() > 0 {
+            TransitionOutcome::Applied
+        } else {
+            TransitionOutcome::NoOp
+        })
+    }
+
+    async fn count_silent_to(&self, to: &AgentId) -> Result<i64> {
+        let row = sqlx::query(
+            r#"SELECT COUNT(*) AS n FROM messages
+               WHERE to_agent = $1 AND status IN ('pending','delivered')
+                 AND disposition = 'silent'"#,
         )
         .bind(to.as_str())
         .fetch_one(&self.pool)
@@ -479,6 +529,9 @@ fn row_to_message(row: sqlx::postgres::PgRow) -> Result<MessageRecord> {
         .ok()
         .flatten();
 
+    let disposition: String = row.try_get("disposition")?;
+    let disposition = MessageDisposition::from_str(&disposition).map_err(StorageError::Core)?;
+
     Ok(MessageRecord {
         id,
         thread_id,
@@ -498,6 +551,7 @@ fn row_to_message(row: sqlx::postgres::PgRow) -> Result<MessageRecord> {
         file_blob_location,
         file_size,
         delivery_endpoint,
+        disposition,
     })
 }
 

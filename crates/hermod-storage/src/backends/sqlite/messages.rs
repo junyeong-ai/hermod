@@ -2,7 +2,8 @@
 
 use async_trait::async_trait;
 use hermod_core::{
-    AgentId, MessageBody, MessageId, MessageKind, MessagePriority, MessageStatus, Timestamp,
+    AgentId, MessageBody, MessageDisposition, MessageId, MessageKind, MessagePriority,
+    MessageStatus, Timestamp,
 };
 use sqlx::{Row, SqlitePool};
 use std::str::FromStr;
@@ -26,7 +27,7 @@ impl SqliteMessageRepository {
 const SELECT_BY_ID: &str = r#"
     SELECT id, thread_id, from_agent, to_agent, kind, priority, body_json,
            envelope_cbor, status, created_at, delivered_at, read_at, expires_at,
-           file_blob_location, delivery_endpoint
+           file_blob_location, delivery_endpoint, disposition
     FROM messages WHERE id = ?
 "#;
 
@@ -40,9 +41,9 @@ impl MessageRepository for SqliteMessageRepository {
             INSERT INTO messages
                 (id, thread_id, from_agent, to_agent, kind, priority, body_json,
                  envelope_cbor, status, created_at, delivered_at, read_at, expires_at,
-                 attempts, next_attempt_at, file_blob_location, delivery_endpoint)
+                 attempts, next_attempt_at, file_blob_location, delivery_endpoint, disposition)
             VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO NOTHING
             "#,
         )
@@ -63,6 +64,7 @@ impl MessageRepository for SqliteMessageRepository {
         .bind(record.next_attempt_at.map(|t| t.unix_ms()))
         .bind(record.file_blob_location.as_deref())
         .bind(record.delivery_endpoint.as_deref())
+        .bind(record.disposition.as_str())
         .execute(&self.pool)
         .await?;
 
@@ -112,7 +114,7 @@ impl MessageRepository for SqliteMessageRepository {
             RETURNING id, thread_id, from_agent, to_agent, kind, priority,
                       body_json, envelope_cbor, status, created_at,
                       delivered_at, read_at, expires_at, attempts, next_attempt_at,
-                      file_blob_location, delivery_endpoint
+                      file_blob_location, delivery_endpoint, disposition
             "#,
         )
         .bind(worker_id)
@@ -268,13 +270,22 @@ impl MessageRepository for SqliteMessageRepository {
             None => "",
         };
 
+        let dispositions = filter.dispositions.clone();
+        let disposition_filter = match &dispositions {
+            Some(d) if !d.is_empty() => {
+                format!(" AND disposition IN ({}) ", comma_placeholders(d.len()))
+            }
+            _ => String::new(),
+        };
+
         let sql = format!(
             r#"SELECT id, thread_id, from_agent, to_agent, kind, priority, body_json,
                       envelope_cbor, status, created_at, delivered_at, read_at, expires_at,
-                      file_blob_location, delivery_endpoint
+                      file_blob_location, delivery_endpoint, disposition
                FROM messages
                WHERE to_agent = ? AND status IN ({status_placeholders})
                {priority_filter}
+               {disposition_filter}
                {cursor_filter}
                ORDER BY id ASC
                {limit_clause}"#
@@ -286,6 +297,11 @@ impl MessageRepository for SqliteMessageRepository {
         }
         for p in &priorities {
             q = q.bind(p.as_str());
+        }
+        if let Some(d) = &dispositions {
+            for v in d {
+                q = q.bind(v.as_str());
+            }
         }
         if let Some(after) = &filter.after_id {
             q = q.bind(after.to_string());
@@ -316,6 +332,39 @@ impl MessageRepository for SqliteMessageRepository {
         let row = sqlx::query(
             r#"SELECT COUNT(*) AS n FROM messages
                WHERE to_agent = ? AND status IN ('pending','delivered')"#,
+        )
+        .bind(to.as_str())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.try_get("n")?)
+    }
+
+    async fn promote_to_push(
+        &self,
+        id: &MessageId,
+        recipient: &AgentId,
+    ) -> Result<TransitionOutcome> {
+        let res = sqlx::query(
+            r#"UPDATE messages
+                  SET disposition = 'push'
+                WHERE id = ? AND to_agent = ? AND disposition = 'silent'"#,
+        )
+        .bind(id.to_string())
+        .bind(recipient.as_str())
+        .execute(&self.pool)
+        .await?;
+        Ok(if res.rows_affected() > 0 {
+            TransitionOutcome::Applied
+        } else {
+            TransitionOutcome::NoOp
+        })
+    }
+
+    async fn count_silent_to(&self, to: &AgentId) -> Result<i64> {
+        let row = sqlx::query(
+            r#"SELECT COUNT(*) AS n FROM messages
+               WHERE to_agent = ? AND status IN ('pending','delivered')
+                 AND disposition = 'silent'"#,
         )
         .bind(to.as_str())
         .fetch_one(&self.pool)
@@ -431,6 +480,9 @@ fn row_to_message(row: sqlx::sqlite::SqliteRow) -> Result<MessageRecord> {
         .ok()
         .flatten();
 
+    let disposition: String = row.try_get("disposition")?;
+    let disposition = MessageDisposition::from_str(&disposition).map_err(StorageError::Core)?;
+
     Ok(MessageRecord {
         id,
         thread_id,
@@ -450,6 +502,7 @@ fn row_to_message(row: sqlx::sqlite::SqliteRow) -> Result<MessageRecord> {
         file_blob_location,
         file_size,
         delivery_endpoint,
+        disposition,
     })
 }
 

@@ -5,12 +5,11 @@ use hermod_crypto::{LocalKeySigner, Signer};
 use hermod_daemon::local_agent::LocalAgentRegistry;
 use hermod_protocol::envelope::serialize_envelope;
 use hermod_protocol::ipc::methods::{
-    MessageAckParams, MessageAckResult, MessageListParams, MessageListResult, MessageSendParams,
-    MessageSendResult, MessageView,
+    MessageAckParams, MessageAckResult, MessageSendParams, MessageSendResult,
 };
 use hermod_routing::remote::DeliveryOutcome;
 use hermod_routing::{AccessController, RateLimiter, RemoteDeliverer, RouteOutcome, Router};
-use hermod_storage::{AuditEntry, AuditSink, Database, InboxFilter, MessageRecord};
+use hermod_storage::{AuditEntry, AuditSink, Database, MessageRecord};
 use std::sync::Arc;
 
 use crate::audit_context::current_caller_agent;
@@ -22,13 +21,6 @@ use crate::services::{ServiceError, audit_or_warn};
 /// memorable. Also bounds memory use on the inbound path before any
 /// DB / fanout work.
 pub const MAX_DIRECT_TEXT_BYTES: usize = 4096;
-
-/// Hard cap on `message.list` page size. Caps both the SQL query result
-/// and the IPC reply size (stays comfortably under the 1 MiB remote-IPC
-/// frame cap even with full `MessageView` serialisation). Operators
-/// paginate via `after_id` for larger sweeps.
-pub const MAX_LIST_LIMIT: u32 = 500;
-pub const DEFAULT_LIST_LIMIT: u32 = 100;
 
 /// Hard cap on `message.ack` batch size. Bounds the SQL fan-out and the
 /// returned `acked` vector even on the local socket (which has no IPC
@@ -335,61 +327,6 @@ impl MessageService {
             Ok(Some(rec)) => rec.active_peer_live(now).unwrap_or(false),
             _ => false,
         }
-    }
-
-    pub async fn list(&self, params: MessageListParams) -> Result<MessageListResult, ServiceError> {
-        let caller = current_caller_agent().ok_or_else(|| {
-            ServiceError::InvalidParam(
-                "message.list requires an IPC caller scope (no caller_agent in context)".into(),
-            )
-        })?;
-        let limit = params
-            .limit
-            .unwrap_or(DEFAULT_LIST_LIMIT)
-            .min(MAX_LIST_LIMIT);
-        let filter = InboxFilter {
-            statuses: params.statuses,
-            priority_min: params.priority_min,
-            limit: Some(limit),
-            after_id: params.after_id,
-        };
-        let records = self.db.messages().list_inbox(&caller, &filter).await?;
-        let total = self.db.messages().count_pending_to(&caller).await?;
-        // Per-batch alias cache. Multiple messages from the same sender
-        // share one directory lookup; the directory is small + indexed so
-        // this is O(distinct senders) sqlite SELECTs.
-        let mut sender_cache: std::collections::HashMap<hermod_core::AgentId, SenderProjection> =
-            std::collections::HashMap::new();
-        let mut messages = Vec::with_capacity(records.len());
-        for r in records {
-            let proj = match sender_cache.get(&r.from_agent) {
-                Some(v) => v.clone(),
-                None => {
-                    let t = SenderProjection::lookup(&self.db, &r.from_agent).await;
-                    sender_cache.insert(r.from_agent.clone(), t.clone());
-                    t
-                }
-            };
-            messages.push(MessageView {
-                id: r.id,
-                from: r.from_agent,
-                from_local_alias: proj.local,
-                from_peer_alias: proj.peer,
-                from_alias: proj.effective,
-                from_alias_ambiguous: proj.effective_ambiguous,
-                from_host_pubkey: proj.host_pubkey_hex,
-                to: r.to_agent,
-                kind: r.kind,
-                priority: r.priority,
-                status: r.status,
-                created_at: r.created_at,
-                body: r.body,
-                thread: r.thread_id,
-                file_blob_location: r.file_blob_location,
-                file_size: r.file_size,
-            });
-        }
-        Ok(MessageListResult { messages, total })
     }
 
     pub async fn ack(&self, params: MessageAckParams) -> Result<MessageAckResult, ServiceError> {

@@ -224,7 +224,7 @@ fn federation_end_to_end() {
         "expected delivered status, got: {send_out}"
     );
     std::thread::sleep(Duration::from_millis(300));
-    let (_, list_out) = bob.run(&["message", "list"]);
+    let (_, list_out) = bob.run(&["inbox", "list"]);
     assert!(list_out.contains("hi from alice"), "bob inbox: {list_out}");
 
     // Workspace + channel adopt + broadcast.
@@ -394,7 +394,7 @@ fn inbound_rate_limit_kicks_in() {
         "expected at most 2 delivered, got {delivered}"
     );
     assert!(failed >= 3, "expected at least 3 failed, got {failed}");
-    let (_, list_out) = bob.run(&["message", "list"]);
+    let (_, list_out) = bob.run(&["inbox", "list"]);
     let total_count = list_out.matches("\"id\": \"").count();
     assert!(
         total_count <= 2,

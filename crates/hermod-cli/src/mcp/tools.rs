@@ -7,7 +7,7 @@ use hermod_protocol::ipc::methods::{
     self as proto, AgentGetParams, AgentListParams, BriefPublishParams, BriefReadParams,
     BroadcastSendParams, ChannelAdoptParams, ChannelAdvertiseParams, ChannelCreateParams,
     ChannelDiscoverParams, ChannelHistoryParams, ChannelListParams, ConfirmationListParams,
-    MessageAckParams, MessageListParams, MessageSendParams, PresenceClearManualParams,
+    InboxListParams, MessageAckParams, MessageSendParams, PresenceClearManualParams,
     PresenceGetParams, PresenceSetManualParams, WorkspaceChannelsParams, WorkspaceCreateParams,
     WorkspaceInviteParams, WorkspaceJoinParams, WorkspaceRosterParams,
 };
@@ -34,13 +34,14 @@ pub fn schemas() -> Value {
             }
         },
         {
-            "name": "message_list",
-            "description": "List inbox messages addressed to me. Use to fetch beyond what arrives via channel notifications, or to filter by priority.",
+            "name": "inbox_list",
+            "description": "List inbox messages addressed to me. Use to fetch beyond what arrives via channel notifications, to filter by priority, or to inspect rows the routing engine kept silent.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "limit":        { "type":"integer", "minimum": 1, "maximum": 500 },
-                    "priority_min": { "type":"string", "enum":["low","normal","high","urgent"] }
+                    "priority_min": { "type":"string", "enum":["low","normal","high","urgent"] },
+                    "disposition":  { "type":"string", "enum":["push","silent","all"], "default":"all", "description":"Filter by recipient-side disposition. `silent` shows rows the routing engine kept off the channel; `push` matches what arrived via channel events; `all` shows both." }
                 }
             }
         },
@@ -282,7 +283,7 @@ pub async fn dispatch(id: Value, params: Value, target: &ClientTarget) -> Value 
 
     let result = match name {
         "message_send" => do_message_send(args, target).await,
-        "message_list" => do_message_list(args, target).await,
+        "inbox_list" => do_inbox_list(args, target).await,
         "message_ack" => do_message_ack(args, target).await,
         "agent_list" => do_agent_list(args, target).await,
         "agent_get" => do_agent_get(args, target).await,
@@ -364,7 +365,7 @@ async fn do_message_send(args: Value, target: &ClientTarget) -> Result<Value> {
     Ok(serde_json::to_value(res)?)
 }
 
-async fn do_message_list(args: Value, target: &ClientTarget) -> Result<Value> {
+async fn do_inbox_list(args: Value, target: &ClientTarget) -> Result<Value> {
     let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as u32);
     let priority_min = args
         .get("priority_min")
@@ -372,14 +373,21 @@ async fn do_message_list(args: Value, target: &ClientTarget) -> Result<Value> {
         .map(MessagePriority::from_str)
         .transpose()
         .map_err(|e| anyhow!("invalid priority_min: {e}"))?;
+    let dispositions = match args.get("disposition").and_then(|v| v.as_str()) {
+        Some("push") => Some(vec![hermod_core::MessageDisposition::Push]),
+        Some("silent") => Some(vec![hermod_core::MessageDisposition::Silent]),
+        Some("all") | None => None,
+        Some(other) => return Err(anyhow!("invalid disposition: {other}")),
+    };
 
     let mut client = target.connect().await?;
     let r = client
-        .message_list(MessageListParams {
+        .inbox_list(InboxListParams {
             limit,
             priority_min,
             statuses: None,
             after_id: None,
+            dispositions,
         })
         .await?;
     Ok(serde_json::to_value(r)?)
