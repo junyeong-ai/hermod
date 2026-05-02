@@ -13,7 +13,7 @@
 //! status using [`effective_status`].
 
 use async_trait::async_trait;
-use hermod_core::{AgentId, PresenceStatus, Timestamp};
+use hermod_core::{AgentId, McpSessionId, MessageId, PresenceStatus, SessionLabel, Timestamp};
 
 use crate::error::Result;
 
@@ -70,15 +70,78 @@ pub struct ObservedPresence {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpSession {
-    pub session_id: String,
+    pub session_id: McpSessionId,
     /// Locally-hosted agent the bearer authenticated as on
     /// `mcp.attach`. Liveness for that agent is "any active session
     /// row with this `agent_id`".
     pub agent_id: AgentId,
+    /// Operator-supplied stable nickname (`HERMOD_SESSION_LABEL`).
+    /// `None` for legacy/unlabelled attaches; `Some(label)` allows
+    /// resumption of cursors across MCP process restart.
+    pub session_label: Option<SessionLabel>,
     pub attached_at: Timestamp,
     pub last_heartbeat_at: Timestamp,
     pub client_name: Option<String>,
     pub client_version: Option<String>,
+    /// Delivery cursors. Server-side persisted via `cursor_advance`
+    /// after the MCP client writes a batch to stdout — restart
+    /// resumes from these positions, not zero.
+    pub last_message_id: Option<MessageId>,
+    pub last_confirmation_id: Option<String>,
+    pub last_resolved_seq: Option<u64>,
+}
+
+/// What the caller hands to [`McpSessionRepository::attach`]. Repos
+/// own the resume / conflict logic; the service layer just supplies
+/// the freshly-minted handle and the operator-provided label.
+#[derive(Debug, Clone)]
+pub struct AttachParams {
+    pub session_id: McpSessionId,
+    pub agent_id: AgentId,
+    pub session_label: Option<SessionLabel>,
+    pub attached_at: Timestamp,
+    pub client_name: Option<String>,
+    pub client_version: Option<String>,
+    /// Heartbeat-staleness cutoff used to classify the prior label
+    /// holder (live ⇒ reject, stale ⇒ resume). The service passes
+    /// `SESSION_TTL_SECS * 1_000`.
+    pub ttl_ms: i64,
+}
+
+/// Outcome of [`McpSessionRepository::attach`]. The success branch
+/// carries the row as it now stands in the DB (cursors carried over
+/// if a stale labelled row was found); the conflict branch carries
+/// the live holder's identity so the service can return a clear
+/// error to the caller.
+#[derive(Debug, Clone)]
+pub enum AttachOutcome {
+    /// Fresh insert. `resumed` is true iff a stale labelled row
+    /// existed and its cursors were carried into the new row;
+    /// `was_live` reports whether *any* session for the host was
+    /// live before this attach (drives the offline→online presence
+    /// broadcast).
+    Inserted {
+        session: McpSession,
+        was_live: bool,
+        resumed: bool,
+    },
+    /// Label is currently held by a live session. The caller
+    /// surfaces this as `ServiceError::Conflict`; the operator
+    /// either picks a different label or waits for the prior
+    /// session's heartbeat TTL to elapse.
+    LabelInUse {
+        live_session_id: McpSessionId,
+        last_heartbeat_at: Timestamp,
+    },
+}
+
+/// Server-side cursor write. All four fields optional — callers pass
+/// only what advanced. Idempotent: the same value twice is a no-op.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CursorAdvance {
+    pub last_message_id: Option<MessageId>,
+    pub last_confirmation_id: Option<String>,
+    pub last_resolved_seq: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,18 +177,28 @@ pub trait AgentPresenceRepository: Send + Sync + std::fmt::Debug {
 
 #[async_trait]
 pub trait McpSessionRepository: Send + Sync + std::fmt::Debug {
-    /// Attach a session and report whether self was already live before the
-    /// insert, in a single transaction.
-    async fn attach_atomic(&self, session: &McpSession, ttl_ms: i64) -> Result<bool>;
+    /// Attach a session, atomically resolving label collisions:
+    /// stale labelled rows are evicted and their cursors carried;
+    /// live labelled rows are reported as [`AttachOutcome::LabelInUse`].
+    async fn attach(&self, params: AttachParams) -> Result<AttachOutcome>;
 
     /// Bump `last_heartbeat_at` to `now`. Returns `false` if the session
     /// row is gone (already detached or pruned).
-    async fn heartbeat(&self, session_id: &str, now: Timestamp) -> Result<bool>;
+    async fn heartbeat(&self, session_id: &McpSessionId, now: Timestamp) -> Result<bool>;
+
+    /// Persist delivery cursors. Each `Some(_)` is written; `None`
+    /// fields are left untouched. Returns `false` if the session row
+    /// is gone (caller should re-attach before retrying).
+    async fn cursor_advance(
+        &self,
+        session_id: &McpSessionId,
+        advance: &CursorAdvance,
+    ) -> Result<bool>;
 
     /// Detach a session and report the resulting liveness, atomically.
     async fn detach_atomic(
         &self,
-        session_id: &str,
+        session_id: &McpSessionId,
         now: Timestamp,
         ttl_ms: i64,
     ) -> Result<DetachOutcome>;
@@ -137,6 +210,20 @@ pub trait McpSessionRepository: Send + Sync + std::fmt::Debug {
     /// agent* (not the host as a whole) is online — distinct
     /// addressable identities mean distinct liveness.
     async fn count_live_for(&self, agent_id: &AgentId, now: Timestamp, ttl_ms: i64) -> Result<u64>;
+
+    /// Live MCP sessions for one locally-hosted agent. Used by
+    /// `local.sessions` IPC so the operator can see which Claude
+    /// Code windows are currently attached as `agent_id`.
+    /// Sorted by `attached_at` ascending (oldest first).
+    async fn list_for_agent(
+        &self,
+        agent_id: &AgentId,
+        now: Timestamp,
+        ttl_ms: i64,
+    ) -> Result<Vec<McpSession>>;
+
+    /// Look up one session by its handle. `None` if pruned or detached.
+    async fn get(&self, session_id: &McpSessionId) -> Result<Option<McpSession>>;
 
     /// Prune stale rows and report the liveness transition.
     async fn prune_with_transition(&self, now: Timestamp, ttl_ms: i64) -> Result<PruneOutcome>;

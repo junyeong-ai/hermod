@@ -197,6 +197,10 @@ enum LocalCmd {
     /// connects as the named agent when launched from that project.
     #[command(name = "setup-mcp")]
     SetupMcp(commands::local::SetupMcpArgs),
+    /// List live MCP sessions for the caller agent (one row per
+    /// attached Claude Code window). Surfaces `session_label` so
+    /// operators can tell which window is which.
+    Sessions,
 }
 
 #[derive(Subcommand, Debug)]
@@ -463,6 +467,7 @@ async fn main() -> anyhow::Result<()> {
             LocalCmd::Rm(a) => commands::local::remove(a, &target).await,
             LocalCmd::Rotate(a) => commands::local::rotate(a, &target).await,
             LocalCmd::SetupMcp(a) => commands::local::setup_mcp(a, &home).await,
+            LocalCmd::Sessions => commands::local::sessions(&target).await,
         },
         Command::Audit(sub) => match sub {
             AuditCmd::Query(a) => commands::audit::query(a, &target).await,

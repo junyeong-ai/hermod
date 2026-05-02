@@ -6,14 +6,22 @@
 //! grammar is small, and adapters (CLI, MCP, audit log) all assume it.
 
 use hermod_core::{
-    AgentAddress, AgentAlias, AgentId, CapabilityDirection, CapabilityToken, Endpoint, MessageBody,
-    MessageId, MessageKind, MessagePriority, MessageStatus, Timestamp, TrustLevel,
+    AgentAddress, AgentAlias, AgentId, CapabilityDirection, CapabilityToken, Endpoint,
+    McpSessionId, MessageBody, MessageId, MessageKind, MessagePriority, MessageStatus,
+    SessionLabel, Timestamp, TrustLevel,
 };
 use serde::{Deserialize, Serialize};
 
 // Re-exported so CLI / MCP callers don't need a separate `use hermod_core::…`
 // for types that appear in IPC params and results.
 pub use hermod_core::WorkspaceVisibility;
+
+/// `serde(skip_serializing_if = "is_false")` helper — drop the field
+/// from the wire when its value is the boolean default. Keeps the
+/// shape stable for callers that haven't seen the new field yet.
+fn is_false(b: &bool) -> bool {
+    !*b
+}
 
 // ---------- method names ----------
 
@@ -41,6 +49,10 @@ pub mod method {
     pub const LOCAL_ADD: &str = "local.add";
     pub const LOCAL_REMOVE: &str = "local.remove";
     pub const LOCAL_ROTATE: &str = "local.rotate";
+    /// Live MCP sessions for the caller agent — used by the operator
+    /// to see which Claude Code windows are currently attached and
+    /// under which `session_label`.
+    pub const LOCAL_SESSIONS: &str = "local.sessions";
 
     pub const PEER_ADD: &str = "peer.add";
     pub const PEER_LIST: &str = "peer.list";
@@ -79,6 +91,11 @@ pub mod method {
     pub const MCP_ATTACH: &str = "mcp.attach";
     pub const MCP_DETACH: &str = "mcp.detach";
     pub const MCP_HEARTBEAT: &str = "mcp.heartbeat";
+    /// Persist the session's delivery cursors so a Claude Code restart
+    /// resumes from the same position rather than re-emitting the
+    /// agent's entire backlog. Idempotent partial advance — only
+    /// `Some(_)` fields are written.
+    pub const MCP_CURSOR_ADVANCE: &str = "mcp.cursor_advance";
 
     // Workspaces (group container).
     pub const WORKSPACE_CREATE: &str = "workspace.create";
@@ -234,6 +251,12 @@ pub struct MessageView {
     /// UIs/LLMs that just want "the sender's name" should read this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_alias: Option<AgentAlias>,
+    /// `true` iff another agent (different `id`) shares the same
+    /// `from_alias`. Receivers MUST surface `from_host_pubkey` (or
+    /// the raw `from` id) before acting on the alias to avoid acting
+    /// on the wrong identity.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub from_alias_ambiguous: bool,
     /// Hex-encoded ed25519 host pubkey of the daemon hosting `from`.
     /// `None` for local-only senders that have never been federated.
     /// UIs render the leading 8 chars when local aliases collide.
@@ -816,7 +839,7 @@ pub struct PresenceGetResult {
     pub presence: Option<PresenceView>,
 }
 
-// ---------- mcp.session_* + mcp.heartbeat ----------
+// ---------- mcp.attach + mcp.heartbeat + mcp.cursor_advance + mcp.detach ----------
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct McpAttachParams {
@@ -825,29 +848,53 @@ pub struct McpAttachParams {
     pub client_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_version: Option<String>,
+    /// Operator-supplied stable nickname (`HERMOD_SESSION_LABEL`).
+    /// When set, the daemon resumes prior cursors keyed by
+    /// `(caller_agent, session_label)` — a Claude Code restart with
+    /// the same label picks up where the previous attach left off.
+    /// `None` ⇒ ephemeral session, no cursor resumption.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_label: Option<SessionLabel>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct McpAttachResult {
-    pub session_id: String,
+    pub session_id: McpSessionId,
+    /// Operator-supplied label, echoed for client display. `None`
+    /// when the attach was unlabelled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_label: Option<SessionLabel>,
+    /// `true` iff a stale labelled row was found and its cursors
+    /// were carried into this attach. `false` for fresh attaches
+    /// (no label or label not previously seen).
+    pub resumed: bool,
     /// Cadence the daemon expects heartbeats at. The MCP server schedules
     /// its heartbeat task using this so the two ends agree without a config.
     pub heartbeat_interval_secs: u32,
+    /// Resumed delivery cursors. Clients seed their pollers from
+    /// these — only messages / confirmations / verdicts past these
+    /// positions are emitted to the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_message_id: Option<MessageId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_confirmation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_resolved_seq: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct McpDetachParams {
-    pub session_id: String,
+    pub session_id: McpSessionId,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct McpDetachResult {
-    pub session_id: String,
+    pub session_id: McpSessionId,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct McpHeartbeatParams {
-    pub session_id: String,
+    pub session_id: McpSessionId,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -857,6 +904,58 @@ pub struct McpHeartbeatResult {
     /// `false` iff the server has no record of this session — the client
     /// should re-attach (typically the daemon was restarted under us).
     pub recognised: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct McpCursorAdvanceParams {
+    pub session_id: McpSessionId,
+    /// Inbox cursor — last `MessageId` the MCP client successfully
+    /// emitted to Claude Code on the channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_message_id: Option<MessageId>,
+    /// Held-confirmation cursor. Stored as opaque string (matches
+    /// `PendingConfirmationView.id` shape).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_confirmation_id: Option<String>,
+    /// Permission verdict cursor (monotonic seq from `permission.list_resolved`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_resolved_seq: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct McpCursorAdvanceResult {
+    /// `false` iff the session_id is unknown — caller should re-attach
+    /// before retrying.
+    pub recognised: bool,
+}
+
+// ---------- local.sessions ----------
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LocalSessionsParams {}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalSessionsResult {
+    pub sessions: Vec<McpSessionSummary>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct McpSessionSummary {
+    pub session_id: McpSessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_label: Option<SessionLabel>,
+    pub attached_at: Timestamp,
+    pub last_heartbeat_at: Timestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_message_id: Option<MessageId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_confirmation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_resolved_seq: Option<u64>,
 }
 
 // ---------- audit ----------
@@ -1192,6 +1291,9 @@ pub struct PendingConfirmationView {
     pub from_peer_alias: Option<AgentAlias>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_alias: Option<AgentAlias>,
+    /// Mirrors [`MessageView::from_alias_ambiguous`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub from_alias_ambiguous: bool,
     /// Hex-encoded ed25519 host pubkey of the daemon hosting `from`.
     /// Mirrors [`MessageView::from_host_pubkey`] — surfaced for
     /// cross-host disambiguation when local aliases collide.
@@ -1355,6 +1457,14 @@ pub struct PermissionRequestParams {
     /// Tool arguments as a JSON string, truncated to ~200 chars by the
     /// caller per the Channels reference.
     pub input_preview: String,
+    /// MCP session that originated this prompt. The daemon stores
+    /// it on the open request so `permission.list` /
+    /// `permission.list_resolved` filtered by `session_id` only
+    /// see verdicts originating from the same Claude Code window.
+    /// `None` for non-MCP callers (e.g. operator-driven flows that
+    /// open a prompt without a session — none today, future-proofing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<McpSessionId>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1391,6 +1501,13 @@ pub struct PermissionRespondResult {
 pub struct PermissionListParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    /// Filter to prompts originated from this MCP session. `None`
+    /// surfaces every open prompt for the caller agent (operator
+    /// CLI use case). `Some(id)` is the Claude Code path —
+    /// sibling windows of the same agent only ever observe their
+    /// own prompts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<McpSessionId>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1421,6 +1538,12 @@ pub struct PermissionListResolvedParams {
     pub after_seq: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    /// Filter to verdicts whose originating prompt was owned by
+    /// this MCP session. Critical for multi-instance isolation:
+    /// without this filter, sibling Claude Code windows of the same
+    /// agent would observe each other's tool-call verdicts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<McpSessionId>,
 }
 
 /// Outcome of a resolved permission request.

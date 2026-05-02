@@ -260,6 +260,24 @@ impl AgentRepository for PostgresAgentRepository {
         rows.into_iter().map(row_to_agent).collect()
     }
 
+    async fn count_with_effective_alias(
+        &self,
+        alias: &hermod_core::AgentAlias,
+        exclude: &AgentId,
+    ) -> Result<u64> {
+        let row = sqlx::query(
+            r#"SELECT COUNT(*) AS n FROM agents
+               WHERE id != $1
+                 AND COALESCE(local_alias, peer_asserted_alias) = $2"#,
+        )
+        .bind(exclude.as_str())
+        .bind(alias.as_str())
+        .fetch_one(&self.pool)
+        .await?;
+        let n: i64 = row.try_get("n")?;
+        Ok(n.max(0) as u64)
+    }
+
     async fn set_trust(&self, id: &AgentId, trust: TrustLevel) -> Result<()> {
         sqlx::query(r#"UPDATE agents SET trust_level = $1 WHERE id = $2"#)
             .bind(trust.as_str())

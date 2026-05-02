@@ -8,14 +8,14 @@
 //! consistent.
 
 use async_trait::async_trait;
-use hermod_core::{AgentId, PresenceStatus, Timestamp};
+use hermod_core::{AgentId, McpSessionId, MessageId, PresenceStatus, SessionLabel, Timestamp};
 use sqlx::{PgPool, Row};
 use std::str::FromStr;
 
 use crate::error::{Result, StorageError};
 use crate::repositories::presence::{
-    AgentPresenceRecord, AgentPresenceRepository, DetachOutcome, McpSession, McpSessionRepository,
-    ObservedPresence, PruneOutcome,
+    AgentPresenceRecord, AgentPresenceRepository, AttachOutcome, AttachParams, CursorAdvance,
+    DetachOutcome, McpSession, McpSessionRepository, ObservedPresence, PruneOutcome,
 };
 
 #[derive(Debug, Clone)]
@@ -130,40 +130,129 @@ impl PostgresMcpSessionRepository {
 
 #[async_trait]
 impl McpSessionRepository for PostgresMcpSessionRepository {
-    async fn attach_atomic(&self, session: &McpSession, ttl_ms: i64) -> Result<bool> {
+    async fn attach(&self, params: AttachParams) -> Result<AttachOutcome> {
         let mut tx = self.pool.begin().await?;
-        let cutoff = session.attached_at.unix_ms() - ttl_ms;
-        let row =
+        let cutoff = params.attached_at.unix_ms() - params.ttl_ms;
+
+        let prior_live: i64 =
             sqlx::query(r#"SELECT COUNT(*) AS n FROM mcp_sessions WHERE last_heartbeat_at > $1"#)
                 .bind(cutoff)
                 .fetch_one(&mut *tx)
+                .await?
+                .try_get("n")?;
+
+        let mut carried_message: Option<MessageId> = None;
+        let mut carried_confirmation: Option<String> = None;
+        let mut carried_resolved: Option<u64> = None;
+        let mut resumed = false;
+        if let Some(label) = params.session_label.as_ref()
+            && let Some(row) = sqlx::query(
+                r#"SELECT session_id, last_heartbeat_at,
+                          last_message_id, last_confirmation_id, last_resolved_seq
+                     FROM mcp_sessions
+                    WHERE agent_id = $1 AND session_label = $2"#,
+            )
+            .bind(params.agent_id.as_str())
+            .bind(label.as_str())
+            .fetch_optional(&mut *tx)
+            .await?
+        {
+            let last_heartbeat: i64 = row.try_get("last_heartbeat_at")?;
+            if last_heartbeat > cutoff {
+                let live_session_id = McpSessionId::from_raw(row.try_get("session_id")?);
+                let last_heartbeat_at =
+                    Timestamp::from_unix_ms(last_heartbeat).map_err(StorageError::Core)?;
+                tx.rollback().await?;
+                return Ok(AttachOutcome::LabelInUse {
+                    live_session_id,
+                    last_heartbeat_at,
+                });
+            }
+            carried_message = row
+                .try_get::<Option<String>, _>("last_message_id")?
+                .map(|s| s.parse::<MessageId>())
+                .transpose()
+                .map_err(StorageError::Core)?;
+            carried_confirmation = row.try_get::<Option<String>, _>("last_confirmation_id")?;
+            carried_resolved = row
+                .try_get::<Option<i64>, _>("last_resolved_seq")?
+                .map(|n| n.max(0) as u64);
+            let stale_id: String = row.try_get("session_id")?;
+            sqlx::query(r#"DELETE FROM mcp_sessions WHERE session_id = $1"#)
+                .bind(&stale_id)
+                .execute(&mut *tx)
                 .await?;
-        let prior: i64 = row.try_get("n")?;
+            resumed = true;
+        }
+
         sqlx::query(
             r#"INSERT INTO mcp_sessions
-                  (session_id, agent_id, attached_at, last_heartbeat_at, client_name, client_version)
-               VALUES ($1, $2, $3, $4, $5, $6)"#,
+                  (session_id, agent_id, session_label, attached_at, last_heartbeat_at,
+                   client_name, client_version,
+                   last_message_id, last_confirmation_id, last_resolved_seq)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"#,
         )
-        .bind(&session.session_id)
-        .bind(session.agent_id.as_str())
-        .bind(session.attached_at.unix_ms())
-        .bind(session.last_heartbeat_at.unix_ms())
-        .bind(session.client_name.as_deref())
-        .bind(session.client_version.as_deref())
+        .bind(params.session_id.as_str())
+        .bind(params.agent_id.as_str())
+        .bind(params.session_label.as_ref().map(|l| l.as_str()))
+        .bind(params.attached_at.unix_ms())
+        .bind(params.attached_at.unix_ms())
+        .bind(params.client_name.as_deref())
+        .bind(params.client_version.as_deref())
+        .bind(carried_message.as_ref().map(|m| m.to_string()))
+        .bind(carried_confirmation.as_deref())
+        .bind(carried_resolved.map(|n| n as i64))
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok(prior > 0)
+
+        Ok(AttachOutcome::Inserted {
+            session: McpSession {
+                session_id: params.session_id,
+                agent_id: params.agent_id,
+                session_label: params.session_label,
+                attached_at: params.attached_at,
+                last_heartbeat_at: params.attached_at,
+                client_name: params.client_name,
+                client_version: params.client_version,
+                last_message_id: carried_message,
+                last_confirmation_id: carried_confirmation,
+                last_resolved_seq: carried_resolved,
+            },
+            was_live: prior_live > 0,
+            resumed,
+        })
     }
 
-    async fn heartbeat(&self, session_id: &str, now: Timestamp) -> Result<bool> {
+    async fn heartbeat(&self, session_id: &McpSessionId, now: Timestamp) -> Result<bool> {
         let res = sqlx::query(
             r#"UPDATE mcp_sessions
                SET last_heartbeat_at = $1
                WHERE session_id = $2"#,
         )
         .bind(now.unix_ms())
-        .bind(session_id)
+        .bind(session_id.as_str())
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    async fn cursor_advance(
+        &self,
+        session_id: &McpSessionId,
+        advance: &CursorAdvance,
+    ) -> Result<bool> {
+        let res = sqlx::query(
+            r#"UPDATE mcp_sessions
+                  SET last_message_id      = COALESCE($1, last_message_id),
+                      last_confirmation_id = COALESCE($2, last_confirmation_id),
+                      last_resolved_seq    = COALESCE($3, last_resolved_seq)
+                WHERE session_id = $4"#,
+        )
+        .bind(advance.last_message_id.as_ref().map(|m| m.to_string()))
+        .bind(advance.last_confirmation_id.as_deref())
+        .bind(advance.last_resolved_seq.map(|n| n as i64))
+        .bind(session_id.as_str())
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected() > 0)
@@ -171,7 +260,7 @@ impl McpSessionRepository for PostgresMcpSessionRepository {
 
     async fn detach_atomic(
         &self,
-        session_id: &str,
+        session_id: &McpSessionId,
         now: Timestamp,
         ttl_ms: i64,
     ) -> Result<DetachOutcome> {
@@ -184,7 +273,7 @@ impl McpSessionRepository for PostgresMcpSessionRepository {
                 .await?;
         let prior: i64 = prior_row.try_get("n")?;
         sqlx::query(r#"DELETE FROM mcp_sessions WHERE session_id = $1"#)
-            .bind(session_id)
+            .bind(session_id.as_str())
             .execute(&mut *tx)
             .await?;
         let post_row =
@@ -225,6 +314,42 @@ impl McpSessionRepository for PostgresMcpSessionRepository {
         Ok(n.max(0) as u64)
     }
 
+    async fn list_for_agent(
+        &self,
+        agent_id: &AgentId,
+        now: Timestamp,
+        ttl_ms: i64,
+    ) -> Result<Vec<McpSession>> {
+        let cutoff = now.unix_ms() - ttl_ms;
+        let rows = sqlx::query(
+            r#"SELECT session_id, agent_id, session_label, attached_at, last_heartbeat_at,
+                      client_name, client_version,
+                      last_message_id, last_confirmation_id, last_resolved_seq
+                 FROM mcp_sessions
+                WHERE agent_id = $1 AND last_heartbeat_at > $2
+                ORDER BY attached_at ASC"#,
+        )
+        .bind(agent_id.as_str())
+        .bind(cutoff)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_mcp_session).collect()
+    }
+
+    async fn get(&self, session_id: &McpSessionId) -> Result<Option<McpSession>> {
+        let row = sqlx::query(
+            r#"SELECT session_id, agent_id, session_label, attached_at, last_heartbeat_at,
+                      client_name, client_version,
+                      last_message_id, last_confirmation_id, last_resolved_seq
+                 FROM mcp_sessions
+                WHERE session_id = $1"#,
+        )
+        .bind(session_id.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_mcp_session).transpose()
+    }
+
     async fn prune_with_transition(&self, now: Timestamp, ttl_ms: i64) -> Result<PruneOutcome> {
         let mut tx = self.pool.begin().await?;
         let cutoff = now.unix_ms() - ttl_ms;
@@ -252,6 +377,41 @@ impl McpSessionRepository for PostgresMcpSessionRepository {
             is_live: post > 0,
         })
     }
+}
+
+fn row_to_mcp_session(row: sqlx::postgres::PgRow) -> Result<McpSession> {
+    let session_id = McpSessionId::from_raw(row.try_get("session_id")?);
+    let agent_id = AgentId::from_str(row.try_get("agent_id")?).map_err(StorageError::Core)?;
+    let session_label = row
+        .try_get::<Option<String>, _>("session_label")?
+        .map(|s| s.parse::<SessionLabel>())
+        .transpose()
+        .map_err(StorageError::Core)?;
+    let attached_at =
+        Timestamp::from_unix_ms(row.try_get("attached_at")?).map_err(StorageError::Core)?;
+    let last_heartbeat_at =
+        Timestamp::from_unix_ms(row.try_get("last_heartbeat_at")?).map_err(StorageError::Core)?;
+    let last_message_id = row
+        .try_get::<Option<String>, _>("last_message_id")?
+        .map(|s| s.parse::<MessageId>())
+        .transpose()
+        .map_err(StorageError::Core)?;
+    let last_confirmation_id = row.try_get::<Option<String>, _>("last_confirmation_id")?;
+    let last_resolved_seq = row
+        .try_get::<Option<i64>, _>("last_resolved_seq")?
+        .map(|n| n.max(0) as u64);
+    Ok(McpSession {
+        session_id,
+        agent_id,
+        session_label,
+        attached_at,
+        last_heartbeat_at,
+        client_name: row.try_get("client_name")?,
+        client_version: row.try_get("client_version")?,
+        last_message_id,
+        last_confirmation_id,
+        last_resolved_seq,
+    })
 }
 
 fn row_to_presence(row: sqlx::postgres::PgRow) -> Result<AgentPresenceRecord> {

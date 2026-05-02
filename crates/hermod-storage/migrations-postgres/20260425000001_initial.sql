@@ -142,16 +142,25 @@ CREATE TABLE agent_presence (
     peer_live_expires_at      BIGINT
 );
 
+-- See sqlite migration for column-purpose detail. Postgres parity:
+-- partial unique index uses `WHERE session_label IS NOT NULL`,
+-- equivalent semantics to the sqlite expression.
 CREATE TABLE mcp_sessions (
-    session_id          TEXT NOT NULL PRIMARY KEY,
-    agent_id            TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
-    attached_at         BIGINT NOT NULL,
-    last_heartbeat_at   BIGINT NOT NULL,
-    client_name         TEXT,
-    client_version      TEXT
+    session_id            TEXT NOT NULL PRIMARY KEY,
+    agent_id              TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    session_label         TEXT,
+    attached_at           BIGINT NOT NULL,
+    last_heartbeat_at     BIGINT NOT NULL,
+    client_name           TEXT,
+    client_version        TEXT,
+    last_message_id       TEXT,
+    last_confirmation_id  TEXT,
+    last_resolved_seq     BIGINT
 );
 CREATE INDEX idx_mcp_sessions_heartbeat ON mcp_sessions(last_heartbeat_at);
 CREATE INDEX idx_mcp_sessions_agent ON mcp_sessions(agent_id, last_heartbeat_at);
+CREATE UNIQUE INDEX idx_mcp_sessions_agent_label
+    ON mcp_sessions(agent_id, session_label) WHERE session_label IS NOT NULL;
 
 CREATE TABLE workspaces (
     id              TEXT NOT NULL PRIMARY KEY,

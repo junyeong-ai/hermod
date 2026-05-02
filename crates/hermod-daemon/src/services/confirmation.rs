@@ -104,6 +104,7 @@ impl ConfirmationService {
                 from_local_alias: proj.local,
                 from_peer_alias: proj.peer,
                 from_alias: proj.effective,
+                from_alias_ambiguous: proj.effective_ambiguous,
                 from_host_pubkey: proj.host_pubkey_hex,
                 intent: r.intent.as_str().to_string(),
                 sensitivity: r.sensitivity,

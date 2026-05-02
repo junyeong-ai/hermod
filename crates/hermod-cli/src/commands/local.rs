@@ -19,7 +19,9 @@ use anyhow::{Context, Result};
 use clap::Args;
 use hermod_core::{AgentAlias, AgentId};
 use hermod_daemon::local_agent;
-use hermod_protocol::ipc::methods::{LocalAddParams, LocalRemoveParams, LocalRotateParams};
+use hermod_protocol::ipc::methods::{
+    LocalAddParams, LocalRemoveParams, LocalRotateParams, LocalSessionsParams,
+};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -168,6 +170,15 @@ pub async fn rotate(args: RotateArgs, target: &ClientTarget) -> Result<()> {
         .await?;
     println!("rotated bearer for {}", res.agent_id);
     println!("  new token: {}", res.bearer_token);
+    Ok(())
+}
+
+pub async fn sessions(target: &ClientTarget) -> Result<()> {
+    let mut client = target.connect().await?;
+    let res = client
+        .local_sessions(LocalSessionsParams::default())
+        .await?;
+    println!("{}", serde_json::to_string_pretty(&res)?);
     Ok(())
 }
 

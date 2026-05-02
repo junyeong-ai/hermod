@@ -116,6 +116,18 @@ pub trait AgentRepository: Send + Sync + std::fmt::Debug {
     /// Peers with a federation endpoint registered.
     async fn list_federated(&self) -> Result<Vec<AgentRecord>>;
 
+    /// Count agents whose effective alias (local override winning,
+    /// peer-asserted as fallback) equals `alias`, *excluding* the
+    /// `exclude` row itself. Used by sender projections to surface
+    /// the `from_alias_ambiguous` flag — receivers see "this name
+    /// isn't unique on your roster" without the daemon needing to
+    /// compute the full collision set.
+    async fn count_with_effective_alias(
+        &self,
+        alias: &AgentAlias,
+        exclude: &AgentId,
+    ) -> Result<u64>;
+
     async fn set_trust(&self, id: &AgentId, trust: TrustLevel) -> Result<()>;
     async fn touch(&self, id: &AgentId, at: Timestamp) -> Result<()>;
 

@@ -16,7 +16,9 @@
 
 #![cfg(feature = "postgres")]
 
-use hermod_core::{AgentAlias, AgentId, PresenceStatus, PubkeyBytes, Timestamp, TrustLevel};
+use hermod_core::{
+    AgentAlias, AgentId, McpSessionId, PresenceStatus, PubkeyBytes, Timestamp, TrustLevel,
+};
 use hermod_storage::AgentRepository;
 use hermod_storage::backends::postgres::{
     PostgresAgentPresenceRepository, PostgresAgentRepository, PostgresBriefRepository,
@@ -25,7 +27,7 @@ use hermod_storage::backends::postgres::{
 use hermod_storage::repositories::agents::AgentRecord;
 use hermod_storage::repositories::briefs::{BriefRecord, BriefRepository};
 use hermod_storage::repositories::presence::{
-    AgentPresenceRepository, McpSession, McpSessionRepository, ObservedPresence,
+    AgentPresenceRepository, AttachOutcome, AttachParams, McpSessionRepository, ObservedPresence,
 };
 use hermod_storage::repositories::rate_limit::RateLimitRepository;
 use sqlx::Executor;
@@ -361,22 +363,34 @@ async fn mcp_attach_detach_track_liveness_correctly() {
     let agent = fake_agent(20);
     seed_agent(&pool, agent.clone()).await;
 
-    let s1 = McpSession {
-        session_id: "sess-1".into(),
+    let p1 = AttachParams {
+        session_id: McpSessionId::from_raw("sess-1".into()),
         agent_id: agent.clone(),
+        session_label: None,
         attached_at: now,
-        last_heartbeat_at: now,
         client_name: Some("claude".into()),
         client_version: Some("0.1".into()),
+        ttl_ms,
     };
-    let s2 = McpSession {
-        session_id: "sess-2".into(),
-        ..s1.clone()
+    let p2 = AttachParams {
+        session_id: McpSessionId::from_raw("sess-2".into()),
+        ..p1.clone()
     };
 
-    let was_live_before_first = mcp.attach_atomic(&s1, ttl_ms).await.unwrap();
-    assert!(!was_live_before_first, "no sessions before first attach");
-    let was_live_before_second = mcp.attach_atomic(&s2, ttl_ms).await.unwrap();
+    let outcome_first = mcp.attach(p1).await.unwrap();
+    let was_live_before_first = matches!(
+        outcome_first,
+        AttachOutcome::Inserted {
+            was_live: false,
+            ..
+        }
+    );
+    assert!(was_live_before_first, "no sessions before first attach");
+    let outcome_second = mcp.attach(p2).await.unwrap();
+    let was_live_before_second = matches!(
+        outcome_second,
+        AttachOutcome::Inserted { was_live: true, .. }
+    );
     assert!(
         was_live_before_second,
         "first session is live when second attaches"
@@ -394,15 +408,17 @@ async fn mcp_attach_detach_track_liveness_correctly() {
 
     // Heartbeat keeps the session live.
     let later = Timestamp::from_unix_ms(now.unix_ms() + 30_000).unwrap();
-    assert!(mcp.heartbeat("sess-1", later).await.unwrap());
+    let sess1 = McpSessionId::from_raw("sess-1".into());
+    let sess2 = McpSessionId::from_raw("sess-2".into());
+    assert!(mcp.heartbeat(&sess1, later).await.unwrap());
 
     // Detach one — should still be live (the other is fresh).
-    let outcome = mcp.detach_atomic("sess-1", later, ttl_ms).await.unwrap();
+    let outcome = mcp.detach_atomic(&sess1, later, ttl_ms).await.unwrap();
     assert!(outcome.was_live);
     assert!(outcome.is_live);
 
     // Detach the other — last live session goes away.
-    let outcome = mcp.detach_atomic("sess-2", later, ttl_ms).await.unwrap();
+    let outcome = mcp.detach_atomic(&sess2, later, ttl_ms).await.unwrap();
     assert!(outcome.was_live);
     assert!(!outcome.is_live);
 }
@@ -420,17 +436,15 @@ async fn mcp_prune_with_transition_drops_stale_and_reports_was_live_correctly() 
     let agent = fake_agent(22);
     seed_agent(&pool, agent.clone()).await;
 
-    mcp.attach_atomic(
-        &McpSession {
-            session_id: "stale".into(),
-            agent_id: agent,
-            attached_at: attached,
-            last_heartbeat_at: attached,
-            client_name: None,
-            client_version: None,
-        },
+    mcp.attach(AttachParams {
+        session_id: McpSessionId::from_raw("stale".into()),
+        agent_id: agent,
+        session_label: None,
+        attached_at: attached,
+        client_name: None,
+        client_version: None,
         ttl_ms,
-    )
+    })
     .await
     .unwrap();
 

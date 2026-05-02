@@ -8,6 +8,7 @@ pub mod capability;
 pub mod envelope;
 pub mod error;
 pub mod identity;
+pub mod mcp_session;
 pub mod time;
 pub mod workspace;
 
@@ -20,5 +21,6 @@ pub use envelope::{
 };
 pub use error::HermodError;
 pub use identity::{AgentAddress, AgentAlias, AgentId, Endpoint, TrustLevel, WssEndpoint};
+pub use mcp_session::{McpSessionId, SESSION_LABEL_MAX_LEN, SessionLabel};
 pub use time::Timestamp;
 pub use workspace::WorkspaceVisibility;

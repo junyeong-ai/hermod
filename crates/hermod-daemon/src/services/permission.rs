@@ -36,7 +36,7 @@
 //! semantics to the Channels reference: "whichever side answers first".
 
 use async_trait::async_trait;
-use hermod_core::{AgentId, Timestamp};
+use hermod_core::{AgentId, McpSessionId, Timestamp};
 use hermod_crypto::short_id;
 use hermod_protocol::ipc::methods::{
     PermissionBehavior, PermissionListParams, PermissionListResolvedParams,
@@ -137,6 +137,16 @@ struct OpenRequest {
     /// gate on caller == owner so distinct hosted agents have
     /// independent permission queues.
     owner: AgentId,
+    /// MCP session that originated this prompt. `None` for
+    /// `Relayed` origin (we don't know — and don't need to know —
+    /// which session on the originating peer opened the prompt;
+    /// the relayed verdict ships back as a `PermissionResponse`
+    /// envelope to the originator). `Some(id)` for `Local` origin
+    /// where the MCP server passed `session_id` on the request —
+    /// list_resolved / list filtered by `session_id` only see
+    /// matches, so sibling Claude Code windows never observe each
+    /// other's verdicts.
+    owner_session: Option<McpSessionId>,
 }
 
 impl OpenRequest {
@@ -162,6 +172,11 @@ struct ResolvedEntry {
     /// caller for the same multi-tenant isolation reason as
     /// `OpenRequest.owner`.
     owner: AgentId,
+    /// Session that originated the prompt. `list_resolved` filtered
+    /// by `session_id` only surfaces verdicts whose origin matches —
+    /// or has `None` (e.g. relayed verdicts that have no per-session
+    /// binding on this side). Mirrors [`OpenRequest::owner_session`].
+    owner_session: Option<McpSessionId>,
 }
 
 impl ResolvedEntry {
@@ -206,6 +221,7 @@ impl State {
                 PermissionOutcome::Expired,
                 now,
                 req.owner.clone(),
+                req.owner_session.clone(),
             );
         }
         expired
@@ -217,6 +233,7 @@ impl State {
         outcome: PermissionOutcome,
         at: Timestamp,
         owner: AgentId,
+        owner_session: Option<McpSessionId>,
     ) {
         self.next_seq = self.next_seq.saturating_add(1);
         let entry = ResolvedEntry {
@@ -225,6 +242,7 @@ impl State {
             outcome,
             resolved_at: at,
             owner,
+            owner_session,
         };
         self.resolved.push_back(entry);
         while self.resolved.len() > RESOLVED_RING_CAP {
@@ -345,6 +363,7 @@ impl PermissionService {
                     expires_at,
                     origin: PromptOrigin::Local,
                     owner: owner.clone(),
+                    owner_session: params.session_id.clone(),
                 },
             );
             (id, expired)
@@ -474,7 +493,13 @@ impl PermissionService {
                     PermissionBehavior::Allow => PermissionOutcome::Allow,
                     PermissionBehavior::Deny => PermissionOutcome::Deny,
                 };
-                state.push_resolved(request_id.clone(), outcome, now, req.owner.clone());
+                state.push_resolved(
+                    request_id.clone(),
+                    outcome,
+                    now,
+                    req.owner.clone(),
+                    req.owner_session.clone(),
+                );
             }
             removed
         };
@@ -554,6 +579,12 @@ impl PermissionService {
                 expires_at,
                 origin: PromptOrigin::Relayed { from },
                 owner: recipient,
+                // Relayed prompts have no per-session binding on this
+                // side: the originating peer's session is opaque to us
+                // and the verdict ships back as an envelope to the
+                // originator regardless. Surfaces in `list_resolved`
+                // for any session_id filter on this side.
+                owner_session: None,
             },
         );
         Ok(())
@@ -610,7 +641,13 @@ impl PermissionService {
                     PermissionBehavior::Allow => PermissionOutcome::Allow,
                     PermissionBehavior::Deny => PermissionOutcome::Deny,
                 };
-                state.push_resolved(params.request_id.clone(), outcome, now, req.owner.clone());
+                state.push_resolved(
+                    params.request_id.clone(),
+                    outcome,
+                    now,
+                    req.owner.clone(),
+                    req.owner_session.clone(),
+                );
             }
             (removed, expired)
         };
@@ -707,10 +744,24 @@ impl PermissionService {
             // Per-agent isolation: only entries owned by the caller
             // are visible. Without this, agent A's MCP cursor would
             // observe agent B's verdicts.
+            //
+            // Per-session isolation (axis 2): when `session_id` is
+            // set, additionally drop verdicts that originated from
+            // *other* MCP sessions of the same agent. Sibling Claude
+            // Code windows never observe each other's tool-call
+            // verdicts. Verdicts with no `owner_session` (relayed
+            // prompts) surface for every session filter — they're
+            // not bound to any local instance.
+            let want_session = params.session_id.as_ref();
             let resolved: Vec<PermissionResolvedView> = state
                 .resolved
                 .iter()
                 .filter(|e| e.seq > after && e.owner == caller)
+                .filter(|e| match (&e.owner_session, want_session) {
+                    (_, None) => true,
+                    (Some(o), Some(w)) => o == w,
+                    (None, Some(_)) => true,
+                })
                 .take(cap)
                 .map(ResolvedEntry::view)
                 .collect();
@@ -744,14 +795,24 @@ impl PermissionService {
             )
         })?;
         let now = Timestamp::now();
+        let want_session = params.session_id.as_ref();
         let (requests, expired) = {
             let mut state = self.state.lock().await;
             let expired = state.purge_expired(now);
             // Per-agent isolation: filter to the caller's own queue.
+            // Per-session isolation: when `session_id` is set, sibling
+            // sessions of the same agent are hidden. Same surfacing
+            // rules as `list_resolved` — relayed prompts (no session
+            // binding) appear for every filter.
             let mut requests: Vec<PermissionRequestView> = state
                 .by_id
                 .values()
                 .filter(|r| r.owner == caller)
+                .filter(|r| match (&r.owner_session, want_session) {
+                    (_, None) => true,
+                    (Some(o), Some(w)) => o == w,
+                    (None, Some(_)) => true,
+                })
                 .map(OpenRequest::view)
                 .collect();
             // Stable, oldest-first ordering — operators triage in arrival order.
@@ -841,6 +902,7 @@ mod tests {
             tool_name: tool.into(),
             description: format!("run {tool}"),
             input_preview: "{\"command\":\"ls\"}".into(),
+            session_id: None,
         }
     }
 
@@ -928,7 +990,10 @@ mod tests {
             let _r3 = svc.request(req_params("Edit")).await.unwrap();
 
             let res = svc
-                .list(PermissionListParams { limit: Some(2) })
+                .list(PermissionListParams {
+                    limit: Some(2),
+                    session_id: None,
+                })
                 .await
                 .unwrap();
             assert_eq!(res.requests.len(), 2);
@@ -958,9 +1023,12 @@ mod tests {
         let b_view = with_caller(caller_b.clone(), {
             let svc = svc.clone();
             async move {
-                svc.list(PermissionListParams { limit: None })
-                    .await
-                    .unwrap()
+                svc.list(PermissionListParams {
+                    limit: None,
+                    session_id: None,
+                })
+                .await
+                .unwrap()
             }
         })
         .await;
@@ -989,9 +1057,12 @@ mod tests {
 
         // A's prompt is still pending after B's failed respond.
         let a_view = with_caller(caller_a, async move {
-            svc.list(PermissionListParams { limit: None })
-                .await
-                .unwrap()
+            svc.list(PermissionListParams {
+                limit: None,
+                session_id: None,
+            })
+            .await
+            .unwrap()
         })
         .await;
         assert_eq!(a_view.requests.len(), 1);
@@ -1019,6 +1090,7 @@ mod tests {
                             expires_at: Timestamp::now().offset_by_ms(60_000),
                             origin: PromptOrigin::Local,
                             owner: owner.clone(),
+                            owner_session: None,
                         },
                     );
                 }
@@ -1065,6 +1137,7 @@ mod tests {
                 .list_resolved(PermissionListResolvedParams {
                     after_seq: Some(after),
                     limit: None,
+                    session_id: None,
                 })
                 .await
                 .unwrap();
@@ -1096,6 +1169,7 @@ mod tests {
                         expires_at: Timestamp::now().offset_by_ms(-60_000),
                         origin: PromptOrigin::Local,
                         owner: owner.clone(),
+                        owner_session: None,
                     },
                 );
             }
@@ -1164,6 +1238,7 @@ mod tests {
                             expires_at: Timestamp::now().offset_by_ms(-1_000),
                             origin: PromptOrigin::Local,
                             owner: owner.clone(),
+                            owner_session: None,
                         },
                     );
                 }
@@ -1183,5 +1258,122 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].action, "permission.expired");
         assert_eq!(entries[0].target.as_deref(), Some("aacde"));
+    }
+
+    /// Per-session isolation (axis 2): two MCP sessions of the *same*
+    /// agent must not see each other's verdicts. A session-scoped
+    /// `permission.list_resolved` returns only entries originated by
+    /// that session (plus relayed prompts which carry no session
+    /// binding). The unfiltered call (CLI path) sees everything for
+    /// the agent.
+    #[tokio::test]
+    async fn list_resolved_isolates_by_session() {
+        use hermod_protocol::ipc::methods::PermissionListResolvedParams;
+
+        let (svc, _db, caller) = make_service().await;
+        let session_a = McpSessionId::from_raw("alpha".into());
+        let session_b = McpSessionId::from_raw("beta".into());
+
+        // Open a prompt under each session, then resolve both.
+        with_caller(caller.clone(), {
+            let svc = svc.clone();
+            let session_a = session_a.clone();
+            let session_b = session_b.clone();
+            async move {
+                let mut p_a = req_params("Bash");
+                p_a.session_id = Some(session_a.clone());
+                let r_a = svc.request(p_a).await.unwrap();
+                let mut p_b = req_params("Write");
+                p_b.session_id = Some(session_b.clone());
+                let r_b = svc.request(p_b).await.unwrap();
+
+                svc.respond(PermissionRespondParams {
+                    request_id: r_a.request_id.clone(),
+                    behavior: PermissionBehavior::Allow,
+                })
+                .await
+                .unwrap();
+                svc.respond(PermissionRespondParams {
+                    request_id: r_b.request_id.clone(),
+                    behavior: PermissionBehavior::Deny,
+                })
+                .await
+                .unwrap();
+
+                // Session A only sees A's verdict.
+                let view_a = svc
+                    .list_resolved(PermissionListResolvedParams {
+                        after_seq: None,
+                        limit: None,
+                        session_id: Some(session_a.clone()),
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(view_a.resolved.len(), 1);
+                assert_eq!(view_a.resolved[0].request_id, r_a.request_id);
+
+                // Session B only sees B's verdict.
+                let view_b = svc
+                    .list_resolved(PermissionListResolvedParams {
+                        after_seq: None,
+                        limit: None,
+                        session_id: Some(session_b.clone()),
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(view_b.resolved.len(), 1);
+                assert_eq!(view_b.resolved[0].request_id, r_b.request_id);
+
+                // Unfiltered call (CLI path) sees both.
+                let view_all = svc
+                    .list_resolved(PermissionListResolvedParams::default())
+                    .await
+                    .unwrap();
+                assert_eq!(view_all.resolved.len(), 2);
+            }
+        })
+        .await;
+    }
+
+    /// Per-session filter on `permission.list` mirrors `list_resolved`.
+    #[tokio::test]
+    async fn list_isolates_by_session() {
+        let (svc, _db, caller) = make_service().await;
+        let session_a = McpSessionId::from_raw("alpha".into());
+        let session_b = McpSessionId::from_raw("beta".into());
+
+        with_caller(caller.clone(), {
+            let svc = svc.clone();
+            let session_a = session_a.clone();
+            let session_b = session_b.clone();
+            async move {
+                let mut p_a = req_params("Bash");
+                p_a.session_id = Some(session_a.clone());
+                let r_a = svc.request(p_a).await.unwrap();
+                let mut p_b = req_params("Write");
+                p_b.session_id = Some(session_b.clone());
+                let _r_b = svc.request(p_b).await.unwrap();
+
+                let view_a = svc
+                    .list(PermissionListParams {
+                        limit: None,
+                        session_id: Some(session_a),
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(view_a.requests.len(), 1);
+                assert_eq!(view_a.requests[0].request_id, r_a.request_id);
+
+                let view_all = svc
+                    .list(PermissionListParams {
+                        limit: None,
+                        session_id: None,
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(view_all.requests.len(), 2);
+            }
+        })
+        .await;
     }
 }

@@ -46,6 +46,11 @@ pub enum ServiceError {
 
     #[error("not found")]
     NotFound,
+
+    /// A unique constraint or live-state invariant rejected the
+    /// operation. Maps to JSON-RPC `code::CONFLICT` (-32005).
+    #[error("conflict: {0}")]
+    Conflict(String),
 }
 
 /// Append an audit entry, overlaying ambient context from

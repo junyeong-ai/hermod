@@ -82,9 +82,9 @@ pub use repositories::messages::{
     InboxFilter, MessagePruneOutcome, MessageRecord, MessageRepository, TransitionOutcome,
 };
 pub use repositories::presence::{
-    AgentPresenceRecord, AgentPresenceRepository, DetachOutcome, HEARTBEAT_INTERVAL_SECS,
-    McpSession, McpSessionRepository, ObservedPresence, PEER_LIVE_TTL_SECS, PruneOutcome,
-    SESSION_TTL_SECS, effective_status,
+    AgentPresenceRecord, AgentPresenceRepository, AttachOutcome, AttachParams, CursorAdvance,
+    DetachOutcome, HEARTBEAT_INTERVAL_SECS, McpSession, McpSessionRepository, ObservedPresence,
+    PEER_LIVE_TTL_SECS, PruneOutcome, SESSION_TTL_SECS, effective_status,
 };
 pub use repositories::rate_limit::RateLimitRepository;
 pub use repositories::workspaces::{

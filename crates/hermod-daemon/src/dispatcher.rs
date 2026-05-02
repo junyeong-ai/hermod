@@ -111,6 +111,10 @@ impl Dispatcher {
                 let p = parse_params(params)?;
                 to_value(self.mcp.heartbeat(p).await)
             }
+            method::MCP_CURSOR_ADVANCE => {
+                let p = parse_params(params)?;
+                to_value(self.mcp.cursor_advance(p).await)
+            }
 
             method::WORKSPACE_CREATE => {
                 let p = parse_params(params)?;
@@ -232,6 +236,10 @@ impl Dispatcher {
                 let p = parse_params(params)?;
                 to_value(self.local_agents.rotate(p).await)
             }
+            method::LOCAL_SESSIONS => {
+                let p = parse_params_or_default(params)?;
+                to_value(self.mcp.list_sessions(p).await)
+            }
 
             method::AUDIT_QUERY => {
                 let p = parse_params_or_default(params)?;
@@ -330,6 +338,7 @@ fn service_to_rpc_err(e: ServiceError) -> RpcError {
         ServiceError::Crypto(_) => (code::CRYPTO, format!("{e}")),
         ServiceError::InvalidParam(_) => (code::INVALID_PARAMS, format!("{e}")),
         ServiceError::NotFound => (code::NOT_FOUND, "not found".to_string()),
+        ServiceError::Conflict(_) => (code::CONFLICT, format!("{e}")),
         ServiceError::Routing(re) => match re {
             RoutingError::RecipientNotFound(_) => (code::NOT_FOUND, format!("{e}")),
             RoutingError::Blocked | RoutingError::Unauthorized(_) => {

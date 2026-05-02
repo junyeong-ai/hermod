@@ -249,6 +249,20 @@ impl DaemonClient {
         self.call(methods::method::MCP_HEARTBEAT, params).await
     }
 
+    pub async fn mcp_cursor_advance(
+        &mut self,
+        params: methods::McpCursorAdvanceParams,
+    ) -> Result<methods::McpCursorAdvanceResult> {
+        self.call(methods::method::MCP_CURSOR_ADVANCE, params).await
+    }
+
+    pub async fn local_sessions(
+        &mut self,
+        params: methods::LocalSessionsParams,
+    ) -> Result<methods::LocalSessionsResult> {
+        self.call(methods::method::LOCAL_SESSIONS, params).await
+    }
+
     pub async fn workspace_create(
         &mut self,
         params: methods::WorkspaceCreateParams,

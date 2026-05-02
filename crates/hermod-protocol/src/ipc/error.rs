@@ -15,6 +15,10 @@ pub mod code {
     pub const NOT_FOUND: i32 = -32002;
     pub const STORAGE: i32 = -32003;
     pub const CRYPTO: i32 = -32004;
+    /// Operation rejected because a unique constraint or live-state
+    /// invariant is already held — e.g. an `mcp.attach` whose
+    /// `session_label` is in use by another live session.
+    pub const CONFLICT: i32 = -32005;
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

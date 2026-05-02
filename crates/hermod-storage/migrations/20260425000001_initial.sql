@@ -254,16 +254,38 @@ CREATE TABLE agent_presence (
 -- bearer authenticated as on `mcp.attach`. References `agents(id)`
 -- for FK integrity; cascade-delete fires if the agent is removed
 -- via `local rm`.
+--
+-- `session_label` is an operator-supplied stable nickname (see
+-- `HERMOD_SESSION_LABEL`). When a fresh `mcp.attach` arrives with
+-- a label that already has a live row for the same agent, the
+-- daemon evicts the prior session and reuses its row — preserving
+-- the cursors below across MCP process restart. The partial unique
+-- index keys this resumption logic.
+--
+-- The three `last_*` columns are server-side persistence of MCP
+-- delivery cursors. The MCP client calls `mcp.cursor_advance` after
+-- writing a batch to stdout so the position survives restart and
+-- multiple Claude Code windows of the same agent observe distinct
+-- cursors:
+--   * `last_message_id`        — inbox emitter (Direct/File)
+--   * `last_confirmation_id`   — held-confirmation emitter
+--   * `last_resolved_seq`      — permission verdict emitter
 CREATE TABLE mcp_sessions (
-    session_id          TEXT NOT NULL PRIMARY KEY,
-    agent_id            TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
-    attached_at         INTEGER NOT NULL,
-    last_heartbeat_at   INTEGER NOT NULL,
-    client_name         TEXT,
-    client_version      TEXT
+    session_id            TEXT NOT NULL PRIMARY KEY,
+    agent_id              TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    session_label         TEXT,
+    attached_at           INTEGER NOT NULL,
+    last_heartbeat_at     INTEGER NOT NULL,
+    client_name           TEXT,
+    client_version        TEXT,
+    last_message_id       TEXT,
+    last_confirmation_id  TEXT,
+    last_resolved_seq     INTEGER
 );
 CREATE INDEX idx_mcp_sessions_heartbeat ON mcp_sessions(last_heartbeat_at);
 CREATE INDEX idx_mcp_sessions_agent ON mcp_sessions(agent_id, last_heartbeat_at);
+CREATE UNIQUE INDEX idx_mcp_sessions_agent_label
+    ON mcp_sessions(agent_id, session_label) WHERE session_label IS NOT NULL;
 
 -- Workspaces: a logical group container. Either:
 --   private — secret = 32-byte PSK; workspace_id and channel keys are

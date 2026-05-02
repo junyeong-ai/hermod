@@ -25,6 +25,12 @@ pub enum HermodError {
 
     #[error("invalid capability token: {0}")]
     InvalidCapabilityToken(String),
+
+    #[error("invalid mcp session id: {0}")]
+    InvalidMcpSessionId(String),
+
+    #[error("invalid session label: {0}")]
+    InvalidSessionLabel(String),
 }
 
 pub type Result<T, E = HermodError> = std::result::Result<T, E>;

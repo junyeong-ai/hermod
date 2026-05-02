@@ -376,6 +376,7 @@ impl MessageService {
                 from_local_alias: proj.local,
                 from_peer_alias: proj.peer,
                 from_alias: proj.effective,
+                from_alias_ambiguous: proj.effective_ambiguous,
                 from_host_pubkey: proj.host_pubkey_hex,
                 to: r.to_agent,
                 kind: r.kind,
@@ -491,6 +492,10 @@ impl MessageService {
 /// self-claim, `effective` is what UIs render. `host_pubkey_hex` is the
 /// hex-encoded ed25519 host pubkey of the daemon hosting the sender —
 /// surfaced for cross-host disambiguation when local aliases collide.
+/// `effective_ambiguous` is true iff *another* agent in the receiver's
+/// directory shares the same effective alias — UI / channel meta lift
+/// `from_host` to disambiguate.
+///
 /// Looked up once per distinct sender per batch (see callers in
 /// `message::list` / `confirmation::list`).
 #[derive(Debug, Clone, Default)]
@@ -498,18 +503,37 @@ pub(crate) struct SenderProjection {
     pub local: Option<hermod_core::AgentAlias>,
     pub peer: Option<hermod_core::AgentAlias>,
     pub effective: Option<hermod_core::AgentAlias>,
+    pub effective_ambiguous: bool,
     pub host_pubkey_hex: Option<String>,
 }
 
 impl SenderProjection {
     pub async fn lookup(db: &Arc<dyn Database>, id: &hermod_core::AgentId) -> Self {
         match db.agents().get(id).await.ok().flatten() {
-            Some(rec) => Self {
-                effective: rec.effective_alias().cloned(),
-                local: rec.local_alias,
-                peer: rec.peer_asserted_alias,
-                host_pubkey_hex: rec.host_pubkey.map(|h| hex::encode(h.as_slice())),
-            },
+            Some(rec) => {
+                let effective = rec.effective_alias().cloned();
+                // Ambiguity is computed via an indexed COUNT(*) per
+                // distinct sender per batch — same cache scope as
+                // the directory lookup itself, so cost is O(distinct
+                // senders) regardless of batch size.
+                let effective_ambiguous = match effective.as_ref() {
+                    Some(alias) => {
+                        db.agents()
+                            .count_with_effective_alias(alias, id)
+                            .await
+                            .unwrap_or(0)
+                            > 0
+                    }
+                    None => false,
+                };
+                Self {
+                    effective,
+                    effective_ambiguous,
+                    local: rec.local_alias,
+                    peer: rec.peer_asserted_alias,
+                    host_pubkey_hex: rec.host_pubkey.map(|h| hex::encode(h.as_slice())),
+                }
+            }
             None => Self::default(),
         }
     }

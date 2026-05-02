@@ -7,6 +7,8 @@
 //! emits one notification per *new* item. New-ness is determined by ULID
 //! cursor — `MessageListParams.after_id` and `ConfirmationListParams.after_id`
 //! filter to "id > last seen", and the cursor advances after each batch.
+//! The cursor is also persisted to the daemon via `mcp.cursor_advance` so a
+//! Claude Code restart with the same `HERMOD_SESSION_LABEL` resumes mid-stream.
 //!
 //! Why polling, not streaming: durable messaging systems converge on
 //! cursor-based pull (Kafka, SQS, GCP Pub/Sub) because correctness still
@@ -16,9 +18,19 @@
 //!
 //! The [`ChannelSource`] trait is the seam: a future streaming source can
 //! drop in without touching emit/serialization code.
+//!
+//! ## AI-agent context discipline
+//!
+//! [`ChannelEvent`] carries the slim view: `from_alias` (effective) plus
+//! `from_alias_ambiguous` plus `from_host_pubkey` (used only when
+//! ambiguous). Operator-debugging fields (`from_local_alias`,
+//! `from_peer_alias`) live on the IPC `MessageView` for human surfaces
+//! and never enter the channel-frame meta.
 
 use anyhow::Result;
-use hermod_core::{AgentAlias, AgentId, MessageBody, MessageId, MessagePriority, MessageStatus};
+use hermod_core::{
+    AgentAlias, AgentId, McpSessionId, MessageBody, MessageId, MessagePriority, MessageStatus,
+};
 use hermod_protocol::ipc::methods::{ConfirmationListParams, MessageListParams, PresenceGetParams};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -43,13 +55,13 @@ const BATCH_LIMIT: u32 = 100;
 ///
 /// Every variant carries:
 ///   * `from`: canonical agent_id (hash) — for crypto, dedup, audit.
-///   * `from_local_alias`: operator's nickname for `from` (sacred,
-///     routing-resolvable).
-///   * `from_peer_alias`: `from`'s self-asserted display name (advisory).
 ///   * `from_alias`: effective display — local wins, falls back to peer.
+///   * `from_alias_ambiguous`: set when another agent shares this alias;
+///     the receiver MUST surface `from_host_pubkey` (or the raw `from`)
+///     before acting on the alias.
 ///   * `from_host_pubkey`: hex ed25519 host pubkey of the daemon
-///     hosting `from`. UIs surface the leading 8 chars when local
-///     aliases collide across hosts.
+///     hosting `from`. UIs surface the leading 8 chars when the alias
+///     is ambiguous.
 ///   * `from_live`: whether a synchronous reply is realistic right now.
 #[derive(Debug, Clone)]
 pub enum ChannelEvent {
@@ -57,9 +69,8 @@ pub enum ChannelEvent {
     DirectMessage {
         id: MessageId,
         from: AgentId,
-        from_local_alias: Option<AgentAlias>,
-        from_peer_alias: Option<AgentAlias>,
         from_alias: Option<AgentAlias>,
+        from_alias_ambiguous: bool,
         from_host_pubkey: Option<String>,
         from_live: bool,
         priority: MessagePriority,
@@ -72,9 +83,8 @@ pub enum ChannelEvent {
     FileMessage {
         id: MessageId,
         from: AgentId,
-        from_local_alias: Option<AgentAlias>,
-        from_peer_alias: Option<AgentAlias>,
         from_alias: Option<AgentAlias>,
+        from_alias_ambiguous: bool,
         from_host_pubkey: Option<String>,
         from_live: bool,
         priority: MessagePriority,
@@ -90,9 +100,8 @@ pub enum ChannelEvent {
     HeldConfirmation {
         id: String,
         from: AgentId,
-        from_local_alias: Option<AgentAlias>,
-        from_peer_alias: Option<AgentAlias>,
         from_alias: Option<AgentAlias>,
+        from_alias_ambiguous: bool,
         from_host_pubkey: Option<String>,
         from_live: bool,
         /// Operator-facing intent label (e.g. `"message.deliver"`,
@@ -116,7 +125,9 @@ pub trait ChannelSource: Send {
 /// Cursor-based pulling source. Polls the daemon's `message.list` and
 /// `confirmation.list` at [`POLL_INTERVAL`], advancing per-stream cursors
 /// so every event is emitted exactly once across the MCP subprocess
-/// lifetime.
+/// lifetime, and persisting the advanced cursor to the daemon after each
+/// batch so a process restart with the same `session_label` picks up
+/// from the same position rather than re-emitting the entire backlog.
 ///
 /// A single [`DaemonClient`] is held open across polls so Remote IPC
 /// transports don't pay TLS handshake + bearer auth on every cycle. The
@@ -133,20 +144,38 @@ pub struct PollingChannelSource {
     target: ClientTarget,
     client: Option<DaemonClient>,
     ticker: tokio::time::Interval,
+    /// MCP session this poller belongs to — drives `mcp.cursor_advance`
+    /// at the end of each batch so the cursor survives MCP restart.
+    session_id: McpSessionId,
     last_message_id: Option<MessageId>,
     last_confirmation_id: Option<String>,
+    /// Tracks whether `last_message_id` / `last_confirmation_id` have
+    /// advanced since the last `cursor_advance` call so we only emit
+    /// the IPC when there's something to persist.
+    dirty_message: bool,
+    dirty_confirmation: bool,
 }
 
 impl PollingChannelSource {
-    pub fn new(target: ClientTarget) -> Self {
+    /// Construct a source seeded with the cursors returned by
+    /// `mcp.attach`. Pass `None` for a fresh stream.
+    pub fn new_with_seed(
+        target: ClientTarget,
+        session_id: McpSessionId,
+        last_message_id: Option<MessageId>,
+        last_confirmation_id: Option<String>,
+    ) -> Self {
         let mut ticker = tokio::time::interval(POLL_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         Self {
             target,
             client: None,
             ticker,
-            last_message_id: None,
-            last_confirmation_id: None,
+            session_id,
+            last_message_id,
+            last_confirmation_id,
+            dirty_message: false,
+            dirty_confirmation: false,
         }
     }
 
@@ -196,6 +225,7 @@ impl PollingChannelSource {
 
         for m in inbox.messages {
             self.last_message_id = Some(m.id);
+            self.dirty_message = true;
             let from_live = resolve_live(&mut client, &m.from, &mut live_cache).await;
             // The inbox now holds `Direct` and `File` bodies. Other
             // kinds (Brief / Presence / channel-broadcast / etc.) have
@@ -205,9 +235,8 @@ impl PollingChannelSource {
                     out.push(ChannelEvent::DirectMessage {
                         id: m.id,
                         from: m.from,
-                        from_local_alias: m.from_local_alias,
-                        from_peer_alias: m.from_peer_alias,
                         from_alias: m.from_alias,
+                        from_alias_ambiguous: m.from_alias_ambiguous,
                         from_host_pubkey: m.from_host_pubkey,
                         from_live,
                         priority: m.priority,
@@ -220,9 +249,8 @@ impl PollingChannelSource {
                     out.push(ChannelEvent::FileMessage {
                         id: m.id,
                         from: m.from,
-                        from_local_alias: m.from_local_alias,
-                        from_peer_alias: m.from_peer_alias,
                         from_alias: m.from_alias,
+                        from_alias_ambiguous: m.from_alias_ambiguous,
                         from_host_pubkey: m.from_host_pubkey,
                         from_live,
                         priority: m.priority,
@@ -252,19 +280,43 @@ impl PollingChannelSource {
 
         for c in confirmations.confirmations {
             self.last_confirmation_id = Some(c.id.clone());
+            self.dirty_confirmation = true;
             let from_live = resolve_live(&mut client, &c.from, &mut live_cache).await;
             out.push(ChannelEvent::HeldConfirmation {
                 id: c.id,
                 from: c.from,
-                from_local_alias: c.from_local_alias,
-                from_peer_alias: c.from_peer_alias,
                 from_alias: c.from_alias,
+                from_alias_ambiguous: c.from_alias_ambiguous,
                 from_host_pubkey: c.from_host_pubkey,
                 from_live,
                 intent: c.intent,
                 sensitivity: c.sensitivity,
                 summary: c.summary,
             });
+        }
+
+        // Persist advanced cursors so a process restart resumes
+        // mid-stream. Best-effort — failure leaves dirty flags set
+        // and the next batch retries the persist.
+        if self.dirty_message || self.dirty_confirmation {
+            super::session::persist_cursor(
+                &self.target,
+                &self.session_id,
+                if self.dirty_message {
+                    self.last_message_id
+                } else {
+                    None
+                },
+                if self.dirty_confirmation {
+                    self.last_confirmation_id.clone()
+                } else {
+                    None
+                },
+                None,
+            )
+            .await;
+            self.dirty_message = false;
+            self.dirty_confirmation = false;
         }
 
         // Reinstate the connection so the next poll skips the connect().

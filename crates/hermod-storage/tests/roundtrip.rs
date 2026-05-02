@@ -954,3 +954,192 @@ async fn claim_pending_remote_reclaims_stale_owners() {
     assert_eq!(b2.len(), 1, "stale claim must be reclaimable");
     assert_eq!(b2[0].id, env.id);
 }
+
+/// Per-instance MCP boundary (axis 1):
+///
+/// * Label-collision attach against a *live* row is rejected as
+///   `LabelInUse` so two Claude Code windows can't silently share a
+///   single cursor stream.
+/// * Label-collision attach against a *stale* row reuses the cursors
+///   so a process restart with the same label resumes mid-stream.
+/// * `cursor_advance` persists per-cursor; partial advances leave
+///   untouched columns intact.
+/// * `list_for_agent` returns the live sessions for `local.sessions`.
+#[tokio::test]
+async fn mcp_session_label_attach_resume_and_cursor_advance() {
+    use hermod_core::{McpSessionId, MessageId, SessionLabel};
+    use hermod_storage::{AttachOutcome, AttachParams, CursorAdvance};
+
+    let db = fresh_db().await;
+    let kp = Keypair::generate();
+    let now = Timestamp::now();
+    db.agents()
+        .upsert(&AgentRecord {
+            id: kp.agent_id(),
+            pubkey: kp.to_pubkey_bytes(),
+            host_pubkey: None,
+            endpoint: None,
+            via_agent: None,
+            local_alias: None,
+            peer_asserted_alias: None,
+            trust_level: TrustLevel::Local,
+            tls_fingerprint: None,
+            reputation: 0,
+            first_seen: now,
+            last_seen: Some(now),
+        })
+        .await
+        .unwrap();
+    let agent = kp.agent_id();
+    let label: SessionLabel = "vscode-1".parse().unwrap();
+    let ttl_ms: i64 = 60_000;
+
+    // First attach with the label — fresh insert, no cursors carried.
+    let s1 = McpSessionId::from_raw("sess-1".into());
+    let outcome = db
+        .mcp_sessions()
+        .attach(AttachParams {
+            session_id: s1.clone(),
+            agent_id: agent.clone(),
+            session_label: Some(label.clone()),
+            attached_at: now,
+            client_name: Some("claude".into()),
+            client_version: None,
+            ttl_ms,
+        })
+        .await
+        .unwrap();
+    let resumed = matches!(outcome, AttachOutcome::Inserted { resumed: false, .. });
+    assert!(resumed, "first attach must not claim resume");
+
+    // Advance the message cursor.
+    let cursor_msg: MessageId = ulid::Ulid::new().to_string().parse().unwrap();
+    db.mcp_sessions()
+        .cursor_advance(
+            &s1,
+            &CursorAdvance {
+                last_message_id: Some(cursor_msg),
+                last_confirmation_id: None,
+                last_resolved_seq: Some(42),
+            },
+        )
+        .await
+        .unwrap();
+
+    // Second attach with the SAME label while the first is live ⇒ LabelInUse.
+    let s2 = McpSessionId::from_raw("sess-2".into());
+    let outcome = db
+        .mcp_sessions()
+        .attach(AttachParams {
+            session_id: s2.clone(),
+            agent_id: agent.clone(),
+            session_label: Some(label.clone()),
+            attached_at: now,
+            client_name: None,
+            client_version: None,
+            ttl_ms,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(outcome, AttachOutcome::LabelInUse { .. }));
+
+    // Heartbeat-stale the first row by attaching far in the future.
+    let way_later = Timestamp::from_unix_ms(now.unix_ms() + ttl_ms * 10).unwrap();
+    let s3 = McpSessionId::from_raw("sess-3".into());
+    let outcome = db
+        .mcp_sessions()
+        .attach(AttachParams {
+            session_id: s3.clone(),
+            agent_id: agent.clone(),
+            session_label: Some(label.clone()),
+            attached_at: way_later,
+            client_name: None,
+            client_version: None,
+            ttl_ms,
+        })
+        .await
+        .unwrap();
+    match outcome {
+        AttachOutcome::Inserted {
+            session,
+            resumed: true,
+            ..
+        } => {
+            assert_eq!(session.session_id, s3);
+            assert!(session.last_message_id.is_some(), "cursor must be carried");
+            assert_eq!(session.last_resolved_seq, Some(42));
+            assert!(session.last_confirmation_id.is_none());
+        }
+        other => panic!("expected Inserted{{ resumed: true }}, got {other:?}"),
+    }
+
+    // Old session is gone (replaced by the resumed one).
+    assert!(db.mcp_sessions().get(&s1).await.unwrap().is_none());
+
+    // list_for_agent surfaces the resumed session.
+    let live = db
+        .mcp_sessions()
+        .list_for_agent(&agent, way_later, ttl_ms)
+        .await
+        .unwrap();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].session_id, s3);
+    assert_eq!(live[0].session_label.as_ref(), Some(&label));
+}
+
+/// Alias-ambiguity count (axis 3): `count_with_effective_alias`
+/// returns the number of *other* agents (excluding `exclude`) whose
+/// effective alias equals the candidate. Drives the
+/// `from_alias_ambiguous` flag in `MessageView` /
+/// `PendingConfirmationView` / `ChannelEvent`.
+#[tokio::test]
+async fn count_with_effective_alias_excludes_self_and_counts_collisions() {
+    use hermod_core::AgentAlias;
+
+    let db = fresh_db().await;
+    let now = Timestamp::now();
+    let alias: AgentAlias = "alice".parse().unwrap();
+
+    let mk = |idx: u32, local: Option<AgentAlias>, peer: Option<AgentAlias>| -> AgentRecord {
+        let kp = Keypair::generate();
+        AgentRecord {
+            id: kp.agent_id(),
+            pubkey: kp.to_pubkey_bytes(),
+            host_pubkey: Some(hermod_core::PubkeyBytes([idx as u8; 32])),
+            endpoint: None,
+            via_agent: None,
+            local_alias: local,
+            peer_asserted_alias: peer,
+            trust_level: TrustLevel::Tofu,
+            tls_fingerprint: None,
+            reputation: 0,
+            first_seen: now,
+            last_seen: Some(now),
+        }
+    };
+
+    let a = mk(1, Some(alias.clone()), None); // local "alice"
+    let b = mk(2, None, Some(alias.clone())); // peer-asserted "alice" (effective)
+    let c = mk(3, Some("bob".parse().unwrap()), Some(alias.clone())); // effective "bob" — local wins
+    db.agents().upsert(&a).await.unwrap();
+    db.agents().upsert(&b).await.unwrap();
+    db.agents().upsert(&c).await.unwrap();
+
+    // From a's perspective: one other agent (b) has effective "alice".
+    let n = db
+        .agents()
+        .count_with_effective_alias(&alias, &a.id)
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "b should collide with a's effective alias");
+
+    // From a host with no other "alice" rows: zero.
+    let alone = mk(4, None, Some("solo".parse().unwrap()));
+    db.agents().upsert(&alone).await.unwrap();
+    let n = db
+        .agents()
+        .count_with_effective_alias(&"solo".parse().unwrap(), &alone.id)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+}

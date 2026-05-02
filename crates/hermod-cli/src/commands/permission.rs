@@ -41,7 +41,12 @@ pub struct DecideArgs {
 pub async fn list(args: ListArgs, target: &ClientTarget) -> Result<()> {
     let mut c = target.connect().await?;
     let r = c
-        .permission_list(PermissionListParams { limit: args.limit })
+        .permission_list(PermissionListParams {
+            limit: args.limit,
+            // Operator CLI is a global view — no session filter,
+            // surfaces every prompt for the caller agent.
+            session_id: None,
+        })
         .await?;
     println!("{}", serde_json::to_string_pretty(&r)?);
     Ok(())

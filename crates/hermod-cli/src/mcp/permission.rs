@@ -31,6 +31,7 @@
 //! latency ever shows up as a real complaint.
 
 use anyhow::Result;
+use hermod_core::McpSessionId;
 use hermod_protocol::ipc::methods::{
     PermissionListResolvedParams, PermissionRequestParams, PermissionRequestResult,
     PermissionResolvedView,
@@ -39,10 +40,15 @@ use serde_json::Value;
 
 use crate::client::{ClientTarget, DaemonClient};
 
-/// Parse an inbound `notifications/claude/channel/permission_request` and
-/// return the typed params, or `None` if the message isn't shaped right.
-/// Unknown extra fields are tolerated — the schema may grow.
-pub fn parse_request_params(value: &Value) -> Option<PermissionRequestParams> {
+/// Parse an inbound `notifications/claude/channel/permission_request`
+/// into typed [`PermissionRequestParams`], stamped with the MCP
+/// server's own `session_id` so the daemon files the prompt under
+/// the originating Claude Code window. Returns `None` if the JSON
+/// isn't shaped right; unknown extra fields are tolerated.
+pub fn parse_request_params(
+    value: &Value,
+    session_id: Option<&McpSessionId>,
+) -> Option<PermissionRequestParams> {
     let params = value.get("params")?;
     Some(PermissionRequestParams {
         tool_name: params.get("tool_name")?.as_str()?.to_string(),
@@ -52,6 +58,7 @@ pub fn parse_request_params(value: &Value) -> Option<PermissionRequestParams> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
+        session_id: session_id.cloned(),
     })
 }
 
@@ -68,15 +75,36 @@ pub async fn forward_request_to_daemon(
 
 /// Cursor over the daemon's resolved-events ring buffer. Holds the
 /// highest `seq` value seen so far; on the next poll only newer entries
-/// are returned. Reset to `None` to receive the full buffer once.
-#[derive(Debug, Default, Clone)]
+/// are returned. Bound to a specific MCP session: the daemon filters
+/// the ring to verdicts whose originating prompt was owned by this
+/// session, so sibling Claude Code windows of the same agent never
+/// observe each other's verdicts.
+#[derive(Debug, Clone)]
 pub struct ResolvedCursor {
+    /// MCP session this cursor belongs to. The daemon scopes
+    /// returned verdicts to prompts originated by this session
+    /// (plus relayed prompts which carry no session binding).
+    session_id: McpSessionId,
     after_seq: Option<u64>,
 }
 
 impl ResolvedCursor {
-    pub fn new() -> Self {
-        Self::default()
+    /// Construct, optionally seeded with the cursor returned by
+    /// `mcp.attach` (so a Claude Code restart with the same
+    /// `session_label` resumes mid-stream rather than re-emitting the
+    /// agent's entire verdict backlog).
+    pub fn new(session_id: McpSessionId, seed: Option<u64>) -> Self {
+        Self {
+            session_id,
+            after_seq: seed,
+        }
+    }
+
+    /// Latest seq the cursor has advanced past — used by the MCP
+    /// supervisor to call `mcp.cursor_advance` so the position
+    /// survives process restart.
+    pub fn after_seq(&self) -> Option<u64> {
+        self.after_seq
     }
 
     /// Pull the next batch of resolved events from the daemon and advance
@@ -101,6 +129,7 @@ impl ResolvedCursor {
             .permission_list_resolved(PermissionListResolvedParams {
                 after_seq: self.after_seq,
                 limit: Some(limit),
+                session_id: Some(self.session_id.clone()),
             })
             .await?;
 
@@ -119,6 +148,7 @@ impl ResolvedCursor {
                 .permission_list_resolved(PermissionListResolvedParams {
                     after_seq: None,
                     limit: Some(limit),
+                    session_id: Some(self.session_id.clone()),
                 })
                 .await?;
             if let Some(max) = res.resolved.iter().map(|e| e.seq).max() {
@@ -150,10 +180,12 @@ mod tests {
                 "input_preview": "{\"command\":\"ls\"}"
             }
         });
-        let p = parse_request_params(&n).expect("must parse");
+        let session = McpSessionId::from_raw("session-x".into());
+        let p = parse_request_params(&n, Some(&session)).expect("must parse");
         assert_eq!(p.tool_name, "Bash");
         assert_eq!(p.description, "list files");
         assert!(p.input_preview.contains("ls"));
+        assert_eq!(p.session_id.as_ref().unwrap().as_str(), "session-x");
     }
 
     #[test]
@@ -165,13 +197,14 @@ mod tests {
                 "description": "create file"
             }
         });
-        let p = parse_request_params(&n).expect("must parse");
+        let p = parse_request_params(&n, None).expect("must parse");
         assert_eq!(p.input_preview, "");
+        assert!(p.session_id.is_none());
     }
 
     #[test]
     fn parse_request_params_rejects_missing_required_fields() {
         let bad = json!({"params": {"tool_name": "Bash"}});
-        assert!(parse_request_params(&bad).is_none());
+        assert!(parse_request_params(&bad, None).is_none());
     }
 }

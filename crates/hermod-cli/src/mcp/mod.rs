@@ -37,6 +37,7 @@ mod session;
 mod tools;
 
 use anyhow::Result;
+use hermod_core::SessionLabel;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -49,6 +50,12 @@ use crate::client::ClientTarget;
 use notification::{PERMISSION_REQUEST_METHOD, channel};
 use session::Session;
 
+/// Environment variable controlling the operator-supplied stable
+/// nickname for this MCP attach. When set the daemon resumes prior
+/// cursors keyed by `(agent, label)` so a Claude Code restart picks
+/// up mid-stream rather than re-emitting the entire backlog.
+const SESSION_LABEL_ENV: &str = "HERMOD_SESSION_LABEL";
+
 /// How long we wait for `mcp.session_detach` on stdin EOF before giving up
 /// and letting the janitor reap the row via TTL. The detach is best-effort —
 /// hanging here on a slow daemon would just leak a few hundred ms of
@@ -60,6 +67,24 @@ pub async fn run(target: &ClientTarget) -> Result<()> {
     let mut reader = BufReader::new(stdin);
     let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
     let target = Arc::new(target.clone());
+    // Resolve the operator's session label once at startup. An invalid
+    // value is logged and treated as absence — failing the MCP server
+    // boot on a typo'd env var would be hostile UX.
+    let session_label = match std::env::var(SESSION_LABEL_ENV) {
+        Ok(raw) if !raw.is_empty() => match raw.parse::<SessionLabel>() {
+            Ok(l) => Some(l),
+            Err(e) => {
+                tracing::warn!(
+                    env = SESSION_LABEL_ENV,
+                    raw = %raw,
+                    error = %e,
+                    "ignoring invalid session label"
+                );
+                None
+            }
+        },
+        _ => None,
+    };
     let mut session: Option<Session> = None;
     let mut line = String::new();
 
@@ -92,7 +117,7 @@ pub async fn run(target: &ClientTarget) -> Result<()> {
 
         // Route inbound notifications (no `id`) — permission relay lives here.
         if msg.get("id").is_none() {
-            route_notification(&msg, target.as_ref(), &stdout).await;
+            route_notification(&msg, target.as_ref(), &stdout, session.as_ref()).await;
             continue;
         }
 
@@ -125,7 +150,15 @@ pub async fn run(target: &ClientTarget) -> Result<()> {
         // notifications after replying to `initialize`. Attach the session,
         // start heartbeat + emitters exactly once.
         if is_initialize && session.is_none() {
-            session = Some(Session::start(target.clone(), stdout.clone(), client_info).await);
+            session = Some(
+                Session::start(
+                    target.clone(),
+                    stdout.clone(),
+                    client_info,
+                    session_label.clone(),
+                )
+                .await,
+            );
         }
     }
 
@@ -184,24 +217,33 @@ async fn handle(req: Request, target: &ClientTarget) -> Value {
 /// else (including stdlib MCP `notifications/initialized`) is silently
 /// dropped, which matches MCP's "no-id messages have no response"
 /// semantic.
-async fn route_notification(msg: &Value, target: &ClientTarget, stdout: &Arc<Mutex<Stdout>>) {
+async fn route_notification(
+    msg: &Value,
+    target: &ClientTarget,
+    stdout: &Arc<Mutex<Stdout>>,
+    session: Option<&Session>,
+) {
     let Some(method) = msg.get("method").and_then(|v| v.as_str()) else {
         return;
     };
     if method == PERMISSION_REQUEST_METHOD {
-        handle_permission_request(msg, target, stdout).await;
+        handle_permission_request(msg, target, stdout, session).await;
     }
 }
 
 /// Handle `notifications/claude/channel/permission_request`: forward to
-/// the daemon, then emit the operator-facing channel event so whoever
+/// the daemon (stamped with the originating session_id so sibling
+/// Claude Code windows of the same agent don't observe each other's
+/// verdicts), then emit the operator-facing channel event so whoever
 /// is on call sees the prompt + the 5-letter short id to type back.
 async fn handle_permission_request(
     msg: &Value,
     target: &ClientTarget,
     stdout: &Arc<Mutex<Stdout>>,
+    session: Option<&Session>,
 ) {
-    let Some(params) = permission::parse_request_params(msg) else {
+    let session_id = session.and_then(|s| s.current_session_id());
+    let Some(params) = permission::parse_request_params(msg, session_id.as_ref()) else {
         tracing::warn!("dropping malformed permission_request notification");
         return;
     };
