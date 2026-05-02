@@ -3,6 +3,7 @@
 //! server, peer pool) live above this crate and feed verified state in.
 
 pub mod access;
+pub mod auto_approve;
 pub mod confirmation;
 pub mod dispatch;
 pub mod error;
@@ -15,6 +16,11 @@ pub mod transport;
 pub mod wss_noise;
 
 pub use access::{AccessController, AccessPolicy, AccessVerdict, scope};
+pub use auto_approve::{
+    AutoApproveConfig, AutoApproveConfigError, AutoApproveOutcome, AutoApproveOverlay,
+    ConfirmationRule as AutoApproveConfirmationRule, FORBIDDEN_TOOL_NAMES,
+    PermissionRule as AutoApprovePermissionRule,
+};
 pub use confirmation::{Sensitivity, Verdict, classify, decide, summarize};
 pub use dispatch::{
     BODY_KEYWORD_MAX_BYTES, BODY_KEYWORD_MAX_COUNT, DispatchDecision, DispatchPolicy,

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use hermod_crypto::SecretString;
-use hermod_routing::RoutingConfig;
+use hermod_routing::{AutoApproveConfig, RoutingConfig};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -31,6 +31,16 @@ pub struct Config {
     /// silently degrade routing.
     #[serde(default)]
     pub routing: RoutingConfig,
+    /// Operator-configured auto-approve overlays.
+    /// `[[auto_approve.confirmation]]` rules downgrade
+    /// `Verdict::Confirm` ⇒ `Accept` (Reject never crossed);
+    /// `[[auto_approve.permission]]` rules auto-allow specific
+    /// `(origin, tool_name)` pairs. Boot-validated via
+    /// `AutoApproveConfig::validate()` — `FORBIDDEN_TOOL_NAMES`
+    /// (Bash/Write/Edit/NotebookEdit) abort startup if any rule
+    /// names them.
+    #[serde(default)]
+    pub auto_approve: AutoApproveConfig,
 }
 
 /// Broker daemon role.

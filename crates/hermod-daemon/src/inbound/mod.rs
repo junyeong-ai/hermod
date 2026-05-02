@@ -52,6 +52,13 @@ pub struct InboundProcessor {
     /// Per-recipient cap on `pending` + `failed` notification rows.
     /// Pulled from `[routing.notification] max_pending` at boot.
     pub(super) notification_max_pending: u32,
+    /// Auto-approve overlays. The confirmation arm here applies
+    /// `[[auto_approve.confirmation]]` rules to downgrade
+    /// `Verdict::Confirm` → `Verdict::Accept` for inbounds that
+    /// match an operator-trusted condition. `Reject` is never
+    /// crossed by construction. Default = empty overlay (every
+    /// `Confirm` parks as before).
+    pub(super) auto_approve: Arc<hermod_routing::AutoApproveOverlay>,
     replay_window_secs: u32,
     /// Held envelopes older than this are refused on accept (Phase 3 —
     /// closes the "operator parks for days, then accepts a stale
@@ -123,6 +130,7 @@ impl InboundProcessor {
             rate_limit,
             dispatch_policy: Arc::new(hermod_routing::PassthroughPolicy),
             notification_max_pending: hermod_routing::NotificationConfig::default().max_pending,
+            auto_approve: Arc::new(hermod_routing::AutoApproveOverlay::default()),
             replay_window_secs,
             held_envelope_max_age_secs,
             max_file_payload_bytes,
@@ -143,6 +151,15 @@ impl InboundProcessor {
     ) -> Self {
         self.dispatch_policy = policy;
         self.notification_max_pending = notification_max_pending;
+        self
+    }
+
+    /// Wire the auto-approve overlay. Rules are read on every
+    /// `Verdict::Confirm` to decide whether to downgrade. Default
+    /// (no overlay) means every `Confirm` parks for the operator
+    /// as before — `[[auto_approve.confirmation]]` is opt-in.
+    pub fn with_auto_approve(mut self, overlay: Arc<hermod_routing::AutoApproveOverlay>) -> Self {
+        self.auto_approve = overlay;
         self
     }
 
@@ -494,35 +511,57 @@ impl InboundProcessor {
                 return Err(FederationRejection::Unauthorized("trust matrix"));
             }
             Verdict::Confirm => {
-                let cbor = serialize_envelope(envelope)
-                    .map_err(|e| FederationRejection::Invalid(format!("serialize: {e}")))?;
-                let summary = summarize(envelope);
-                let held = self
+                // Auto-approve overlay (PR-3, axis 7). The
+                // confirmation gate would surface this prompt to
+                // the operator; check whether an
+                // `[[auto_approve.confirmation]]` rule downgrades
+                // it to Accept. Rules can match on kind, trust,
+                // sender, body keywords, etc. — same condition
+                // vocabulary as `[routing.rules]`. **Reject is
+                // never crossed**: the overlay only runs in the
+                // Confirm arm, by construction.
+                let now = Timestamp::now();
+                let session_active = self
                     .db
-                    .confirmations()
-                    .enqueue(hermod_storage::HoldRequest {
-                        envelope_id: &envelope.id,
-                        actor: &envelope.from.id,
-                        recipient: &envelope.to.id,
-                        intent: intent_for(envelope),
-                        sensitivity: sensitivity.as_str(),
-                        trust_level: trust,
-                        summary: &summary,
-                        envelope_cbor: &cbor,
-                    })
+                    .mcp_sessions()
+                    .count_live_for(
+                        &envelope.to.id,
+                        now,
+                        (hermod_storage::SESSION_TTL_SECS * 1_000) as i64,
+                    )
                     .await
-                    .map_err(|e| FederationRejection::Storage(e.to_string()))?;
-                if let Some(id) = held {
+                    .unwrap_or(0)
+                    > 0;
+                let overlay_ctx = hermod_routing::RouteContext {
+                    message_id: envelope.id,
+                    from: &envelope.from.id,
+                    recipient: &envelope.to.id,
+                    kind: envelope.kind,
+                    priority: envelope.priority,
+                    trust,
+                    body: &envelope.body,
+                    session_active,
+                    now_unix_ms: now.unix_ms(),
+                };
+                if let hermod_routing::AutoApproveOutcome::Accept { rule } =
+                    self.auto_approve.check_confirmation(&overlay_ctx)
+                {
+                    // Downgrade Confirm → Accept. Audit the
+                    // operator-visible trail: which rule fired,
+                    // on which envelope, with what trust /
+                    // sensitivity. Operator can review the audit
+                    // log to spot rules that fire too liberally.
                     audit_or_warn(
                         &*self.audit_sink,
                         AuditEntry {
                             id: None,
-                            ts: Timestamp::now(),
+                            ts: now,
                             actor: envelope.from.id.clone(),
-                            action: "confirmation.held".into(),
-                            target: Some(id),
+                            action: "confirmation.auto_accept".into(),
+                            target: Some(envelope.id.to_string()),
                             details: Some(serde_json::json!({
-                                "envelope_id": envelope.id.to_string(),
+                                "rule": rule,
+                                "kind": envelope.kind.as_str(),
                                 "sensitivity": sensitivity.as_str(),
                                 "trust_level": trust.as_str(),
                             })),
@@ -531,8 +570,49 @@ impl InboundProcessor {
                         },
                     )
                     .await;
+                    // Fall through to apply_envelope — same path
+                    // an operator-accepted hold replays through.
+                } else {
+                    let cbor = serialize_envelope(envelope)
+                        .map_err(|e| FederationRejection::Invalid(format!("serialize: {e}")))?;
+                    let summary = summarize(envelope);
+                    let held = self
+                        .db
+                        .confirmations()
+                        .enqueue(hermod_storage::HoldRequest {
+                            envelope_id: &envelope.id,
+                            actor: &envelope.from.id,
+                            recipient: &envelope.to.id,
+                            intent: intent_for(envelope),
+                            sensitivity: sensitivity.as_str(),
+                            trust_level: trust,
+                            summary: &summary,
+                            envelope_cbor: &cbor,
+                        })
+                        .await
+                        .map_err(|e| FederationRejection::Storage(e.to_string()))?;
+                    if let Some(id) = held {
+                        audit_or_warn(
+                            &*self.audit_sink,
+                            AuditEntry {
+                                id: None,
+                                ts: now,
+                                actor: envelope.from.id.clone(),
+                                action: "confirmation.held".into(),
+                                target: Some(id),
+                                details: Some(serde_json::json!({
+                                    "envelope_id": envelope.id.to_string(),
+                                    "sensitivity": sensitivity.as_str(),
+                                    "trust_level": trust.as_str(),
+                                })),
+                                client_ip: None,
+                                federation: hermod_storage::AuditFederationPolicy::Default,
+                            },
+                        )
+                        .await;
+                    }
+                    return Ok(());
                 }
-                return Ok(());
             }
         }
 

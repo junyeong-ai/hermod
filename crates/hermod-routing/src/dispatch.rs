@@ -309,6 +309,17 @@ impl RoutingConfig {
     }
 }
 
+/// Re-exported for `auto_approve` so confirmation-overlay rules
+/// share the same condition validator as dispatch rules. Crate-
+/// internal — operators don't see this; they see
+/// `RoutingConfig::validate` and `AutoApproveConfig::validate`.
+pub(crate) fn validate_condition_public(
+    rule: &str,
+    c: &RuleCondition,
+) -> Result<(), RoutingConfigError> {
+    validate_condition(rule, c)
+}
+
 fn validate_condition(rule: &str, c: &RuleCondition) -> Result<(), RoutingConfigError> {
     match c {
         RuleCondition::TimeBetween {
@@ -418,7 +429,7 @@ impl DispatchPolicy for RuleBasedPolicy {
     }
 }
 
-fn evaluate(c: &RuleCondition, ctx: &RouteContext<'_>, utc_offset_minutes: i32) -> bool {
+pub(crate) fn evaluate(c: &RuleCondition, ctx: &RouteContext<'_>, utc_offset_minutes: i32) -> bool {
     match c {
         RuleCondition::KindIn { kinds } => kinds.contains(&ctx.kind),
         RuleCondition::TrustIn { trusts } => trusts.contains(&ctx.trust),

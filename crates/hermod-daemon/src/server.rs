@@ -314,7 +314,15 @@ pub async fn serve(
         None
     };
 
-    let permissions = PermissionService::new(audit_sink.clone(), host_id.clone());
+    // Auto-approve overlays (PR-3). Validated at boot in main.rs.
+    // The overlay is shared as `Arc` between InboundProcessor
+    // (confirmation arm) and PermissionService (request arm) so
+    // operator config edits land once.
+    let auto_approve = Arc::new(hermod_routing::AutoApproveOverlay::new(
+        config.auto_approve.clone(),
+    ));
+    let permissions = PermissionService::new(audit_sink.clone(), host_id.clone())
+        .with_auto_approve(auto_approve.clone());
     let observability = crate::services::WorkspaceObservabilityService::new(
         db.clone(),
         audit_sink.clone(),
@@ -356,6 +364,7 @@ pub async fn serve(
             dispatch_policy.clone(),
             config.routing.notification.max_pending,
         )
+        .with_auto_approve(auto_approve.clone())
         .with_permission_service(permissions.clone())
         .with_workspace_observability(observability.clone());
         if config.broker.mode != hermod_daemon::config::BrokerMode::Disabled {

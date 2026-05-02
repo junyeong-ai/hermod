@@ -267,6 +267,12 @@ pub struct PermissionService {
     /// every active `permission:respond` delegate. Mirrors
     /// `relay_responder` — wired once after MessageService exists.
     prompt_forwarder: Arc<OnceCell<Arc<dyn PromptForwarder>>>,
+    /// Auto-approve overlay (PR-3, axis 7). On `request`, after
+    /// the prompt is parked, the overlay is checked against
+    /// `(caller_agent, tool_name)`. On match the prompt is
+    /// resolved with `Allow` immediately and audited as
+    /// `permission.auto_allow`. Default = empty overlay.
+    auto_approve: Arc<hermod_routing::AutoApproveOverlay>,
 }
 
 impl std::fmt::Debug for PermissionService {
@@ -292,6 +298,7 @@ impl PermissionService {
             ttl: REQUEST_TTL,
             relay_responder: Arc::new(OnceCell::new()),
             prompt_forwarder: Arc::new(OnceCell::new()),
+            auto_approve: Arc::new(hermod_routing::AutoApproveOverlay::default()),
         }
     }
 
@@ -308,6 +315,15 @@ impl PermissionService {
     /// `set_relay_responder`.
     pub fn set_prompt_forwarder(&self, forwarder: Arc<dyn PromptForwarder>) {
         let _ = self.prompt_forwarder.set(forwarder);
+    }
+
+    /// Replace the auto-approve overlay with the validated
+    /// boot-time config. Constructed once at daemon startup; later
+    /// calls overwrite (operator config reload would re-call this,
+    /// though no such reload path exists today).
+    pub fn with_auto_approve(mut self, overlay: Arc<hermod_routing::AutoApproveOverlay>) -> Self {
+        self.auto_approve = overlay;
+        self
     }
 
     /// Open a fresh permission request and return the operator-visible
@@ -388,6 +404,60 @@ impl PermissionService {
             },
         )
         .await;
+
+        // Auto-approve overlay (PR-3, axis 7). On match the prompt
+        // is resolved with `Allow` immediately — the MCP cursor
+        // poller picks up the verdict and ships
+        // `notifications/claude/channel/permission` back to Claude
+        // Code on the next tick. The operator's audit log records
+        // `permission.auto_allow` with the rule name; the
+        // operator-facing `permission list` will not surface the
+        // prompt because it's already resolved by the time the
+        // request returns.
+        if let hermod_routing::AutoApproveOutcome::Allow { rule } = self
+            .auto_approve
+            .check_permission(&owner, &params.tool_name)
+        {
+            let mut state = self.state.lock().await;
+            // Remove from `by_id` (we just inserted) and push the
+            // resolved entry. owner_session carried verbatim so
+            // sibling-session isolation (T25) still applies — the
+            // verdict only surfaces in the originating session's
+            // `list_resolved` cursor.
+            let removed = state.by_id.remove(&request_id);
+            if let Some(req) = &removed {
+                state.push_resolved(
+                    request_id.clone(),
+                    PermissionOutcome::Allow,
+                    now,
+                    req.owner.clone(),
+                    req.owner_session.clone(),
+                );
+            }
+            drop(state);
+            audit_or_warn(
+                &*self.audit_sink,
+                AuditEntry {
+                    id: None,
+                    ts: now,
+                    actor: self.host_actor.clone(),
+                    action: "permission.auto_allow".into(),
+                    target: Some(request_id.clone()),
+                    details: Some(serde_json::json!({
+                        "rule": rule,
+                        "tool_name": params.tool_name,
+                        "origin": owner.to_string(),
+                    })),
+                    client_ip: None,
+                    federation: hermod_storage::AuditFederationPolicy::Default,
+                },
+            )
+            .await;
+            return Ok(PermissionRequestResult {
+                request_id,
+                expires_at,
+            });
+        }
 
         // Federated fan-out: ship the prompt to every active
         // `permission:respond` delegate so a remote operator can
@@ -1375,5 +1445,169 @@ mod tests {
             }
         })
         .await;
+    }
+
+    /// PR-3 axis-7 integration: a `[[auto_approve.permission]]`
+    /// rule whose `origin` matches the caller AND whose
+    /// `tool_names` contains the request's tool resolves the
+    /// prompt with `Allow` immediately. The audit log records
+    /// `permission.auto_allow`; the live queue is empty after
+    /// the call returns.
+    #[tokio::test]
+    async fn permission_auto_allow_resolves_immediately_with_audit() {
+        use hermod_protocol::ipc::methods::PermissionListResolvedParams;
+        use hermod_routing::{AutoApproveConfig, AutoApproveOverlay, AutoApprovePermissionRule};
+
+        let (svc, db, caller) = make_service().await;
+        // Configure overlay: caller is allowed to auto-allow `Read`.
+        let cfg = AutoApproveConfig {
+            confirmation: vec![],
+            permission: vec![AutoApprovePermissionRule {
+                name: "trusted-read".into(),
+                origin: caller.clone(),
+                tool_names: vec!["Read".into()],
+            }],
+        };
+        cfg.validate().unwrap();
+        let svc = svc.with_auto_approve(std::sync::Arc::new(AutoApproveOverlay::new(cfg)));
+
+        with_caller(caller.clone(), {
+            let svc = svc.clone();
+            async move {
+                let r = svc.request(req_params("Read")).await.unwrap();
+                // Live queue is empty — the prompt was resolved
+                // before the call returned.
+                let live = svc
+                    .list(PermissionListParams {
+                        limit: None,
+                        session_id: None,
+                    })
+                    .await
+                    .unwrap();
+                assert!(
+                    live.requests.is_empty(),
+                    "auto-allowed prompt must not appear in live list, got {:?}",
+                    live.requests
+                );
+                // Resolved cursor sees an `Allow` verdict for the id.
+                let resolved = svc
+                    .list_resolved(PermissionListResolvedParams::default())
+                    .await
+                    .unwrap();
+                let entry = resolved
+                    .resolved
+                    .iter()
+                    .find(|e| e.request_id == r.request_id)
+                    .expect("resolved entry must exist");
+                assert_eq!(entry.outcome, PermissionOutcome::Allow);
+            }
+        })
+        .await;
+
+        // Audit row carries the rule name and the tool — so the
+        // operator's review trail is unambiguous about *why*
+        // the prompt resolved without their input.
+        let entries = db
+            .audit()
+            .query(None, Some("permission.auto_allow"), None, 16)
+            .await
+            .unwrap();
+        assert_eq!(entries.len(), 1, "exactly one auto_allow audit row");
+        let details = entries[0].details.as_ref().unwrap();
+        assert_eq!(
+            details.get("rule").and_then(|v| v.as_str()),
+            Some("trusted-read")
+        );
+        assert_eq!(
+            details.get("tool_name").and_then(|v| v.as_str()),
+            Some("Read")
+        );
+    }
+
+    /// A tool NOT on the rule's allowlist falls through to the
+    /// normal park-and-wait path (no audit row, queue still
+    /// holds the prompt).
+    #[tokio::test]
+    async fn permission_auto_allow_skips_tools_outside_allowlist() {
+        use hermod_routing::{AutoApproveConfig, AutoApproveOverlay, AutoApprovePermissionRule};
+
+        let (svc, db, caller) = make_service().await;
+        let cfg = AutoApproveConfig {
+            confirmation: vec![],
+            permission: vec![AutoApprovePermissionRule {
+                name: "trusted-read".into(),
+                origin: caller.clone(),
+                tool_names: vec!["Read".into()],
+            }],
+        };
+        cfg.validate().unwrap();
+        let svc = svc.with_auto_approve(std::sync::Arc::new(AutoApproveOverlay::new(cfg)));
+
+        with_caller(caller, {
+            let svc = svc.clone();
+            async move {
+                // `WebSearch` is not on the allowlist.
+                let r = svc.request(req_params("WebSearch")).await.unwrap();
+                let live = svc
+                    .list(PermissionListParams {
+                        limit: None,
+                        session_id: None,
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(live.requests.len(), 1);
+                assert_eq!(live.requests[0].request_id, r.request_id);
+            }
+        })
+        .await;
+
+        let entries = db
+            .audit()
+            .query(None, Some("permission.auto_allow"), None, 16)
+            .await
+            .unwrap();
+        assert!(entries.is_empty(), "no auto_allow row when tool off-list");
+    }
+
+    /// Cross-agent isolation under the overlay: agent A's rule
+    /// must NOT auto-allow agent B's identical request. The
+    /// rule's `origin` is matched against `current_caller_agent`,
+    /// which the IPC path sets per connection.
+    #[tokio::test]
+    async fn permission_auto_allow_does_not_cross_agents() {
+        use hermod_routing::{AutoApproveConfig, AutoApproveOverlay, AutoApprovePermissionRule};
+
+        let (svc, _db, caller_a) = make_service().await;
+        let caller_b = hermod_crypto::Keypair::generate().agent_id();
+        let cfg = AutoApproveConfig {
+            confirmation: vec![],
+            permission: vec![AutoApprovePermissionRule {
+                name: "trusted-read-for-a".into(),
+                origin: caller_a.clone(),
+                tool_names: vec!["Read".into()],
+            }],
+        };
+        cfg.validate().unwrap();
+        let svc = svc.with_auto_approve(std::sync::Arc::new(AutoApproveOverlay::new(cfg)));
+
+        // Agent B requests Read — rule should NOT fire.
+        let b_view = with_caller(caller_b, {
+            let svc = svc.clone();
+            async move {
+                let _ = svc.request(req_params("Read")).await.unwrap();
+                svc.list(PermissionListParams {
+                    limit: None,
+                    session_id: None,
+                })
+                .await
+                .unwrap()
+            }
+        })
+        .await;
+        assert_eq!(
+            b_view.requests.len(),
+            1,
+            "B's prompt must remain live — rule applies only to A"
+        );
     }
 }

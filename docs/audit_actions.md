@@ -165,6 +165,8 @@ silently-timed-out one in post-incident review.
 | `permission.relay.send_failed` | Originating daemon's response-to-delegator `PermissionResponse` envelope failed to ship. | `to`, `error` |
 | `permission.relay.observed` | Inbound `PermissionPrompt` from a delegating peer landed in the local permission queue. | `envelope_id`, `request_id`, `tool_name`, `description`, `input_preview`, `expires_at` |
 | `permission.relay.responded` | Inbound `PermissionResponse` verdict from a delegate was applied (or no-op'd if the prompt was already resolved). | `envelope_id`, `request_id`, `behavior` |
+| `permission.auto_allow` | A `[[auto_approve.permission]]` rule matched a freshly-opened request; the daemon resolved it with `Allow` immediately rather than parking. The matched rule's `tool_names` allowlist contained the call's `tool_name` AND the rule's `origin` equalled the calling agent's `agent_id`. **Reject is never crossed by this surface.** | `rule`, `tool_name`, `origin` |
+| `confirmation.auto_accept` | A `[[auto_approve.confirmation]]` rule matched an inbound whose verdict was `Confirm`; the daemon downgraded to `Accept` rather than parking. **Reject is never crossed.** | `rule`, `kind`, `sensitivity`, `trust_level` |
 
 ### routing.* / inbox.* / notification.*
 

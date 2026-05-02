@@ -150,6 +150,13 @@ async fn main() -> anyhow::Result<()> {
     // typo (out-of-range UTC offset, duplicate rule names,
     // oversized keyword) never silently degrades routing behaviour.
     config.routing.validate().context("routing config")?;
+    // Auto-approve overlay validation — fail-loud on
+    // FORBIDDEN_TOOL_NAMES, empty allowlists, duplicate rule names,
+    // or any condition that the dispatch validator rejects.
+    config
+        .auto_approve
+        .validate()
+        .context("auto_approve config")?;
 
     serve(
         effective_socket,
