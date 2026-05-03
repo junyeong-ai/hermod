@@ -735,8 +735,9 @@ pub async fn serve(
                     Ok(stream) => {
                         let dispatcher = dispatcher.clone();
                         let local_caller = local_socket_caller.clone();
+                        let registry = registry.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_connection(stream, dispatcher, local_caller).await {
+                            if let Err(e) = handle_connection(stream, dispatcher, local_caller, registry).await {
                                 error!(error = %e, "connection terminated with error");
                             }
                         });
@@ -809,25 +810,68 @@ async fn handle_connection(
     stream: hermod_transport::UnixIpcStream,
     dispatcher: Dispatcher,
     local_caller: Option<hermod_core::AgentId>,
+    registry: hermod_daemon::local_agent::LocalAgentRegistry,
 ) -> Result<()> {
     // Unix-socket IPC inherits filesystem-permission auth — anyone
     // who can open the socket is already running as the daemon's
     // owning user, so there's no per-connection bearer challenge.
     // When the daemon hosts exactly one local agent we bind it as
     // the connection's `CALLER_AGENT` (single-tenant convenience).
-    // With N>1 hosted agents the local socket leaves caller_agent
-    // unset — operator IPC methods that don't need a caller still
-    // work; per-agent methods (message.send, identity.get, …) must
-    // come in over remote IPC where the bearer disambiguates.
-    let inner = async {
-        let mut server = IpcServer::new(stream);
-        while let Some(req) = server.next_request().await? {
-            let resp = dispatcher.handle(req).await;
+    // For N>1 hosted agents the caller is established by an explicit
+    // `auth.bind_caller` request from the client (resolves a bearer
+    // to the agent_id it was issued for); without that request,
+    // per-agent methods on a multi-tenant daemon error out.
+    use hermod_protocol::ipc::Response;
+    use hermod_protocol::ipc::methods::{AuthBindCallerResult, method};
+
+    let mut server = IpcServer::new(stream);
+    let mut bound_caller: Option<hermod_core::AgentId> = local_caller;
+    while let Some(req) = server.next_request().await? {
+        if req.method == method::AUTH_BIND_CALLER {
+            let resp = match parse_bind_caller(&req.params, &registry) {
+                Ok(agent_id) => {
+                    bound_caller = Some(agent_id.clone());
+                    Response::ok(
+                        req.id,
+                        serde_json::to_value(AuthBindCallerResult { agent_id })
+                            .expect("AuthBindCallerResult is always JSON-serializable"),
+                    )
+                }
+                Err(rpc_err) => Response::err(req.id, rpc_err),
+            };
             server.send_response(resp).await?;
+            continue;
         }
-        Ok::<_, anyhow::Error>(())
-    };
-    crate::audit_context::with_caller_agent(local_caller, inner).await
+        let dispatcher = dispatcher.clone();
+        let caller = bound_caller.clone();
+        let resp = crate::audit_context::with_caller_agent(caller, dispatcher.handle(req)).await;
+        server.send_response(resp).await?;
+    }
+    Ok::<_, anyhow::Error>(())
+}
+
+/// Resolve `auth.bind_caller` params into the matching agent id, or
+/// return an `RpcError` with the right JSON-RPC error shape.
+///
+/// The bearer is hashed via the same `LocalAgentRegistry::resolve_bearer`
+/// path the remote IPC bearer handshake uses. Mismatch surfaces as
+/// `Unauthorized` so a misconfigured client (wrong bearer file, stale
+/// rotation) gets a clear failure rather than silently writing
+/// envelopes under the wrong identity.
+fn parse_bind_caller(
+    params: &Option<serde_json::Value>,
+    registry: &hermod_daemon::local_agent::LocalAgentRegistry,
+) -> std::result::Result<hermod_core::AgentId, hermod_protocol::ipc::error::RpcError> {
+    use hermod_protocol::ipc::error::{RpcError, code};
+    use hermod_protocol::ipc::methods::AuthBindCallerParams;
+    let p = params
+        .as_ref()
+        .ok_or_else(|| RpcError::new(code::INVALID_PARAMS, "auth.bind_caller requires params"))?;
+    let parsed: AuthBindCallerParams = serde_json::from_value(p.clone())
+        .map_err(|e| RpcError::new(code::INVALID_PARAMS, format!("invalid params: {e}")))?;
+    registry
+        .resolve_bearer(&parsed.bearer)
+        .ok_or_else(|| RpcError::new(code::UNAUTHORIZED, "bearer does not match any hosted agent"))
 }
 
 /// Resolve when either SIGINT or SIGTERM arrives, returning a static label
@@ -1043,6 +1087,74 @@ fn parse_federation_pin_label(spec: &hermod_transport::pin::PinSpec) -> &'static
         hermod_transport::pin::PinSpec::PublicCa => "public-ca",
         hermod_transport::pin::PinSpec::Insecure => "insecure",
         hermod_transport::pin::PinSpec::Fingerprint(_) => "fingerprint",
+    }
+}
+
+#[cfg(test)]
+mod auth_bind_caller_tests {
+    use super::*;
+    use hermod_daemon::local_agent;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    /// `parse_bind_caller` must return the correct agent id when the
+    /// presented bearer matches a hosted agent's on-disk token, and
+    /// surface `Unauthorized` for any other input. Mirrors the
+    /// daemon-side path the local-socket connection uses to bind a
+    /// caller for multi-tenant local IPC.
+    #[test]
+    fn parse_bind_caller_resolves_known_bearer_and_rejects_others() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let bootstrap = local_agent::create_bootstrap(home, None).unwrap();
+        let extra = local_agent::create_additional(
+            home,
+            Some(hermod_core::AgentAlias::try_from("ide-2".to_string()).unwrap()),
+        )
+        .unwrap();
+        let registry = local_agent::load_registry(home).unwrap();
+
+        // Happy path — bootstrap bearer resolves to its agent_id.
+        let bootstrap_token = std::fs::read_to_string(local_agent::bearer_token_path(
+            home,
+            &bootstrap.agent_id,
+        ))
+        .unwrap();
+        let bootstrap_token = bootstrap_token.trim().to_string();
+        let resolved = parse_bind_caller(
+            &Some(json!({ "bearer": bootstrap_token })),
+            &registry,
+        )
+        .expect("bootstrap bearer must resolve");
+        assert_eq!(resolved, bootstrap.agent_id);
+
+        // Second agent's bearer resolves independently.
+        let extra_token = std::fs::read_to_string(local_agent::bearer_token_path(
+            home,
+            &extra.agent_id,
+        ))
+        .unwrap();
+        let extra_token = extra_token.trim().to_string();
+        let resolved = parse_bind_caller(
+            &Some(json!({ "bearer": extra_token })),
+            &registry,
+        )
+        .expect("extra agent's bearer must resolve");
+        assert_eq!(resolved, extra.agent_id);
+
+        // Unknown bearer → Unauthorized.
+        let bogus = "00".repeat(32);
+        let err = parse_bind_caller(&Some(json!({ "bearer": bogus })), &registry)
+            .expect_err("unknown bearer must fail");
+        assert_eq!(
+            err.code,
+            hermod_protocol::ipc::error::code::UNAUTHORIZED,
+            "unknown bearer must surface as Unauthorized, got {err:?}"
+        );
+
+        // Missing params → InvalidParams.
+        let err = parse_bind_caller(&None, &registry).expect_err("missing params must fail");
+        assert_eq!(err.code, hermod_protocol::ipc::error::code::INVALID_PARAMS);
     }
 }
 

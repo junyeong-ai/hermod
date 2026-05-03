@@ -144,7 +144,7 @@ pub async fn run(home: &Path, target: &ClientTarget) -> Result<()> {
 
     // Daemon reachability and audit chain.
     let label = match target {
-        ClientTarget::Local(_) => "daemon reachable on Unix socket",
+        ClientTarget::Local { .. } => "daemon reachable on Unix socket",
         ClientTarget::Remote { .. } => "remote daemon reachable (WSS+Bearer)",
     };
     let mut client = match target.connect().await {

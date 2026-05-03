@@ -42,7 +42,17 @@ use crate::remote::{RemoteIpcClient, connect_remote_with_refresh};
 /// that need observability inspect specific fields explicitly.
 #[derive(Clone)]
 pub enum ClientTarget {
-    Local(PathBuf),
+    /// Local Unix-socket IPC. The optional `bearer` provider lets
+    /// the client identify which hosted agent it speaks for on a
+    /// multi-tenant daemon (N>1 local agents); the connect path
+    /// calls `auth.bind_caller` immediately after socket open. When
+    /// `bearer = None` the daemon falls back to its single-tenant
+    /// convenience binding (or leaves caller unset on multi-tenant
+    /// daemons; per-agent methods then error out).
+    Local {
+        socket: PathBuf,
+        bearer: Option<Arc<dyn BearerProvider>>,
+    },
     Remote {
         url: Url,
         auth: RemoteAuth,
@@ -53,7 +63,9 @@ pub enum ClientTarget {
 impl ClientTarget {
     pub async fn connect(&self) -> Result<DaemonClient> {
         match self {
-            ClientTarget::Local(p) => DaemonClient::connect(p).await,
+            ClientTarget::Local { socket, bearer } => {
+                DaemonClient::connect(socket, bearer.clone()).await
+            }
             ClientTarget::Remote { url, auth, pin } => {
                 DaemonClient::connect_remote(url, auth, pin.clone()).await
             }
@@ -95,10 +107,33 @@ enum Inner {
 
 impl DaemonClient {
     /// Open a local Unix-socket IPC session.
-    pub async fn connect(socket: &Path) -> Result<Self> {
-        let ipc = IpcClient::connect_unix(socket)
+    ///
+    /// When `bearer` is provided (e.g. `HERMOD_BEARER_FILE` set, or
+    /// `--bearer-file` passed), the connect path issues an
+    /// `auth.bind_caller` request immediately so subsequent
+    /// per-agent IPC calls run under the right caller agent on a
+    /// multi-tenant daemon. Mismatched bearer fails loudly here
+    /// rather than silently writing envelopes under the wrong
+    /// identity.
+    pub async fn connect(socket: &Path, bearer: Option<Arc<dyn BearerProvider>>) -> Result<Self> {
+        let mut ipc = IpcClient::connect_unix(socket)
             .await
             .with_context(|| format!("connect daemon at {}", socket.display()))?;
+        if let Some(provider) = bearer {
+            let token = provider
+                .current()
+                .await
+                .with_context(|| "mint local IPC bearer for auth.bind_caller")?;
+            let _: hermod_protocol::ipc::methods::AuthBindCallerResult = ipc
+                .call(
+                    hermod_protocol::ipc::methods::method::AUTH_BIND_CALLER,
+                    hermod_protocol::ipc::methods::AuthBindCallerParams {
+                        bearer: token.secret().expose_secret().to_string(),
+                    },
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("auth.bind_caller failed: {e}"))?;
+        }
         Ok(Self {
             inner: Inner::Local(ipc),
         })

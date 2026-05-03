@@ -41,7 +41,7 @@ struct Cli {
     /// that updates the file) is picked up by the next connect
     /// without restarting the CLI. Mutually exclusive with
     /// `--bearer-command` and `HERMOD_BEARER_TOKEN`.
-    #[arg(long, env = "HERMOD_BEARER_FILE", requires = "remote")]
+    #[arg(long, env = "HERMOD_BEARER_FILE")]
     bearer_file: Option<PathBuf>,
 
     /// Shell command that prints the daemon-layer bearer token to
@@ -53,7 +53,7 @@ struct Cli {
     /// `--bearer-file` and `HERMOD_BEARER_TOKEN`.
     ///
     /// Example: `--bearer-command "gcloud auth print-identity-token --audiences=$IAP_CLIENT_ID"`
-    #[arg(long, env = "HERMOD_BEARER_COMMAND", requires = "remote")]
+    #[arg(long, env = "HERMOD_BEARER_COMMAND")]
     bearer_command: Option<String>,
 
     /// File containing the proxy-layer bearer token for remote IPC,
@@ -579,16 +579,17 @@ fn build_target(
     home: &std::path::Path,
     socket: &Option<PathBuf>,
 ) -> anyhow::Result<client::ClientTarget> {
+    let daemon_args = bearer::BearerArgs {
+        file: cli.bearer_file.clone(),
+        command: cli.bearer_command.clone(),
+    };
+    let daemon_env = hermod_crypto::secret::secret_from_env("HERMOD_BEARER_TOKEN");
+
     if let Some(raw_url) = &cli.remote {
         let url = url::Url::parse(raw_url)
             .map_err(|e| anyhow::anyhow!("invalid --remote URL {raw_url:?}: {e}"))?;
         let pin = build_pin_policy(cli, &url, home)?;
 
-        let daemon_args = bearer::BearerArgs {
-            file: cli.bearer_file.clone(),
-            command: cli.bearer_command.clone(),
-        };
-        let daemon_env = hermod_crypto::secret::secret_from_env("HERMOD_BEARER_TOKEN");
         let daemon_default = hermod_daemon::local_agent::implicit_bearer_default(home);
         let daemon = bearer::daemon_from_env_and_args(&daemon_args, daemon_env, daemon_default)?;
 
@@ -602,10 +603,35 @@ fn build_target(
         let auth = client::RemoteAuth { daemon, proxy };
         Ok(client::ClientTarget::Remote { url, auth, pin })
     } else {
-        Ok(client::ClientTarget::Local(socket_or_default(
-            home,
-            socket.clone(),
-        )))
+        // Local Unix socket: bind the caller agent via auth.bind_caller
+        // ONLY when the bearer is explicitly configured. The multi-
+        // tenant daemon (N>1 hosted agents) needs this to disambiguate
+        // which hosted agent the CLI invocation represents — `setup-mcp`
+        // writes the per-agent bearer path into Claude Code's
+        // `.mcp.json`, which lands here as HERMOD_BEARER_FILE.
+        //
+        // The implicit-default fallback is intentionally NOT used here:
+        // operator CLI invocations on a multi-tenant daemon without
+        // explicit bearer config get the daemon-side single-tenant
+        // convenience binding (or unset caller for N>1), preserving
+        // pre-PR backwards-compatible behavior for `hermod local list`,
+        // `hermod peer add`, etc.
+        let bearer_explicitly_set =
+            daemon_env.is_some() || daemon_args.file.is_some() || daemon_args.command.is_some();
+        let bearer = if bearer_explicitly_set {
+            let daemon_default = hermod_daemon::local_agent::implicit_bearer_default(home);
+            Some(bearer::daemon_from_env_and_args(
+                &daemon_args,
+                daemon_env,
+                daemon_default,
+            )?)
+        } else {
+            None
+        };
+        Ok(client::ClientTarget::Local {
+            socket: socket_or_default(home, socket.clone()),
+            bearer,
+        })
     }
 }
 

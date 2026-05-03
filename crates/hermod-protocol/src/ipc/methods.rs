@@ -30,6 +30,15 @@ pub mod method {
     pub const STATUS_GET: &str = "status.get";
     pub const IDENTITY_GET: &str = "identity.get";
 
+    // Auth — per-connection caller-agent binding for the local Unix
+    // socket. Multi-tenant daemons (N>1 hosted agents) cannot infer
+    // caller from filesystem auth alone; the CLI calls this method
+    // first when a bearer is configured (HERMOD_BEARER_FILE,
+    // HERMOD_BEARER_TOKEN, or --bearer-file). Remote IPC connections
+    // resolve caller during their own bearer handshake and never
+    // touch this method.
+    pub const AUTH_BIND_CALLER: &str = "auth.bind_caller";
+
     // Messages — `message.send` and `message.ack` are the sender-side
     // and read-receipt surface. The inbox lister lives at `inbox.list`
     // (richer projection: `MessageView` carries `from_alias` /
@@ -174,6 +183,38 @@ pub mod method {
     pub const PERMISSION_RESPOND: &str = "permission.respond";
     pub const PERMISSION_LIST: &str = "permission.list";
     pub const PERMISSION_LIST_RESOLVED: &str = "permission.list_resolved";
+}
+
+// ---------- auth.bind_caller ----------
+
+/// Bind a caller agent to the local Unix-socket connection. The
+/// daemon hashes the bearer with blake3 and looks up the matching
+/// hosted agent in `LocalAgentRegistry`. On success, every
+/// subsequent request on this connection runs with that agent as
+/// the audit-context caller. On failure the request errors with
+/// `Unauthorized` and the prior caller-binding (if any) is
+/// preserved.
+///
+/// Remote IPC connections never call this — bearer resolution
+/// happens inside the WSS+Bearer handshake. Local connections from
+/// single-tenant daemons don't need it either; the daemon already
+/// binds the lone hosted agent at `accept` time. It exists for
+/// **multi-tenant local IPC**: when one daemon hosts N>1 agents
+/// (e.g. one project running multiple Claude Code instances each
+/// with its own identity), the CLI needs to tell the daemon which
+/// hosted agent the caller represents.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AuthBindCallerParams {
+    /// Hex-encoded bearer token bytes (matches the on-disk
+    /// `agents/<id>/bearer_token` file content).
+    pub bearer: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AuthBindCallerResult {
+    /// The agent the bearer resolved to. Echoed back so the caller
+    /// can sanity-check it matches the agent it intended to bind.
+    pub agent_id: AgentId,
 }
 
 // ---------- status.get ----------

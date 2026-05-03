@@ -50,6 +50,17 @@ impl Dispatcher {
 
     async fn dispatch(&self, method: &str, params: Option<Value>) -> Result<Value, RpcError> {
         match method {
+            // `auth.bind_caller` modifies per-connection caller state and is
+            // therefore handled outside the dispatcher (in `handle_connection`)
+            // before the request ever reaches here. If we see it on this path
+            // it means the caller is on a non-local-socket transport that
+            // shouldn't be using it (remote IPC has its own bearer
+            // handshake) — fail loud rather than silently no-op.
+            method::AUTH_BIND_CALLER => Err(RpcError::new(
+                hermod_protocol::ipc::error::code::INVALID_REQUEST,
+                "auth.bind_caller is local-socket-scoped; use the bearer handshake on remote IPC",
+            )),
+
             method::STATUS_GET => to_value(self.status.status().await),
             method::IDENTITY_GET => to_value(self.status.identity().await),
 
