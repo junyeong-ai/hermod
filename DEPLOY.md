@@ -382,9 +382,9 @@ Every field in `[identity] [daemon] [storage] [federation] [policy]
 | -------------------------------------------- | ---------------------------------------- |
 | `HERMOD_DAEMON_LISTEN_WS=0.0.0.0:7823`       | `[daemon] listen_ws`                     |
 | `HERMOD_DAEMON_METRICS_LISTEN=0.0.0.0:9690`  | `[daemon] metrics_listen`                |
-| `HERMOD_STORAGE_URL=sqlite:///path/to/db`    | `[storage] url` (DSN; scheme = backend)  |
-| `HERMOD_STORAGE_URL=postgres://u:p@host/db`  | (postgres backend — see below)           |
-| `HERMOD_STORAGE_BLOB_ROOT=/var/lib/hermod`   | `[storage] blob_root`                    |
+| `HERMOD_STORAGE_DSN=sqlite:///path/to/db`    | `[storage] dsn` (scheme = backend)       |
+| `HERMOD_STORAGE_DSN=postgresql://u:p@host/db?sslmode=require` | (postgres backend — see below) |
+| `HERMOD_BLOB_DSN=file:///path/to/blob-store` | `[blob] dsn` (file://, gcs://, s3://, memory://) |
 | `HERMOD_FEDERATION_ENABLED=true`             | `[federation] enabled`                   |
 | `HERMOD_FEDERATION_DISCOVER_MDNS=true`       | `[federation] discover_mdns`             |
 | `HERMOD_FEDERATION_PEERS=wss://a:7823#hex,…` | `[federation] peers` (static seed)       |
@@ -555,20 +555,20 @@ sender's signature), so a malicious broker cannot impersonate a peer
 
 #### Storage backends
 
-Backend selection is by URL scheme on `[storage] url`. Built-in:
+Backend selection is by URL scheme on `[storage] dsn`. Built-in:
 
-| Scheme       | Status   | DSN form                                       |
-| ------------ | -------- | ---------------------------------------------- |
-| `sqlite`     | full     | `sqlite:///$HERMOD_HOME/hermod.db`             |
-| `postgres`   | full\*   | `postgres://user:pass@host:5432/dbname`        |
+| Scheme         | Status   | DSN form                                                       |
+| -------------- | -------- | -------------------------------------------------------------- |
+| `sqlite`       | full     | `sqlite:///$HERMOD_HOME/hermod.db`                             |
+| `postgresql`   | full\*   | `postgresql://user:pass@host:5432/dbname?sslmode=require`      |
 
 \* The PostgreSQL backend is gated behind the crate feature
 `hermod-storage/postgres`; build with
 `cargo build --release --features hermod-storage/postgres` (default
 builds are SQLite-only — the daemon binary stays lean for the
 single-host case). Every `Database` repository is implemented and
-integration-tested against PostgreSQL 16, including hash-chain
-audit append under concurrent load (per-chain `pg_advisory_xact_lock`)
+integration-tested against PostgreSQL, including hash-chain audit
+append under concurrent load (per-chain `pg_advisory_xact_lock`)
 and the outbox claim race (`FOR UPDATE SKIP LOCKED`). The
 hash-chain canonicalisation is bit-for-bit identical between the two
 backends, so an audit-archive blob exported from one verifies under
@@ -578,11 +578,11 @@ Switching backends is a one-field config change:
 
 ```toml
 [storage]
-# url = "sqlite:///$HERMOD_HOME/hermod.db"   # default, single-host
-url = "postgres://hermod:secret@db.internal/hermod"
+# dsn = "sqlite:///$HERMOD_HOME/hermod.db"   # default, single-host
+dsn = "postgresql://hermod:secret@db.internal/hermod?sslmode=require"
 ```
 
-No service-layer code, no env vars beyond `HERMOD_STORAGE_URL`, and
+No service-layer code, no env vars beyond `HERMOD_STORAGE_DSN`, and
 no migration tooling needs to change — the backend abstraction is
 genuinely driver-agnostic.
 
@@ -768,7 +768,7 @@ A daemon's persistent state is `$HERMOD_HOME`:
 ```
 $HERMOD_HOME/
   config.toml
-  hermod.db                      # SQLite (or use [storage] url for Postgres)
+  hermod.db                      # SQLite (or use [storage] dsn for Postgres)
   blobs/                         # file payloads + audit archives
   identity/
     ed25519_secret               # 32-byte seed — agent_id derives from this

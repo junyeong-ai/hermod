@@ -19,7 +19,7 @@ access.rs           AccessController + AccessVerdict — capability check + scop
 rate_limit.rs       per-(from,to) token bucket
 confirmation.rs     Verdict { Accept, Reject, Confirm } matrix — peer trust × action sensitivity
 auto_approve.rs     AutoApproveOverlay — downgrade-only Confirm→Accept rules; Permission auto-allow with FORBIDDEN_TOOL_NAMES floor
-dispatch.rs         RoutingPolicy — push vs silent disposition (and the receiver-side promote path)
+dispatch.rs         DispatchPolicy trait + Rule / RoutingConfig — push vs silent disposition (receiver-side; the operator-promote path is in inbox.promote)
 ```
 
 ## Trust matrix invariants

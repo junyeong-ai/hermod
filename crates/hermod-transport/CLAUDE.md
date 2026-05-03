@@ -45,7 +45,9 @@ restart.
 ## Pin store semantics
 
 `TlsPinStore` is the cross-restart store for cert fingerprints.
-Three pin policies on the dialing side: `Insecure` (Noise XX
-already provides peer auth — reasonable default for federation),
-`Tofu` (SSH-style first-use pinning), `Fingerprint(<sha256>)`
-(explicit pin, fail-closed on mismatch).
+`PinSpec` (the dialing-side enum in this crate) carries four
+variants: `Insecure` (Noise XX already provides peer auth —
+reasonable default for federation), `Tofu` (SSH-style first-use
+pinning), `PublicCa` (delegate validation to the system trust
+store — for hosted brokers behind a public CA), and
+`Fingerprint(<sha256>)` (explicit pin, fail-closed on mismatch).

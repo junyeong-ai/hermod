@@ -17,8 +17,10 @@ higher crate.
   in hermod-crypto.
 - **Capability tags** (`capability_tag.rs`): `CapabilityTagSet`
   (discovery-only, never trust-bearing).
-- **Time** (`time.rs`): `Timestamp` (unix-ms i64), the only timestamp
-  shape on the wire.
+- **Time** (`time.rs`): `Timestamp` — wraps `time::OffsetDateTime`
+  but is only ever serialized + compared as unix milliseconds
+  (`unix_ms() / from_unix_ms`). The only timestamp shape on the
+  wire.
 - **Compile-time bounds**: `MAX_FILE_PAYLOAD_BYTES`,
   `MAX_CAPS_PER_ENVELOPE`. Both are pinned by wire-level tests in
   `hermod-protocol`; raising either requires re-running
