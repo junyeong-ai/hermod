@@ -108,7 +108,7 @@ pub enum ChannelEvent {
         from_host_pubkey: Option<String>,
         from_live: bool,
         /// Operator-facing intent label (e.g. `"message.deliver"`,
-        /// `"workspace.invite"`). Mirrors `HoldedIntent::as_str()`.
+        /// `"workspace.invite"`). Mirrors `HeldIntent::as_str()`.
         intent: String,
         /// Wire-format sensitivity (`"routine" | "review" | "sensitive"`).
         /// String here keeps the MCP layer free of routing-internal types.

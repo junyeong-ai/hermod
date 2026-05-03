@@ -588,14 +588,14 @@ fn brokered_mesh_via_relay_only_broker() {
     bob.run(&["peer", "trust", &broker_id, "verified"]);
 
     // The crux — alice registers bob with `--via @broker`, no
-    // endpoint of her own. Dispatcher should resolve to Brokered.
+    // endpoint or host pubkey of her own (the broker dials bob, so
+    // the Noise XX pin lives in the broker's directory, not alice's).
+    // Dispatcher should resolve alice→bob to Brokered.
     let (rc, add_out) = alice.run(&[
         "peer",
         "add",
         "--via",
         "@broker",
-        "--host-pubkey-hex",
-        &bob_host_pk,
         "--agent-pubkey-hex",
         &bob_agent_pk,
         "--alias",
@@ -613,8 +613,6 @@ fn brokered_mesh_via_relay_only_broker() {
         "add",
         "--via",
         "@broker",
-        "--host-pubkey-hex",
-        &alice_host_pk,
         "--agent-pubkey-hex",
         &alice_agent_pk,
         "--alias",
@@ -655,7 +653,6 @@ fn brokered_mesh_via_relay_only_broker() {
 fn peer_add_via_unknown_broker_rejects() {
     let alice = Daemon::spawn("alice", 17932, None);
     let bob = Daemon::spawn("bob", 17933, None);
-    let bob_host_pk = bob.host_pubkey_hex();
     let bob_agent_pk = bob.agent_pubkey_hex();
 
     let (rc, out) = alice.run(&[
@@ -663,8 +660,6 @@ fn peer_add_via_unknown_broker_rejects() {
         "add",
         "--via",
         "@nonexistent",
-        "--host-pubkey-hex",
-        &bob_host_pk,
         "--agent-pubkey-hex",
         &bob_agent_pk,
         "--alias",
@@ -686,8 +681,6 @@ fn peer_add_endpoint_and_via_are_mutually_exclusive() {
         "wss://x:7823",
         "--via",
         "@broker",
-        "--host-pubkey-hex",
-        &"00".repeat(32),
         "--agent-pubkey-hex",
         &"00".repeat(32),
     ]);

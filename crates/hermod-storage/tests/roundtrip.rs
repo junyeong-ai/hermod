@@ -7,7 +7,7 @@ use hermod_core::{
 };
 use hermod_crypto::{Keypair, LocalKeySigner, Signer, canonical_envelope_bytes};
 use hermod_storage::backends::sqlite::SqliteDatabase;
-use hermod_storage::{AgentRecord, Database, InboxFilter, MessageRecord, RepinOutcome};
+use hermod_storage::{AgentRecord, Database, HostRecord, InboxFilter, MessageRecord};
 use std::sync::Arc;
 
 fn tmp_db_path() -> std::path::PathBuf {
@@ -38,13 +38,11 @@ async fn message_roundtrip() {
             .upsert(&AgentRecord {
                 id: kp.agent_id(),
                 pubkey: kp.to_pubkey_bytes(),
-                host_pubkey: None,
-                endpoint: None,
+                host_id: None,
                 via_agent: None,
                 local_alias: None,
                 peer_asserted_alias: None,
                 trust_level: TrustLevel::Local,
-                tls_fingerprint: None,
                 reputation: 0,
                 first_seen: now,
                 last_seen: Some(now),
@@ -118,13 +116,11 @@ async fn priority_min_filter_binds_correctly() {
             .upsert(&AgentRecord {
                 id: kp.agent_id(),
                 pubkey: kp.to_pubkey_bytes(),
-                host_pubkey: None,
-                endpoint: None,
+                host_id: None,
                 via_agent: None,
                 local_alias: None,
                 peer_asserted_alias: None,
                 trust_level: TrustLevel::Local,
-                tls_fingerprint: None,
                 reputation: 0,
                 first_seen: now,
                 last_seen: Some(now),
@@ -206,13 +202,11 @@ async fn wrong_recipient_cannot_ack() {
             .upsert(&AgentRecord {
                 id: kp.agent_id(),
                 pubkey: kp.to_pubkey_bytes(),
-                host_pubkey: None,
-                endpoint: None,
+                host_id: None,
                 via_agent: None,
                 local_alias: None,
                 peer_asserted_alias: None,
                 trust_level: TrustLevel::Local,
-                tls_fingerprint: None,
                 reputation: 0,
                 first_seen: now,
                 last_seen: Some(now),
@@ -261,13 +255,11 @@ async fn agent_upsert_preserves_operator_trust() {
         .upsert(&AgentRecord {
             id: kp.agent_id(),
             pubkey: kp.to_pubkey_bytes(),
-            host_pubkey: None,
-            endpoint: None,
+            host_id: None,
             via_agent: None,
             local_alias: None,
             peer_asserted_alias: None,
             trust_level: TrustLevel::Tofu,
-            tls_fingerprint: None,
             reputation: 0,
             first_seen: now,
             last_seen: Some(now),
@@ -287,13 +279,11 @@ async fn agent_upsert_preserves_operator_trust() {
         .upsert(&AgentRecord {
             id: kp.agent_id(),
             pubkey: kp.to_pubkey_bytes(),
-            host_pubkey: None,
-            endpoint: None,
+            host_id: None,
             via_agent: None,
             local_alias: None,
             peer_asserted_alias: None,
             trust_level: TrustLevel::Tofu,
-            tls_fingerprint: None,
             reputation: 0,
             first_seen: now,
             last_seen: Some(now),
@@ -329,13 +319,11 @@ async fn broadcast_hmac_end_to_end() {
             .upsert(&AgentRecord {
                 id: kp.agent_id(),
                 pubkey: kp.to_pubkey_bytes(),
-                host_pubkey: None,
-                endpoint: None,
+                host_id: None,
                 via_agent: None,
                 local_alias: None,
                 peer_asserted_alias: None,
                 trust_level: TrustLevel::Tofu,
-                tls_fingerprint: None,
                 reputation: 0,
                 first_seen: now,
                 last_seen: Some(now),
@@ -456,13 +444,11 @@ async fn fail_pending_to_clears_invisible_pending() {
             .upsert(&AgentRecord {
                 id: kp.agent_id(),
                 pubkey: kp.to_pubkey_bytes(),
-                host_pubkey: None,
-                endpoint: None,
+                host_id: None,
                 via_agent: None,
                 local_alias: None,
                 peer_asserted_alias: None,
                 trust_level: TrustLevel::Tofu,
-                tls_fingerprint: None,
                 reputation: 0,
                 first_seen: now,
                 last_seen: Some(now),
@@ -536,13 +522,11 @@ async fn list_distinct_excluding_is_deterministic() {
             .upsert(&AgentRecord {
                 id: kp.agent_id(),
                 pubkey: kp.to_pubkey_bytes(),
-                host_pubkey: None,
-                endpoint: None,
+                host_id: None,
                 via_agent: None,
                 local_alias: None,
                 peer_asserted_alias: None,
                 trust_level: TrustLevel::Tofu,
-                tls_fingerprint: None,
                 reputation: 0,
                 first_seen: now,
                 last_seen: Some(now),
@@ -592,186 +576,11 @@ async fn list_distinct_excluding_is_deterministic() {
     assert_eq!(first, sorted);
 }
 
-#[tokio::test]
-async fn forget_peer_returns_prior_endpoint_atomically() {
-    // Regression: forget_peer must read-and-clear in one transaction, so
-    // a concurrent peer.add can't change the endpoint between the read
-    // and the clear and leave a stale pool entry alive.
-    let db = fresh_db().await;
-    let kp = Keypair::generate();
-    let now = Timestamp::now();
-
-    let endpoint = hermod_core::Endpoint::Wss(hermod_core::WssEndpoint {
-        host: "example.com".into(),
-        port: 7823,
-    });
-    db.agents()
-        .upsert(&AgentRecord {
-            id: kp.agent_id(),
-            pubkey: kp.to_pubkey_bytes(),
-            host_pubkey: None,
-            endpoint: Some(endpoint.clone()),
-            via_agent: None,
-            local_alias: None,
-            peer_asserted_alias: None,
-            trust_level: TrustLevel::Verified,
-            tls_fingerprint: Some("aa:bb".into()),
-            reputation: 0,
-            first_seen: now,
-            last_seen: Some(now),
-            peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
-        })
-        .await
-        .unwrap();
-
-    let outcome = db.agents().forget_peer(&kp.agent_id()).await.unwrap();
-    assert!(outcome.existed);
-    assert_eq!(outcome.prior_endpoint, Some(endpoint));
-
-    // Idempotent: a second call against the now-cleared row reports
-    // existed=true (row still exists) but prior_endpoint=None.
-    let outcome2 = db.agents().forget_peer(&kp.agent_id()).await.unwrap();
-    assert!(outcome2.existed);
-    assert_eq!(outcome2.prior_endpoint, None);
-
-    // Missing row reports existed=false.
-    let missing = db
-        .agents()
-        .forget_peer(&Keypair::generate().agent_id())
-        .await
-        .unwrap();
-    assert!(!missing.existed);
-    assert_eq!(missing.prior_endpoint, None);
-}
-
-#[tokio::test]
-async fn repin_returns_endpoint_snapshot_for_pool_eviction() {
-    // R17 regression: replace_tls_fingerprint must capture the endpoint
-    // inside the same SQL transaction that swaps the fingerprint.
-    // Without that snapshot, a follow-up SELECT could observe an
-    // endpoint changed by a concurrent peer.add and evict the wrong
-    // pool entry, leaving the stale-context one alive.
-    let db = fresh_db().await;
-    let kp = Keypair::generate();
-    let now = Timestamp::now();
-    let endpoint = hermod_core::Endpoint::Wss(hermod_core::WssEndpoint {
-        host: "peer.example".into(),
-        port: 7823,
-    });
-    db.agents()
-        .upsert(&AgentRecord {
-            id: kp.agent_id(),
-            pubkey: kp.to_pubkey_bytes(),
-            host_pubkey: None,
-            endpoint: Some(endpoint.clone()),
-            via_agent: None,
-            local_alias: None,
-            peer_asserted_alias: None,
-            trust_level: TrustLevel::Verified,
-            tls_fingerprint: Some("aa:bb".into()),
-            reputation: 0,
-            first_seen: now,
-            last_seen: Some(now),
-            peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
-        })
-        .await
-        .unwrap();
-
-    let outcome = db
-        .agents()
-        .replace_tls_fingerprint(&kp.agent_id(), "cc:dd", TrustLevel::Verified)
-        .await
-        .unwrap();
-    match outcome {
-        RepinOutcome::Replaced {
-            previous,
-            endpoint: ep,
-        } => {
-            assert_eq!(previous.as_deref(), Some("aa:bb"));
-            assert_eq!(ep, Some(endpoint));
-        }
-        other => panic!("expected Replaced with endpoint, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn repin_atomic_against_trust_change() {
-    // Regression: replace_tls_fingerprint must check trust level and
-    // perform the update in one transaction. A non-Verified peer must
-    // not have its pin silently rotated.
-    let db = fresh_db().await;
-    let kp = Keypair::generate();
-    let now = Timestamp::now();
-
-    db.agents()
-        .upsert(&AgentRecord {
-            id: kp.agent_id(),
-            pubkey: kp.to_pubkey_bytes(),
-            host_pubkey: None,
-            endpoint: None,
-            via_agent: None,
-            local_alias: None,
-            peer_asserted_alias: None,
-            trust_level: TrustLevel::Tofu,
-            tls_fingerprint: Some("aa:bb".into()),
-            reputation: 0,
-            first_seen: now,
-            last_seen: Some(now),
-            peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
-        })
-        .await
-        .unwrap();
-
-    // Tofu — refuse.
-    let r = db
-        .agents()
-        .replace_tls_fingerprint(&kp.agent_id(), "cc:dd", TrustLevel::Verified)
-        .await
-        .unwrap();
-    match r {
-        RepinOutcome::TrustMismatch { actual } => assert_eq!(actual, TrustLevel::Tofu),
-        other => panic!("expected TrustMismatch, got {other:?}"),
-    }
-    // The pin must NOT have been rotated.
-    let rec = db.agents().get(&kp.agent_id()).await.unwrap().unwrap();
-    assert_eq!(rec.tls_fingerprint.as_deref(), Some("aa:bb"));
-
-    // Promote to Verified.
-    db.agents()
-        .set_trust(&kp.agent_id(), TrustLevel::Verified)
-        .await
-        .unwrap();
-
-    // Now repin succeeds and reports the previous value + the endpoint
-    // snapshot taken inside the same transaction.
-    let r = db
-        .agents()
-        .replace_tls_fingerprint(&kp.agent_id(), "cc:dd", TrustLevel::Verified)
-        .await
-        .unwrap();
-    match r {
-        RepinOutcome::Replaced { previous, endpoint } => {
-            assert_eq!(previous.as_deref(), Some("aa:bb"));
-            // This peer was upserted with endpoint = None.
-            assert_eq!(endpoint, None);
-        }
-        other => panic!("expected Replaced, got {other:?}"),
-    }
-    let rec = db.agents().get(&kp.agent_id()).await.unwrap().unwrap();
-    assert_eq!(rec.tls_fingerprint.as_deref(), Some("cc:dd"));
-
-    // Missing peer.
-    let r = db
-        .agents()
-        .replace_tls_fingerprint(
-            &Keypair::generate().agent_id(),
-            "ee:ff",
-            TrustLevel::Verified,
-        )
-        .await
-        .unwrap();
-    assert_eq!(r, RepinOutcome::NotFound);
-}
+// `HostRepository` integration tests cover `forget`,
+// `replace_tls_fingerprint`, and `pin_or_match_tls_fingerprint`
+// directly (see `crates/hermod-storage/src/backends/sqlite/hosts.rs`).
+// The `peer.repin` trust-gate is enforced in the daemon's
+// `services::peer::repin` (see daemon-side regression).
 
 /// Two outbox workers calling `claim_pending_remote` concurrently must
 /// never both receive the same row. SQLite's IMMEDIATE transaction
@@ -797,13 +606,11 @@ async fn claim_pending_remote_no_double_claims_under_race() {
         .upsert(&AgentRecord {
             id: sender.agent_id(),
             pubkey: sender.to_pubkey_bytes(),
-            host_pubkey: None,
-            endpoint: None,
+            host_id: None,
             via_agent: None,
             local_alias: None,
             peer_asserted_alias: None,
             trust_level: TrustLevel::Local,
-            tls_fingerprint: None,
             reputation: 0,
             first_seen: now,
             last_seen: Some(now),
@@ -811,17 +618,29 @@ async fn claim_pending_remote_no_double_claims_under_race() {
         })
         .await
         .unwrap();
+    let host_pk = recipient.to_pubkey_bytes();
+    let host_id = hermod_crypto::agent_id_from_pubkey(&host_pk);
+    db.hosts()
+        .upsert(&HostRecord {
+            id: host_id.clone(),
+            pubkey: host_pk,
+            endpoint: Some(endpoint),
+            tls_fingerprint: None,
+            peer_asserted_alias: None,
+            first_seen: now,
+            last_seen: Some(now),
+        })
+        .await
+        .unwrap();
     db.agents()
         .upsert(&AgentRecord {
             id: recipient.agent_id(),
             pubkey: recipient.to_pubkey_bytes(),
-            host_pubkey: None,
-            endpoint: Some(endpoint),
+            host_id: Some(host_id),
             via_agent: None,
             local_alias: None,
             peer_asserted_alias: None,
             trust_level: TrustLevel::Verified,
-            tls_fingerprint: None,
             reputation: 0,
             first_seen: now,
             last_seen: Some(now),
@@ -902,21 +721,33 @@ async fn claim_pending_remote_reclaims_stale_owners() {
         host: "remote.example".into(),
         port: 7823,
     });
-    for (kp, ep, trust) in [
+    let recipient_host_pk = recipient.to_pubkey_bytes();
+    let recipient_host_id = hermod_crypto::agent_id_from_pubkey(&recipient_host_pk);
+    db.hosts()
+        .upsert(&HostRecord {
+            id: recipient_host_id.clone(),
+            pubkey: recipient_host_pk,
+            endpoint: Some(endpoint),
+            tls_fingerprint: None,
+            peer_asserted_alias: None,
+            first_seen: now,
+            last_seen: Some(now),
+        })
+        .await
+        .unwrap();
+    for (kp, host_id, trust) in [
         (&sender, None, TrustLevel::Local),
-        (&recipient, Some(endpoint), TrustLevel::Verified),
+        (&recipient, Some(recipient_host_id), TrustLevel::Verified),
     ] {
         db.agents()
             .upsert(&AgentRecord {
                 id: kp.agent_id(),
                 pubkey: kp.to_pubkey_bytes(),
-                host_pubkey: None,
-                endpoint: ep,
+                host_id,
                 via_agent: None,
                 local_alias: None,
                 peer_asserted_alias: None,
                 trust_level: trust,
-                tls_fingerprint: None,
                 reputation: 0,
                 first_seen: now,
                 last_seen: Some(now),
@@ -991,13 +822,11 @@ async fn mcp_session_label_attach_resume_and_cursor_advance() {
         .upsert(&AgentRecord {
             id: kp.agent_id(),
             pubkey: kp.to_pubkey_bytes(),
-            host_pubkey: None,
-            endpoint: None,
+            host_id: None,
             via_agent: None,
             local_alias: None,
             peer_asserted_alias: None,
             trust_level: TrustLevel::Local,
-            tls_fingerprint: None,
             reputation: 0,
             first_seen: now,
             last_seen: Some(now),
@@ -1115,18 +944,16 @@ async fn count_with_effective_alias_excludes_self_and_counts_collisions() {
     let now = Timestamp::now();
     let alias: AgentAlias = "alice".parse().unwrap();
 
-    let mk = |idx: u32, local: Option<AgentAlias>, peer: Option<AgentAlias>| -> AgentRecord {
+    let mk = |_idx: u32, local: Option<AgentAlias>, peer: Option<AgentAlias>| -> AgentRecord {
         let kp = Keypair::generate();
         AgentRecord {
             id: kp.agent_id(),
             pubkey: kp.to_pubkey_bytes(),
-            host_pubkey: Some(hermod_core::PubkeyBytes([idx as u8; 32])),
-            endpoint: None,
+            host_id: None,
             via_agent: None,
             local_alias: local,
             peer_asserted_alias: peer,
             trust_level: TrustLevel::Tofu,
-            tls_fingerprint: None,
             reputation: 0,
             first_seen: now,
             last_seen: Some(now),
@@ -1177,13 +1004,11 @@ async fn inbox_disposition_filter_and_promote() {
             .upsert(&AgentRecord {
                 id: kp.agent_id(),
                 pubkey: kp.to_pubkey_bytes(),
-                host_pubkey: None,
-                endpoint: None,
+                host_id: None,
                 via_agent: None,
                 local_alias: None,
                 peer_asserted_alias: None,
                 trust_level: TrustLevel::Local,
-                tls_fingerprint: None,
                 reputation: 0,
                 first_seen: now,
                 last_seen: Some(now),
@@ -1314,13 +1139,11 @@ async fn notification_enqueue_respects_cap_atomically() {
             .upsert(&AgentRecord {
                 id: kp.agent_id(),
                 pubkey: kp.to_pubkey_bytes(),
-                host_pubkey: None,
-                endpoint: None,
+                host_id: None,
                 via_agent: None,
                 local_alias: None,
                 peer_asserted_alias: None,
                 trust_level: TrustLevel::Local,
-                tls_fingerprint: None,
                 reputation: 0,
                 first_seen: now,
                 last_seen: Some(now),

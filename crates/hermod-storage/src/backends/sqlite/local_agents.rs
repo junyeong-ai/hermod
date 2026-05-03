@@ -144,7 +144,7 @@ mod tests {
     use crate::Database;
     use crate::backends::sqlite::SqliteDatabase;
     use crate::repositories::agents::AgentRecord;
-    use hermod_core::{Endpoint, PubkeyBytes, TrustLevel};
+    use hermod_core::{PubkeyBytes, TrustLevel};
     use hermod_crypto::{Keypair, LocalKeySigner, Signer};
     use std::sync::Arc;
 
@@ -186,16 +186,11 @@ mod tests {
             .upsert(&AgentRecord {
                 id: record.agent_id.clone(),
                 pubkey: kp_pubkey,
-                host_pubkey: Some(kp_pubkey),
-                endpoint: Some(Endpoint::Wss(hermod_core::WssEndpoint {
-                    host: "host.example".into(),
-                    port: 7823,
-                })),
+                host_id: None,
                 via_agent: None,
                 local_alias: None,
                 peer_asserted_alias: None,
                 trust_level: TrustLevel::Local,
-                tls_fingerprint: None,
                 reputation: 0,
                 first_seen: record.created_at,
                 last_seen: Some(record.created_at),

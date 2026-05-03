@@ -29,9 +29,14 @@ impl InboundProcessor {
         )
         .await
         .map_err(FederationRejection::Unauthorized)?;
-        svc.handle_roster_request(&envelope.from.id, envelope.id, workspace_id)
-            .await
-            .map_err(|e| FederationRejection::Storage(e.to_string()))
+        svc.handle_roster_request(
+            &envelope.to.id,
+            &envelope.from.id,
+            envelope.id,
+            workspace_id,
+        )
+        .await
+        .map_err(|e| FederationRejection::Storage(e.to_string()))
     }
 
     pub(super) async fn accept_workspace_roster_response(
@@ -105,18 +110,24 @@ impl InboundProcessor {
             if self.local_agents.lookup(&m.id).is_some() {
                 continue;
             }
+            // `upsert` (not `upsert_observed`) so re-observing a
+            // member on every membership refresh doesn't clobber the
+            // peer-asserted columns subsequent `peer.advertise`
+            // envelopes have populated. Member observations carry
+            // no alias / tag claims of their own — only `(id,
+            // pubkey)`. The host_id is filled in later, when the
+            // member sends an envelope and inbound TOFU runs
+            // `record_host_peer`.
             self.db
                 .agents()
-                .upsert_observed(&hermod_storage::AgentRecord {
+                .upsert(&hermod_storage::AgentRecord {
                     id: m.id.clone(),
                     pubkey: m.pubkey,
-                    host_pubkey: None,
-                    endpoint: None,
+                    host_id: None,
                     via_agent: None,
                     local_alias: None,
                     peer_asserted_alias: None,
                     trust_level: TrustLevel::Tofu,
-                    tls_fingerprint: None,
                     reputation: 0,
                     first_seen: now,
                     last_seen: Some(now),
@@ -149,9 +160,14 @@ impl InboundProcessor {
         )
         .await
         .map_err(FederationRejection::Unauthorized)?;
-        svc.handle_channels_request(&envelope.from.id, envelope.id, workspace_id)
-            .await
-            .map_err(|e| FederationRejection::Storage(e.to_string()))
+        svc.handle_channels_request(
+            &envelope.to.id,
+            &envelope.from.id,
+            envelope.id,
+            workspace_id,
+        )
+        .await
+        .map_err(|e| FederationRejection::Storage(e.to_string()))
     }
 
     pub(super) async fn accept_workspace_channels_response(

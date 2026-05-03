@@ -18,6 +18,7 @@ use crate::repositories::{
     briefs::BriefRepository,
     capabilities::CapabilityRepository,
     confirmations::ConfirmationRepository,
+    hosts::HostRepository,
     local_agents::LocalAgentRepository,
     messages::MessageRepository,
     notifications::NotificationRepository,
@@ -81,6 +82,7 @@ pub trait Database: Send + Sync + std::fmt::Debug + 'static {
     fn channels(&self) -> &dyn ChannelRepository;
     fn confirmations(&self) -> &dyn ConfirmationRepository;
     fn discovered_channels(&self) -> &dyn DiscoveredChannelRepository;
+    fn hosts(&self) -> &dyn HostRepository;
     fn local_agents(&self) -> &dyn LocalAgentRepository;
     fn mcp_sessions(&self) -> &dyn McpSessionRepository;
     fn messages(&self) -> &dyn MessageRepository;

@@ -11,6 +11,7 @@ mod briefs;
 mod capabilities;
 mod confirmations;
 mod database;
+mod hosts;
 mod local_agents;
 mod messages;
 mod notifications;

@@ -778,7 +778,7 @@ fn federated_permission_relay_round_trip() {
 /// listing. Walks backwards from the matching action to the
 /// preceding `"id"` field of the same entry.
 fn extract_held_capability_grant_id(listing: &str) -> Option<String> {
-    // `confirm list` emits the typed `HoldedIntent` as a JSON string
+    // `confirm list` emits the typed `HeldIntent` as a JSON string
     // under the `intent` field on `PendingConfirmationView`. Locate
     // the row whose intent is `capability.deliver`, then walk back
     // to the row's `id`.

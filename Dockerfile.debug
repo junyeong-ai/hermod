@@ -1,0 +1,46 @@
+# Hermod debug image — same binaries as `Dockerfile`, swapped runtime.
+#
+# Replaces distroless with `debian:bookworm-slim` so end-to-end test
+# scenarios can:
+#
+#   * spawn `hermod mcp` in the background via `sh -c '… &'`
+#   * use `jq` / `procps` for inspection inside the container
+#   * read SQLite state directly via `sqlite3` when debugging
+#
+# Production stays on `Dockerfile` (distroless cc-debian12). This
+# image's only job is enabling reproducible scenario verification.
+
+FROM rust:1.94-slim-bookworm AS build
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends pkg-config libssl-dev \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN cargo build --release -p hermod-daemon -p hermod-cli --bin hermodd --bin hermod \
+ && strip target/release/hermodd target/release/hermod \
+ && mkdir -p /out/state
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        jq \
+        procps \
+        sqlite3 \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --gid 65532 hermod \
+ && useradd --uid 65532 --gid 65532 --no-create-home --shell /bin/sh hermod
+COPY --from=build /src/target/release/hermodd /usr/local/bin/hermodd
+COPY --from=build /src/target/release/hermod  /usr/local/bin/hermod
+COPY --from=build --chown=65532:65532 /out/state /var/lib/hermod
+
+ENV HERMOD_HOME=/var/lib/hermod
+ENV HERMOD_DAEMON_LOG=info
+EXPOSE 7823
+EXPOSE 9690
+
+VOLUME ["/var/lib/hermod"]
+
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/hermodd"]

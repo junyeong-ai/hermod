@@ -118,16 +118,15 @@ impl LocalAgentService {
         //    FK references it), then the local_agents row.
         let bearer_hash = agent.bearer_hash();
         let now = Timestamp::now();
+        let host_id = hermod_crypto::agent_id_from_pubkey(&self.host_pubkey);
         let agent_record = AgentRecord {
             id: agent.agent_id.clone(),
             pubkey: agent.keypair.to_pubkey_bytes(),
-            host_pubkey: Some(self.host_pubkey),
-            endpoint: None,
+            host_id: None,
             via_agent: None,
             local_alias: alias.clone(),
             peer_asserted_alias: None,
             trust_level: TrustLevel::Local,
-            tls_fingerprint: None,
             reputation: 0,
             first_seen: now,
             last_seen: Some(now),
@@ -139,6 +138,11 @@ impl LocalAgentService {
         self.db
             .agents()
             .upsert(&agent_record)
+            .await
+            .map_err(ServiceError::Storage)?;
+        self.db
+            .agents()
+            .set_routing_direct(&agent.agent_id, &host_id)
             .await
             .map_err(ServiceError::Storage)?;
         let db_record = LocalAgentRecord {

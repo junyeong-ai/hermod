@@ -192,7 +192,7 @@ fn row_to_pending(row: sqlx::sqlite::SqliteRow) -> Result<PendingConfirmation> {
     let recipient = AgentId::from_str(&recipient_str).map_err(StorageError::Core)?;
     let intent_s: String = row.try_get("intent")?;
     let intent =
-        crate::HoldedIntent::from_str(&intent_s).map_err(crate::error::StorageError::Core)?;
+        crate::HeldIntent::from_str(&intent_s).map_err(crate::error::StorageError::Core)?;
     let sensitivity: String = row.try_get("sensitivity")?;
     let trust_str: String = row.try_get("trust_level")?;
     let trust_level = TrustLevel::from_str(&trust_str).map_err(StorageError::Core)?;
@@ -259,13 +259,11 @@ mod tests {
                 .upsert(&AgentRecord {
                     id: (*id).clone(),
                     pubkey: PubkeyBytes(*pk),
-                    host_pubkey: None,
-                    endpoint: None,
+                    host_id: None,
                     via_agent: None,
                     local_alias: None,
                     peer_asserted_alias: None,
                     trust_level: TrustLevel::Tofu,
-                    tls_fingerprint: None,
                     reputation: 0,
                     first_seen: now,
                     last_seen: Some(now),
@@ -281,7 +279,7 @@ mod tests {
             envelope_id: &env_id,
             actor: &actor,
             recipient: &recipient,
-            intent: crate::HoldedIntent::DirectMessage,
+            intent: crate::HeldIntent::DirectMessage,
             sensitivity: "review",
             trust_level: TrustLevel::Tofu,
             summary,

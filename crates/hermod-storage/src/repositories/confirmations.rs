@@ -55,7 +55,7 @@ impl FromStr for ConfirmationStatus {
 /// `hermod confirmation list` output / DB column); parsed back via
 /// [`FromStr`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HoldedIntent {
+pub enum HeldIntent {
     DirectMessage,
     BriefDeliver,
     ChannelBroadcast,
@@ -74,57 +74,57 @@ pub enum HoldedIntent {
     PeerAdvertise,
 }
 
-impl HoldedIntent {
+impl HeldIntent {
     pub fn as_str(&self) -> &'static str {
         match self {
-            HoldedIntent::DirectMessage => "message.deliver",
-            HoldedIntent::BriefDeliver => "brief.deliver",
-            HoldedIntent::ChannelBroadcast => "broadcast.deliver",
-            HoldedIntent::ChannelAdvertise => "channel.advertise",
-            HoldedIntent::WorkspaceInvite => "workspace.invite",
-            HoldedIntent::PresenceUpdate => "presence.deliver",
-            HoldedIntent::FileDeliver => "file.deliver",
-            HoldedIntent::PermissionRelay => "permission.relay",
-            HoldedIntent::PermissionRelayResponse => "permission.relay.responded",
-            HoldedIntent::CapabilityDeliver => "capability.deliver",
-            HoldedIntent::AuditFederate => "audit.federate.received",
-            HoldedIntent::WorkspaceRosterRequest => "workspace.roster.request",
-            HoldedIntent::WorkspaceRosterResponse => "workspace.roster.response",
-            HoldedIntent::WorkspaceChannelsRequest => "workspace.channels.request",
-            HoldedIntent::WorkspaceChannelsResponse => "workspace.channels.response",
-            HoldedIntent::PeerAdvertise => "peer.advertise",
+            HeldIntent::DirectMessage => "message.deliver",
+            HeldIntent::BriefDeliver => "brief.deliver",
+            HeldIntent::ChannelBroadcast => "broadcast.deliver",
+            HeldIntent::ChannelAdvertise => "channel.advertise",
+            HeldIntent::WorkspaceInvite => "workspace.invite",
+            HeldIntent::PresenceUpdate => "presence.deliver",
+            HeldIntent::FileDeliver => "file.deliver",
+            HeldIntent::PermissionRelay => "permission.relay",
+            HeldIntent::PermissionRelayResponse => "permission.relay.responded",
+            HeldIntent::CapabilityDeliver => "capability.deliver",
+            HeldIntent::AuditFederate => "audit.federate.received",
+            HeldIntent::WorkspaceRosterRequest => "workspace.roster.request",
+            HeldIntent::WorkspaceRosterResponse => "workspace.roster.response",
+            HeldIntent::WorkspaceChannelsRequest => "workspace.channels.request",
+            HeldIntent::WorkspaceChannelsResponse => "workspace.channels.response",
+            HeldIntent::PeerAdvertise => "peer.advertise",
         }
     }
 }
 
-impl FromStr for HoldedIntent {
+impl FromStr for HeldIntent {
     type Err = hermod_core::HermodError;
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
-            "message.deliver" => Ok(HoldedIntent::DirectMessage),
-            "brief.deliver" => Ok(HoldedIntent::BriefDeliver),
-            "broadcast.deliver" => Ok(HoldedIntent::ChannelBroadcast),
-            "channel.advertise" => Ok(HoldedIntent::ChannelAdvertise),
-            "workspace.invite" => Ok(HoldedIntent::WorkspaceInvite),
-            "presence.deliver" => Ok(HoldedIntent::PresenceUpdate),
-            "file.deliver" => Ok(HoldedIntent::FileDeliver),
-            "permission.relay" => Ok(HoldedIntent::PermissionRelay),
-            "permission.relay.responded" => Ok(HoldedIntent::PermissionRelayResponse),
-            "capability.deliver" => Ok(HoldedIntent::CapabilityDeliver),
-            "audit.federate.received" => Ok(HoldedIntent::AuditFederate),
-            "workspace.roster.request" => Ok(HoldedIntent::WorkspaceRosterRequest),
-            "workspace.roster.response" => Ok(HoldedIntent::WorkspaceRosterResponse),
-            "workspace.channels.request" => Ok(HoldedIntent::WorkspaceChannelsRequest),
-            "workspace.channels.response" => Ok(HoldedIntent::WorkspaceChannelsResponse),
-            "peer.advertise" => Ok(HoldedIntent::PeerAdvertise),
+            "message.deliver" => Ok(HeldIntent::DirectMessage),
+            "brief.deliver" => Ok(HeldIntent::BriefDeliver),
+            "broadcast.deliver" => Ok(HeldIntent::ChannelBroadcast),
+            "channel.advertise" => Ok(HeldIntent::ChannelAdvertise),
+            "workspace.invite" => Ok(HeldIntent::WorkspaceInvite),
+            "presence.deliver" => Ok(HeldIntent::PresenceUpdate),
+            "file.deliver" => Ok(HeldIntent::FileDeliver),
+            "permission.relay" => Ok(HeldIntent::PermissionRelay),
+            "permission.relay.responded" => Ok(HeldIntent::PermissionRelayResponse),
+            "capability.deliver" => Ok(HeldIntent::CapabilityDeliver),
+            "audit.federate.received" => Ok(HeldIntent::AuditFederate),
+            "workspace.roster.request" => Ok(HeldIntent::WorkspaceRosterRequest),
+            "workspace.roster.response" => Ok(HeldIntent::WorkspaceRosterResponse),
+            "workspace.channels.request" => Ok(HeldIntent::WorkspaceChannelsRequest),
+            "workspace.channels.response" => Ok(HeldIntent::WorkspaceChannelsResponse),
+            "peer.advertise" => Ok(HeldIntent::PeerAdvertise),
             other => Err(hermod_core::HermodError::InvalidEnvelope(format!(
-                "unknown holded intent {other:?}"
+                "unknown held intent {other:?}"
             ))),
         }
     }
 }
 
-impl std::fmt::Display for HoldedIntent {
+impl std::fmt::Display for HeldIntent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -134,35 +134,35 @@ impl std::fmt::Display for HoldedIntent {
 mod intent_tests {
     use super::*;
 
-    /// Every `HoldedIntent` variant. Maintained by hand because
+    /// Every `HeldIntent` variant. Maintained by hand because
     /// adding `strum` derive would push a transitive dep into the
     /// crate's public API; this list is short enough that a
     /// missed-variant test failure here is the canonical signal that
     /// `as_str` / `FromStr` need a new arm.
-    const ALL: &[HoldedIntent] = &[
-        HoldedIntent::DirectMessage,
-        HoldedIntent::BriefDeliver,
-        HoldedIntent::ChannelBroadcast,
-        HoldedIntent::ChannelAdvertise,
-        HoldedIntent::WorkspaceInvite,
-        HoldedIntent::PresenceUpdate,
-        HoldedIntent::FileDeliver,
-        HoldedIntent::PermissionRelay,
-        HoldedIntent::PermissionRelayResponse,
-        HoldedIntent::CapabilityDeliver,
-        HoldedIntent::AuditFederate,
-        HoldedIntent::WorkspaceRosterRequest,
-        HoldedIntent::WorkspaceRosterResponse,
-        HoldedIntent::WorkspaceChannelsRequest,
-        HoldedIntent::WorkspaceChannelsResponse,
-        HoldedIntent::PeerAdvertise,
+    const ALL: &[HeldIntent] = &[
+        HeldIntent::DirectMessage,
+        HeldIntent::BriefDeliver,
+        HeldIntent::ChannelBroadcast,
+        HeldIntent::ChannelAdvertise,
+        HeldIntent::WorkspaceInvite,
+        HeldIntent::PresenceUpdate,
+        HeldIntent::FileDeliver,
+        HeldIntent::PermissionRelay,
+        HeldIntent::PermissionRelayResponse,
+        HeldIntent::CapabilityDeliver,
+        HeldIntent::AuditFederate,
+        HeldIntent::WorkspaceRosterRequest,
+        HeldIntent::WorkspaceRosterResponse,
+        HeldIntent::WorkspaceChannelsRequest,
+        HeldIntent::WorkspaceChannelsResponse,
+        HeldIntent::PeerAdvertise,
     ];
 
     #[test]
     fn intent_str_round_trips() {
         for &intent in ALL {
             let s = intent.as_str();
-            let back = HoldedIntent::from_str(s).expect("FromStr must accept as_str()");
+            let back = HeldIntent::from_str(s).expect("FromStr must accept as_str()");
             assert_eq!(back, intent, "{intent:?} → {s:?} → roundtrip drift");
         }
     }
@@ -217,7 +217,7 @@ mod intent_tests {
             "message-deliver",
         ] {
             assert!(
-                HoldedIntent::from_str(bad).is_err(),
+                HeldIntent::from_str(bad).is_err(),
                 "FromStr should reject {bad:?} but accepted it"
             );
         }
@@ -234,7 +234,7 @@ pub struct PendingConfirmation {
     /// `caller == recipient` so distinct hosted agents have
     /// independent confirmation queues.
     pub recipient: AgentId,
-    pub intent: HoldedIntent,
+    pub intent: HeldIntent,
     pub sensitivity: String,
     pub trust_level: TrustLevel,
     pub summary: String,
@@ -251,7 +251,7 @@ pub struct HoldRequest<'a> {
     pub actor: &'a AgentId,
     /// Locally-hosted agent the envelope was addressed to (`envelope.to.id`).
     pub recipient: &'a AgentId,
-    pub intent: HoldedIntent,
+    pub intent: HeldIntent,
     pub sensitivity: &'a str,
     pub trust_level: TrustLevel,
     pub summary: &'a str,

@@ -44,12 +44,10 @@ fn record(id: AgentId, local: Option<&str>, peer: Option<&str>) -> AgentRecord {
     AgentRecord {
         id,
         pubkey: PubkeyBytes([1u8; 32]),
-        host_pubkey: None,
         endpoint: None,
         local_alias: local.map(|s| AgentAlias::from_str(s).unwrap()),
         peer_asserted_alias: peer.map(|s| AgentAlias::from_str(s).unwrap()),
         trust_level: TrustLevel::Tofu,
-        tls_fingerprint: None,
         reputation: 0,
         first_seen: now,
         last_seen: Some(now),

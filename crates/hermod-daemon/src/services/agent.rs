@@ -2,9 +2,9 @@ use hermod_core::{AgentAlias, AgentId, PubkeyBytes, Timestamp};
 use hermod_crypto::{agent_id_from_pubkey, fingerprint_from_pubkey};
 use hermod_protocol::ipc::methods::{
     AgentGetParams, AgentGetResult, AgentListParams, AgentListResult, AgentRegisterParams,
-    AgentRegisterResult, AgentSummary, AliasOutcomeView,
+    AgentRegisterResult, AgentSummary,
 };
-use hermod_storage::{AgentRecord, AliasOutcome, AuditEntry, AuditSink, Database};
+use hermod_storage::{AgentRecord, AuditEntry, AuditSink, Database};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -60,12 +60,13 @@ impl AgentService {
                 continue;
             }
             let effective_alias = a.effective_alias().cloned();
+            let endpoint = self.host_endpoint(a.host_id.as_ref()).await;
             agents.push(AgentSummary {
                 id: a.id,
                 local_alias: a.local_alias,
                 peer_asserted_alias: a.peer_asserted_alias,
                 effective_alias,
-                endpoint: a.endpoint,
+                endpoint,
                 trust_level: a.trust_level,
                 last_seen: a.last_seen,
                 status: view.status,
@@ -83,12 +84,13 @@ impl AgentService {
         let effective_alias = record.effective_alias().cloned();
         let local_tags = self.local_tags_for(&record.id).await;
         let effective_tags = hermod_core::effective_tags(&local_tags, &record.peer_asserted_tags);
+        let endpoint = self.host_endpoint(record.host_id.as_ref()).await;
         Ok(AgentGetResult {
             id: record.id,
             local_alias: record.local_alias,
             peer_asserted_alias: record.peer_asserted_alias,
             effective_alias,
-            endpoint: record.endpoint,
+            endpoint,
             trust_level: record.trust_level,
             first_seen: record.first_seen,
             last_seen: record.last_seen,
@@ -110,6 +112,25 @@ impl AgentService {
             Ok(Some(rec)) => rec.tags,
             _ => hermod_core::CapabilityTagSet::empty(),
         }
+    }
+
+    /// Resolve an agent's `host_id` FK to its host's federation
+    /// endpoint, or `None` if no host or endpoint is recorded.
+    /// Surfaced into the `AgentSummary` / `AgentGetResult` views so
+    /// CLI / API consumers see "where this agent lives" without
+    /// having to call `peer list` separately.
+    async fn host_endpoint(
+        &self,
+        host_id: Option<&hermod_core::AgentId>,
+    ) -> Option<hermod_core::Endpoint> {
+        let id = host_id?;
+        self.db
+            .hosts()
+            .get(id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|h| h.endpoint)
     }
 
     pub async fn register(
@@ -134,47 +155,26 @@ impl AgentService {
         let record = AgentRecord {
             id: id.clone(),
             pubkey,
-            host_pubkey: None,
-            endpoint: params.endpoint.clone(),
+            // `agent register` is a directory-only IPC — operator
+            // hands us identity + alias + trust level. Routing
+            // info (host_id / via_agent) belongs to `peer add`,
+            // which has the host pubkey context to build the FK.
+            host_id: None,
             via_agent: None,
             local_alias: params.local_alias.clone(),
             peer_asserted_alias: None,
             trust_level: params.trust_level,
-            tls_fingerprint: None,
             reputation: 0,
             first_seen: now,
             last_seen: Some(now),
             peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
         };
-        // `upsert_observed` is the receiver-sovereignty path — if the
-        // proposed `local_alias` collides with an existing different agent's
-        // sacred label, it's silently dropped (the rest of the record is
-        // still stored). This keeps the contract symmetric with `peer.add`.
-        let outcome = self.db.agents().upsert_observed(&record).await?;
-
-        if let AliasOutcome::LocalDropped {
-            proposed,
-            conflicting_id,
-        } = &outcome
-        {
-            audit_or_warn(
-                &*self.audit_sink,
-                AuditEntry {
-                    id: None,
-                    ts: now,
-                    actor: id.clone(),
-                    action: "agent.alias_collision".into(),
-                    target: Some(conflicting_id.to_string()),
-                    details: Some(serde_json::json!({
-                        "proposed": proposed.as_str(),
-                        "for_id": id.to_string(),
-                    })),
-                    client_ip: None,
-                    federation: hermod_storage::AuditFederationPolicy::Default,
-                },
-            )
-            .await;
-        }
+        // `agent register` is operator-driven; goes through `upsert`
+        // so a re-register on an existing agent_id preserves any
+        // peer-asserted columns the row has accumulated. Alias
+        // collision against a different agent_id surfaces as a
+        // UNIQUE storage error — operator input must resolve cleanly.
+        self.db.agents().upsert(&record).await?;
 
         audit_or_warn(
             &*self.audit_sink,
@@ -187,11 +187,6 @@ impl AgentService {
                 details: Some(serde_json::json!({
                     "trust_level": params.trust_level.as_str(),
                     "local_alias": params.local_alias.as_ref().map(|a| a.as_str()),
-                    "endpoint": params.endpoint.as_ref().map(|e| e.to_string()),
-                    "alias_outcome": match &outcome {
-                        AliasOutcome::Accepted => "accepted",
-                        AliasOutcome::LocalDropped { .. } => "local_dropped",
-                    },
                 })),
                 client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
@@ -199,13 +194,7 @@ impl AgentService {
         )
         .await;
 
-        Ok(AgentRegisterResult {
-            id,
-            alias_outcome: match outcome {
-                AliasOutcome::Accepted => AliasOutcomeView::Accepted,
-                AliasOutcome::LocalDropped { .. } => AliasOutcomeView::LocalDropped,
-            },
-        })
+        Ok(AgentRegisterResult { id })
     }
 
     async fn resolve_ref(&self, reference: &str) -> Result<AgentRecord, ServiceError> {

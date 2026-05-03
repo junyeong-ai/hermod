@@ -27,7 +27,7 @@ rationale.
 Add a unit / integration test when:
 
 - A new typed enum variant is introduced (round-trip + uniqueness +
-  shape pin) — see `HoldedIntent`'s `intent_tests` module for the
+  shape pin) — see `HeldIntent`'s `intent_tests` module for the
   pattern.
 - A new audit action is emitted (doc-coverage test catches the doc
   drift; you don't need to write it manually).

@@ -158,9 +158,12 @@ impl WorkspaceObservabilityService {
     }
 
     /// Handle inbound `WorkspaceRosterRequest`. Builds + ships back a
-    /// `WorkspaceRosterResponse`.
+    /// `WorkspaceRosterResponse`. `responder` is the locally-hosted
+    /// agent that owns this gossip exchange (the envelope's `to.id`)
+    /// — it signs the response.
     pub async fn handle_roster_request(
         &self,
+        responder: &AgentId,
         peer: &AgentId,
         request_envelope_id: MessageId,
         workspace_id_bytes: &ByteBuf,
@@ -236,12 +239,15 @@ impl WorkspaceObservabilityService {
             members: sorted,
             hmac,
         };
-        self.send_to(peer, body).await
+        self.send_to(responder, peer, body).await
     }
 
-    /// Handle inbound `WorkspaceChannelsRequest`.
+    /// Handle inbound `WorkspaceChannelsRequest`. `responder` mirrors
+    /// `handle_roster_request` — the locally-hosted agent that signs
+    /// the response.
     pub async fn handle_channels_request(
         &self,
+        responder: &AgentId,
         peer: &AgentId,
         request_envelope_id: MessageId,
         workspace_id_bytes: &ByteBuf,
@@ -314,7 +320,7 @@ impl WorkspaceObservabilityService {
             channels: entries,
             hmac,
         };
-        self.send_to(peer, body).await
+        self.send_to(responder, peer, body).await
     }
 
     /// Handle inbound `WorkspaceRosterResponse`. Push into the pending
@@ -352,14 +358,17 @@ impl WorkspaceObservabilityService {
     }
 
     /// IPC entry point: parse hex workspace_id, dispatch to
-    /// `query_roster`, format result.
+    /// `query_roster`, format result. The IPC caller agent signs the
+    /// outbound gossip request envelopes.
     pub async fn ipc_roster(
         &self,
         params: WorkspaceRosterParams,
     ) -> Result<WorkspaceRosterResult, ServiceError> {
+        let originator = crate::audit_context::current_caller_agent()
+            .ok_or_else(|| ServiceError::InvalidParam("ipc caller not bound".into()))?;
         let ws = WorkspaceId::from_hex(&params.workspace_id)
             .map_err(|e| ServiceError::InvalidParam(format!("workspace_id: {e}")))?;
-        let members = self.query_roster(ws).await?;
+        let members = self.query_roster(originator, ws).await?;
         Ok(WorkspaceRosterResult { members })
     }
 
@@ -369,9 +378,11 @@ impl WorkspaceObservabilityService {
         &self,
         params: WorkspaceChannelsParams,
     ) -> Result<WorkspaceChannelsResult, ServiceError> {
+        let originator = crate::audit_context::current_caller_agent()
+            .ok_or_else(|| ServiceError::InvalidParam("ipc caller not bound".into()))?;
         let ws = WorkspaceId::from_hex(&params.workspace_id)
             .map_err(|e| ServiceError::InvalidParam(format!("workspace_id: {e}")))?;
-        let entries = self.query_channels(ws).await?;
+        let entries = self.query_channels(originator, ws).await?;
         let channels = entries
             .into_iter()
             .map(|e| WorkspaceChannelView {
@@ -383,9 +394,14 @@ impl WorkspaceObservabilityService {
     }
 
     /// Public entry point: query the workspace roster from every
-    /// known member, union the responses, return.
+    /// known member, union the responses, return. `originator` is the
+    /// locally-hosted agent that owns this query — its keypair signs
+    /// every outbound request envelope (gossip runs outside any IPC
+    /// scope on the receiving side, so the sender side has to install
+    /// the caller agent explicitly via `audit_context::with_caller_agent`).
     pub async fn query_roster(
         &self,
+        originator: AgentId,
         workspace_id: WorkspaceId,
     ) -> Result<Vec<AgentId>, ServiceError> {
         let workspace = self
@@ -395,15 +411,25 @@ impl WorkspaceObservabilityService {
             .await?
             .ok_or(ServiceError::NotFound)?;
         let known_members = self.db.workspace_members().list(&workspace_id).await?;
+        // Local agents are already in `known_members` (workspace.create
+        // / workspace.join touched them). The remote-target list is
+        // everything we don't host ourselves.
+        let local: std::collections::HashSet<AgentId> = self
+            .db
+            .local_agents()
+            .list()
+            .await?
+            .into_iter()
+            .map(|a| a.agent_id)
+            .collect();
         let targets: Vec<AgentId> = known_members
             .iter()
-            .filter(|m| m.as_str() != self.host_actor.as_str())
+            .filter(|m| !local.contains(m))
             .cloned()
             .collect();
 
         // Seed: our own view of the workspace.
         let mut union: std::collections::HashSet<AgentId> = known_members.into_iter().collect();
-        union.insert(self.host_actor.clone());
 
         if targets.is_empty() {
             let mut out: Vec<AgentId> = union.into_iter().collect();
@@ -427,7 +453,7 @@ impl WorkspaceObservabilityService {
             hmac,
         };
         for peer in &targets {
-            self.send_request(peer.clone(), body.clone(), Some(request_envelope_id))
+            self.send_request(&originator, peer.clone(), body.clone(), request_envelope_id)
                 .await
                 .ok();
         }
@@ -457,9 +483,11 @@ impl WorkspaceObservabilityService {
         Ok(out)
     }
 
-    /// Public entry point: query the workspace channel list.
+    /// Public entry point: query the workspace channel list. See
+    /// [`Self::query_roster`] for the `originator` invariant.
     pub async fn query_channels(
         &self,
+        originator: AgentId,
         workspace_id: WorkspaceId,
     ) -> Result<Vec<WorkspaceChannelEntry>, ServiceError> {
         let workspace = self
@@ -469,9 +497,17 @@ impl WorkspaceObservabilityService {
             .await?
             .ok_or(ServiceError::NotFound)?;
         let known_members = self.db.workspace_members().list(&workspace_id).await?;
+        let local: std::collections::HashSet<AgentId> = self
+            .db
+            .local_agents()
+            .list()
+            .await?
+            .into_iter()
+            .map(|a| a.agent_id)
+            .collect();
         let targets: Vec<AgentId> = known_members
             .iter()
-            .filter(|m| m.as_str() != self.host_actor.as_str())
+            .filter(|m| !local.contains(m))
             .cloned()
             .collect();
 
@@ -501,7 +537,7 @@ impl WorkspaceObservabilityService {
                 hmac,
             };
             for peer in &targets {
-                self.send_request(peer.clone(), body.clone(), Some(request_envelope_id))
+                self.send_request(&originator, peer.clone(), body.clone(), request_envelope_id)
                     .await
                     .ok();
             }
@@ -585,66 +621,86 @@ impl WorkspaceObservabilityService {
         state.pending_channels.remove(id);
     }
 
-    async fn send_to(&self, peer: &AgentId, body: MessageBody) -> Result<(), &'static str> {
+    async fn send_to(
+        &self,
+        from: &AgentId,
+        peer: &AgentId,
+        body: MessageBody,
+    ) -> Result<(), &'static str> {
         let messages = self.messages.get().ok_or("message service not wired")?;
         let to = AgentAddress::local(peer.clone());
-        messages
-            .send(MessageSendParams {
-                to,
-                body,
-                priority: Some(MessagePriority::Normal),
-                thread: None,
-                ttl_secs: Some(60),
-                caps: None,
-            })
-            .await
-            .map_err(|_| "send failed")?;
-        Ok(())
+        // `MessageService::send` reads the caller agent from the
+        // ambient `audit_context` (it's normally set by the IPC
+        // handshake). Inbound federation handlers run outside any
+        // IPC scope, so we install the caller scope explicitly:
+        // the responder is the locally-hosted agent that owns this
+        // gossip request — its keypair signs the response envelope.
+        crate::audit_context::with_caller_agent(Some(from.clone()), async {
+            messages
+                .send(MessageSendParams {
+                    to,
+                    body,
+                    priority: Some(MessagePriority::Normal),
+                    thread: None,
+                    ttl_secs: Some(60),
+                    caps: None,
+                })
+                .await
+                .map_err(|e| {
+                    tracing::warn!(error = %e, "workspace gossip send failed");
+                    "send failed"
+                })?;
+            Ok(())
+        })
+        .await
     }
 
-    /// Send a request envelope to `peer`. The `force_id` parameter is
-    /// the envelope id we want — but currently `MessageService::send`
-    /// generates a fresh id internally. So instead we let MessageService
-    /// generate the id, and the caller looks at the returned id. To keep
-    /// the request_id known to the caller, we pre-allocate the id in
-    /// `query_roster` / `query_channels` and use it to construct the
-    /// envelope. Since `MessageService::send` internally generates,
-    /// we route through a dedicated path: pre-build the envelope here
-    /// with the desired id, then ship via `send`.
+    /// Ship a gossip request envelope whose id is the caller-allocated
+    /// `envelope_id`. The responder echoes that id back inside
+    /// `WorkspaceRosterResponse.request_id` /
+    /// `WorkspaceChannelsResponse.request_id`, so the originator's
+    /// pending-response tracker (keyed on `envelope_id`) lights up on
+    /// match. Goes through `MessageService::send_with_envelope_id` so
+    /// access checks, rate limit, and the per-call signer all run —
+    /// the only difference vs. `send` is that the envelope id is fixed
+    /// up front instead of generated.
     ///
-    /// Note: the current implementation reuses the `MessageService::send`
-    /// path which generates a new id; we accept that the request_id
-    /// in the originating envelope differs from what the response
-    /// echoes. Until envelope-id-passthrough lands, the simplest
-    /// correct shape is: caller fan-out with a single shared correlator
-    /// sourced from the FIRST send's envelope id — but that's racy.
-    ///
-    /// Workaround: every fan-out target gets its own request envelope
-    /// (and its own id), all registered into the same pending channel.
-    /// The pending tracker keys on whichever id the response echoes.
-    /// To make that work, we register N entries (one per target) all
-    /// pointing at the same sender. When responses come in, any of
-    /// them flows into our collector.
+    /// The originating agent (`from`) must own a per-call signer in
+    /// the `LocalAgentRegistry`; gossip runs under
+    /// `audit_context::with_caller_agent(Some(from), ...)` exactly for
+    /// this reason — the inbound federation handler that triggered
+    /// the request runs outside any IPC scope, so the caller agent
+    /// has to be installed explicitly.
     async fn send_request(
         &self,
+        from: &AgentId,
         peer: AgentId,
         body: MessageBody,
-        _force_id: Option<MessageId>,
-    ) -> Result<MessageId, &'static str> {
+        envelope_id: MessageId,
+    ) -> Result<(), &'static str> {
         let messages = self.messages.get().ok_or("message service not wired")?;
         let to = AgentAddress::local(peer);
-        let outcome = messages
-            .send(MessageSendParams {
-                to,
-                body,
-                priority: Some(MessagePriority::Normal),
-                thread: None,
-                ttl_secs: Some(60),
-                caps: None,
-            })
-            .await
-            .map_err(|_| "send failed")?;
-        Ok(outcome.id)
+        crate::audit_context::with_caller_agent(Some(from.clone()), async {
+            messages
+                .send_with_envelope_id(
+                    MessageSendParams {
+                        to,
+                        body,
+                        priority: Some(MessagePriority::Normal),
+                        thread: None,
+                        ttl_secs: Some(60),
+                        caps: None,
+                    },
+                    envelope_id,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::warn!(error = %e, "workspace gossip request send failed");
+                    "send failed"
+                })?;
+            Ok(())
+        })
+        .await
     }
 }
 

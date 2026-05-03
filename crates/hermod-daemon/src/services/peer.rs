@@ -3,10 +3,9 @@ use hermod_core::{
     MessageStatus, PubkeyBytes, Timestamp, TrustLevel,
 };
 use hermod_protocol::ipc::methods::{
-    AliasOutcomeView, MessageSendParams, MessageSendResult, PeerAddParams, PeerAddResult,
-    PeerAdvertiseOutcome, PeerAdvertiseParams, PeerAdvertiseResult, PeerListResult,
-    PeerRemoveParams, PeerRemoveResult, PeerRepinParams, PeerRepinResult, PeerSummary,
-    PeerTrustParams,
+    MessageSendParams, MessageSendResult, PeerAddParams, PeerAddResult, PeerAdvertiseOutcome,
+    PeerAdvertiseParams, PeerAdvertiseResult, PeerListResult, PeerRemoveParams, PeerRemoveResult,
+    PeerRepinParams, PeerRepinResult, PeerSummary, PeerTrustParams,
 };
 use hermod_routing::PeerPool;
 use hermod_storage::{AuditEntry, AuditSink, Database};
@@ -18,6 +17,7 @@ use crate::federation::{record_agent_peer, record_brokered_peer};
 use crate::local_agent::LocalAgentRegistry;
 use crate::services::{
     ServiceError, audit_or_warn, message::MessageService, presence::PresenceService,
+    resolve_host_endpoint,
 };
 
 #[derive(Debug, Clone)]
@@ -61,10 +61,13 @@ impl PeerService {
     }
 
     pub async fn add(&self, params: PeerAddParams) -> Result<PeerAddResult, ServiceError> {
-        let host_pubkey = parse_pubkey(&params.host_pubkey_hex)?;
         let agent_pubkey = parse_pubkey(&params.agent_pubkey_hex)?;
-        let (rec, outcome) = match params.reach {
-            hermod_protocol::ipc::methods::PeerReach::Direct { endpoint } => {
+        let rec = match params.reach {
+            hermod_protocol::ipc::methods::PeerReach::Direct {
+                endpoint,
+                host_pubkey_hex,
+            } => {
+                let host_pubkey = parse_pubkey(&host_pubkey_hex)?;
                 let wss = match endpoint {
                     Endpoint::Wss(w) => w,
                     Endpoint::Unix { .. } => {
@@ -85,45 +88,12 @@ impl PeerService {
             }
             hermod_protocol::ipc::methods::PeerReach::Via { via } => {
                 let via_id = self.resolve_target(&via).await?;
-                record_brokered_peer(
-                    &*self.db,
-                    via_id,
-                    host_pubkey,
-                    agent_pubkey,
-                    params.local_alias.clone(),
-                )
-                .await
-                .map_err(|e| ServiceError::InvalidParam(e.to_string()))?
+                record_brokered_peer(&*self.db, via_id, agent_pubkey, params.local_alias.clone())
+                    .await
+                    .map_err(|e| ServiceError::InvalidParam(e.to_string()))?
             }
         };
         let fingerprint = hermod_crypto::fingerprint_from_pubkey(&rec.pubkey).to_human_prefix(8);
-
-        // Audit a collision *before* the peer.add row so the chain shows
-        // the operator was warned (the alias they asked for was already
-        // taken; the new peer is registered without it).
-        if let hermod_storage::AliasOutcome::LocalDropped {
-            proposed,
-            conflicting_id,
-        } = &outcome
-        {
-            audit_or_warn(
-                &*self.audit_sink,
-                AuditEntry {
-                    id: None,
-                    ts: Timestamp::now(),
-                    actor: self.host_actor.clone(),
-                    action: "peer.alias_collision".into(),
-                    target: Some(conflicting_id.to_string()),
-                    details: Some(serde_json::json!({
-                        "proposed": proposed.as_str(),
-                        "for_id": rec.id.to_string(),
-                    })),
-                    client_ip: None,
-                    federation: hermod_storage::AuditFederationPolicy::Default,
-                },
-            )
-            .await;
-        }
 
         audit_or_warn(
             &*self.audit_sink,
@@ -135,12 +105,8 @@ impl PeerService {
                 target: Some(rec.id.to_string()),
                 details: Some(serde_json::json!({
                     "fingerprint": fingerprint,
-                    "endpoint": rec.endpoint.as_ref().map(|e| e.to_string()),
+                    "host_id": rec.host_id.as_ref().map(|h| h.to_string()),
                     "via_agent": rec.via_agent.as_ref().map(|a| a.to_string()),
-                    "alias_outcome": match &outcome {
-                        hermod_storage::AliasOutcome::Accepted => "accepted",
-                        hermod_storage::AliasOutcome::LocalDropped { .. } => "local_dropped",
-                    },
                 })),
                 client_ip: None,
                 federation: hermod_storage::AuditFederationPolicy::Default,
@@ -167,10 +133,6 @@ impl PeerService {
             id: rec.id,
             fingerprint,
             trust_level: rec.trust_level,
-            alias_outcome: match outcome {
-                hermod_storage::AliasOutcome::Accepted => AliasOutcomeView::Accepted,
-                hermod_storage::AliasOutcome::LocalDropped { .. } => AliasOutcomeView::LocalDropped,
-            },
         })
     }
 
@@ -199,22 +161,18 @@ impl PeerService {
                 outcomes.push(self.dispatch_one(target, agents.clone()).await);
             }
             None => {
-                // Walk federated peers; pick one canonical local-agent
-                // recipient per distinct host_pubkey so a peer running N
-                // hosted agents receives the advertise once, not N
-                // times.
+                // Walk federated peers; pick one canonical recipient
+                // per distinct `host_id` so a peer running N hosted
+                // agents receives the advertise once, not N times.
+                // Brokered agents (host_id NULL, via_agent set) get
+                // their own dispatch — the broker will fan out the
+                // second hop.
                 let rows = self.db.agents().list_federated().await?;
-                let mut seen_hosts: HashSet<PubkeyBytes> = HashSet::new();
+                let mut seen_hosts: HashSet<AgentId> = HashSet::new();
                 for r in rows {
-                    let host = match r.host_pubkey {
-                        Some(h) => h,
-                        // No host pubkey known yet — can't dedup safely;
-                        // skip rather than risk a duplicate advertise. The
-                        // first inbound envelope from this peer will
-                        // populate host_pubkey via TOFU.
-                        None => continue,
-                    };
-                    if !seen_hosts.insert(host) {
+                    if let Some(host) = &r.host_id
+                        && !seen_hosts.insert(host.clone())
+                    {
                         continue;
                     }
                     outcomes.push(self.dispatch_one(r.id, agents.clone()).await);
@@ -337,12 +295,12 @@ impl PeerService {
         target: &AgentId,
         agents: Vec<AdvertisedAgent>,
     ) -> Result<MessageSendResult, ServiceError> {
-        // Resolve recipient endpoint so the router knows whether to
-        // dial direct or via a broker.
+        // Resolve recipient endpoint via the host record so the
+        // router knows whether to dial direct or via a broker.
         let rec = self.db.agents().get(target).await?.ok_or_else(|| {
             ServiceError::InvalidParam(format!("peer.advertise target {target} not in directory"))
         })?;
-        let to = match rec.endpoint {
+        let to = match resolve_host_endpoint(&*self.db, &rec).await {
             Some(ep) if !ep.is_local() => AgentAddress::with_endpoint(rec.id, ep),
             _ => AgentAddress::local(rec.id),
         };
@@ -390,13 +348,12 @@ impl PeerService {
         let rows = self.db.agents().list_federated().await?;
         let mut peers = Vec::with_capacity(rows.len());
         for r in rows {
-            // list_federated guarantees endpoint IS NOT NULL via the WHERE clause.
-            let endpoint = r.endpoint.clone().ok_or_else(|| {
-                ServiceError::InvalidParam(format!(
-                    "federated agent {} missing endpoint after select",
-                    r.id
-                ))
-            })?;
+            // Federated agents either route via host (host_id) or via
+            // a broker (via_agent). For the operator-facing peer list
+            // we surface the host endpoint when present; brokered
+            // agents render with no endpoint (their dial target is
+            // the broker, which has its own row).
+            let endpoint = resolve_host_endpoint(&*self.db, &r).await;
             let view = self.presence.view_for(&r.id).await?;
             let effective_alias = r.effective_alias().cloned();
             peers.push(PeerSummary {
@@ -419,19 +376,29 @@ impl PeerService {
         let agent_id = AgentId::from_str(&params.peer).map_err(|e| {
             ServiceError::InvalidParam(format!("peer.remove requires an agent_id: {e}"))
         })?;
-        // Order matters: fail in-flight messages first, then clear the
-        // endpoint. Once endpoint is NULL the outbox skips them by query
-        // filter — failing them after that point would leave them
-        // invisible-but-pending in the operator's inbox.
+        // Order matters: fail in-flight messages first, then clear
+        // the host endpoint. The outbox skips host-less rows by
+        // query filter — failing them after that point would leave
+        // them invisible-but-pending in the operator's inbox.
         let failed = self.db.messages().fail_pending_to(&agent_id).await?;
-        // `forget_peer` reads-and-clears atomically, so there's no race
-        // against a concurrent `peer.add` that could leave a pool entry
-        // pointed at a stale endpoint.
-        let outcome = self.db.agents().forget_peer(&agent_id).await?;
-        if let Some(ep) = &outcome.prior_endpoint {
-            self.pool.evict_endpoint(ep).await;
+        let agent = self.db.agents().get(&agent_id).await?;
+        // `hosts().forget` reads-and-clears atomically; we evict the
+        // pool entry inside the same atomic snapshot so a concurrent
+        // `peer.add` can't leave a stale-endpoint connection alive.
+        let mut existed = false;
+        if let Some(host_id) = agent.as_ref().and_then(|a| a.host_id.clone()) {
+            let outcome = self.db.hosts().forget(&host_id).await?;
+            existed = outcome.existed;
+            if let Some(ep) = &outcome.prior_endpoint {
+                self.pool.evict_endpoint(ep).await;
+            }
         }
-        if outcome.existed {
+        // The agent row stays for audit / capability lineage, but it
+        // is no longer routable — clear both routing pointers so a
+        // subsequent envelope addressed `--to @alias` fails fast
+        // rather than hanging on the dead host.
+        self.db.agents().clear_routing(&agent_id).await?;
+        if existed {
             audit_or_warn(
                 &*self.audit_sink,
                 AuditEntry {
@@ -449,39 +416,51 @@ impl PeerService {
             )
             .await;
         }
-        Ok(PeerRemoveResult {
-            removed: outcome.existed,
-        })
+        Ok(PeerRemoveResult { removed: existed })
     }
 
     pub async fn repin(&self, params: PeerRepinParams) -> Result<PeerRepinResult, ServiceError> {
         let agent_id = AgentId::from_str(&params.peer).map_err(|e| {
             ServiceError::InvalidParam(format!("peer.repin requires an agent_id: {e}"))
         })?;
-        // Atomic: trust check + read of endpoint + fp swap all in one
-        // SQL transaction. The endpoint snapshot lets us evict the right
-        // pool entry without a follow-up SELECT — without that snapshot,
-        // a concurrent `peer.add` could change endpoint between the swap
-        // and our evict, leaving a stale-context entry alive while we
-        // tear down the wrong one.
-        let outcome = self
+        // Operator gate: only Verified peers can rotate cert pins —
+        // a malicious advertise-only path can't trigger TOFU
+        // re-acceptance.
+        let agent = self
             .db
             .agents()
-            .replace_tls_fingerprint(&agent_id, &params.fingerprint, TrustLevel::Verified)
+            .get(&agent_id)
+            .await?
+            .ok_or(ServiceError::NotFound)?;
+        if agent.trust_level != TrustLevel::Verified {
+            return Err(ServiceError::InvalidParam(format!(
+                "peer.repin only applies to Verified peers (current: {})",
+                agent.trust_level.as_str()
+            )));
+        }
+        let host_id = agent.host_id.ok_or_else(|| {
+            ServiceError::InvalidParam(
+                "agent has no host record — peer.repin requires a federated peer".into(),
+            )
+        })?;
+        // Atomic: read of endpoint + fp swap in one SQL transaction.
+        // The endpoint snapshot lets us evict the right pool entry
+        // without a follow-up SELECT — without that snapshot, a
+        // concurrent `peer.add` could change endpoint between the
+        // swap and our evict, leaving a stale-context entry alive.
+        let outcome = self
+            .db
+            .hosts()
+            .replace_tls_fingerprint(&host_id, &params.fingerprint)
             .await?;
         let (previous, endpoint) = match outcome {
             hermod_storage::RepinOutcome::Replaced { previous, endpoint } => (previous, endpoint),
-            hermod_storage::RepinOutcome::TrustMismatch { actual } => {
-                return Err(ServiceError::InvalidParam(format!(
-                    "peer.repin only applies to Verified peers (current: {})",
-                    actual.as_str()
-                )));
-            }
             hermod_storage::RepinOutcome::NotFound => return Err(ServiceError::NotFound),
         };
-        // Tear down the pooled connection that was bound to the old fp
-        // so the next dial re-handshakes against the new pin immediately
-        // rather than riding the existing TLS session for up to `idle_ttl`.
+        // Tear down the pooled connection bound to the old fp so the
+        // next dial re-handshakes against the new pin immediately
+        // rather than riding the existing TLS session for up to
+        // `idle_ttl`.
         if let Some(ep) = &endpoint {
             self.pool.evict_endpoint(ep).await;
         }
@@ -519,13 +498,7 @@ impl PeerService {
             .get(&agent_id)
             .await?
             .ok_or(ServiceError::NotFound)?;
-        let endpoint = rec.endpoint.clone().ok_or_else(|| {
-            ServiceError::InvalidParam(
-                "agent has no federation endpoint registered — \
-                 peer.trust applies only to federated peers"
-                    .into(),
-            )
-        })?;
+        let endpoint = resolve_host_endpoint(&*self.db, &rec).await;
 
         audit_or_warn(
             &*self.audit_sink,

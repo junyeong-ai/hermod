@@ -15,6 +15,7 @@ use crate::repositories::{
     briefs::BriefRepository,
     capabilities::CapabilityRepository,
     confirmations::ConfirmationRepository,
+    hosts::HostRepository,
     local_agents::LocalAgentRepository,
     messages::MessageRepository,
     notifications::NotificationRepository,
@@ -31,6 +32,7 @@ use super::audit::SqliteAuditRepository;
 use super::briefs::SqliteBriefRepository;
 use super::capabilities::SqliteCapabilityRepository;
 use super::confirmations::SqliteConfirmationRepository;
+use super::hosts::SqliteHostRepository;
 use super::local_agents::SqliteLocalAgentRepository;
 use super::messages::SqliteMessageRepository;
 use super::notifications::SqliteNotificationRepository;
@@ -53,6 +55,7 @@ pub struct SqliteDatabase {
     channels: SqliteChannelRepository,
     confirmations: SqliteConfirmationRepository,
     discovered_channels: SqliteDiscoveredChannelRepository,
+    hosts: SqliteHostRepository,
     local_agents: SqliteLocalAgentRepository,
     mcp_sessions: SqliteMcpSessionRepository,
     messages: SqliteMessageRepository,
@@ -90,6 +93,7 @@ impl SqliteDatabase {
             channels: SqliteChannelRepository::new(pool.clone()),
             confirmations: SqliteConfirmationRepository::new(pool.clone()),
             discovered_channels: SqliteDiscoveredChannelRepository::new(pool.clone()),
+            hosts: SqliteHostRepository::new(pool.clone()),
             local_agents: SqliteLocalAgentRepository::new(pool.clone()),
             mcp_sessions: SqliteMcpSessionRepository::new(pool.clone()),
             messages: SqliteMessageRepository::new(pool.clone()),
@@ -138,6 +142,9 @@ impl Database for SqliteDatabase {
     }
     fn discovered_channels(&self) -> &dyn DiscoveredChannelRepository {
         &self.discovered_channels
+    }
+    fn hosts(&self) -> &dyn HostRepository {
+        &self.hosts
     }
     fn local_agents(&self) -> &dyn LocalAgentRepository {
         &self.local_agents
@@ -193,7 +200,7 @@ impl Database for SqliteDatabase {
                 .fetch_one(&self.pool)
                 .await?;
         let peers_total: i64 = sqlx::query_scalar(
-            r#"SELECT COUNT(*) FROM agents
+            r#"SELECT COUNT(*) FROM hosts
                WHERE endpoint IS NOT NULL AND endpoint NOT LIKE 'unix://%'"#,
         )
         .fetch_one(&self.pool)

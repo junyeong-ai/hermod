@@ -58,7 +58,7 @@ use tracing::{debug, warn};
 
 use hermod_daemon::config::BrokerMode;
 
-use crate::services::audit_or_warn;
+use crate::services::{audit_or_warn, resolve_host_endpoint};
 
 /// Outcome of one relay attempt — surfaces the success/failure mode
 /// to the inbound caller so it can ack the source peer correctly.
@@ -231,7 +231,7 @@ impl BrokerService {
                 return RelayOutcome::Deferred(e.to_string());
             }
         };
-        let endpoint = match recipient_record.endpoint {
+        let endpoint = match resolve_host_endpoint(&*self.db, &recipient_record).await {
             Some(ep) if !ep.is_local() => ep,
             _ => {
                 self.witness(

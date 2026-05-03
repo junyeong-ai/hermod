@@ -120,7 +120,7 @@ async fn dispatch_one(
     ttl_secs: u32,
 ) -> MemberOutcome {
     let recipient = match db.agents().get(&member).await {
-        Ok(Some(rec)) => match rec.endpoint {
+        Ok(Some(rec)) => match crate::services::resolve_host_endpoint(db, &rec).await {
             Some(Endpoint::Wss(w)) => AgentAddress::with_endpoint(rec.id, Endpoint::Wss(w)),
             _ => AgentAddress::local(rec.id),
         },

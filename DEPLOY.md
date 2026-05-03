@@ -63,13 +63,18 @@ Two daemons that want to exchange messages need three things:
 1. **Reachable WSS port.** Each daemon binds `[daemon] listen_ws`
    (default off; set to `0.0.0.0:7823` in `config.toml` or via
    `HERMOD_DAEMON_LISTEN_WS`). Open the port on both firewalls.
-2. **Identity exchange.** `hermod identity` prints the agent_id, the
-   pubkey hex, and the base32 fingerprint. Share these out of band
-   (e.g. Signal, in-person QR scan).
+2. **Identity exchange.** `hermod identity` prints two-tier identity:
+   `host_id` + `host_pubkey` (the daemon, authenticated by the
+   federation Noise XX handshake) AND `agent_id` + `agent_pubkey`
+   (the persona that signs envelopes). Both go on the wire to the
+   other side via `hermod peer add --host-pubkey-hex <…>
+   --agent-pubkey-hex <…>`; share them out of band (e.g. Signal,
+   in-person QR scan).
 3. **TOFU pinning.** First connect captures the peer's TLS cert
-   fingerprint into `agents.tls_fingerprint`. After that, fingerprint
+   fingerprint into `hosts.tls_fingerprint` (per-host, shared by
+   every agent that daemon carries). After that, fingerprint
    mismatches refuse the connection. Re-pinning requires
-   `hermod peer trust` after manual review.
+   `hermod peer repin` against a Verified peer.
 
 ```sh
 # On host A (alpha):
@@ -80,10 +85,12 @@ listen_ws = "0.0.0.0:7823"' >> ~/.hermod/config.toml
 hermodd &
 hermod identity         # copy alpha's pubkey + ip
 
-# On host B (beta), after exchanging A's pubkey:
+# On host B (beta), after exchanging A's host + agent pubkeys:
 hermod peer add --endpoint wss://alpha-host:7823 \
-                --pubkey-hex <alpha-pubkey-hex>
-hermod message send --to <alpha-agent-id> --body "hello from beta"
+                --host-pubkey-hex  <alpha-host-pubkey-hex> \
+                --agent-pubkey-hex <alpha-agent-pubkey-hex> \
+                --alias alice
+hermod message send --to @alice --body "hello from beta"
 ```
 
 For LAN auto-discovery, set `[federation] discover_mdns = true` on both
@@ -689,8 +696,10 @@ exposed as three optional aliases:
   this.
 
 Peer self-claims that collide with an existing `local_alias` are
-silently dropped and audited as `peer.alias_collision` — no peer can
-take a name the operator already bound.
+silently dropped — only the peer-asserted slot updates, the operator's
+sacred label is preserved. Operator-driven `peer add --alias` with a
+collision surfaces as a UNIQUE-constraint error so the operator picks
+a different alias up front.
 
 Liveness — the MCP server registers itself via `mcp.attach` on
 initialize, heartbeats every 30 s, and detaches on stdin EOF. The

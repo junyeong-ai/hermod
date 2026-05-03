@@ -571,23 +571,20 @@ pub struct AgentGetResult {
     pub effective_tags: Vec<CapabilityTag>,
 }
 
-/// Register an agent (typically another local identity or a known peer's agent).
-/// `local_alias` is the operator's nickname for the new entry; peer self-claim
-/// is not part of register (it only arrives via federation).
+/// Register an agent identity in the directory. Routing — endpoint
+/// or broker — is wired up separately via `peer add`, which has the
+/// host pubkey context this directory-only call doesn't.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentRegisterParams {
     pub pubkey_hex: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_alias: Option<AgentAlias>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub endpoint: Option<Endpoint>,
     pub trust_level: TrustLevel,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentRegisterResult {
     pub id: AgentId,
-    pub alias_outcome: AliasOutcomeView,
 }
 
 // ---------- local.* ----------
@@ -681,14 +678,20 @@ pub struct LocalTagSetResult {
 
 /// Reachability hint: a peer is either dialed directly or reached
 /// through a broker that's already in the directory. Mutually
-/// exclusive at the schema level (`agents.endpoint` XOR
+/// exclusive at the schema level (`agents.host_id` XOR
 /// `agents.via_agent`); the wire enum mirrors that XOR so the
-/// operator can't accidentally ask for both.
+/// operator can't accidentally ask for both, AND host_pubkey_hex
+/// rides inside `Direct` only — brokered peers don't need their
+/// own host pubkey at add time (the broker dials, not us).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PeerReach {
-    /// Direct dial: `endpoint` is the peer daemon's WSS+Noise URL.
-    Direct { endpoint: Endpoint },
+    /// Direct dial: `endpoint` is the peer daemon's WSS+Noise URL,
+    /// `host_pubkey_hex` is pinned for the Noise XX handshake.
+    Direct {
+        endpoint: Endpoint,
+        host_pubkey_hex: String,
+    },
     /// Brokered: envelopes go through `via` (an existing directory
     /// entry — agent_id or `@<local_alias>`). The broker's own
     /// endpoint is the dial target; `to.id` is preserved so the
@@ -699,8 +702,6 @@ pub enum PeerReach {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PeerAddParams {
     pub reach: PeerReach,
-    /// Remote daemon's host pubkey — pinned for the Noise XX handshake.
-    pub host_pubkey_hex: String,
     /// The peer agent we want to address by name. Envelopes sent
     /// `--to <local_alias>` resolve to this agent_id; sig verification
     /// uses this pubkey.
@@ -716,21 +717,6 @@ pub struct PeerAddResult {
     pub id: AgentId,
     pub fingerprint: String,
     pub trust_level: TrustLevel,
-    /// What happened to the requested `local_alias`. `accepted` if it was
-    /// stored as proposed; `local_dropped` if the label was already bound
-    /// to a different peer (the operator's existing label is sacred).
-    /// Surfaced so the operator finds out *at request time* — not later
-    /// while reading the audit log.
-    pub alias_outcome: AliasOutcomeView,
-}
-
-/// Wire view of `hermod_storage::AliasOutcome`. Stays in the protocol layer
-/// so storage internals don't leak into IPC.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AliasOutcomeView {
-    Accepted,
-    LocalDropped,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -742,7 +728,11 @@ pub struct PeerSummary {
     pub peer_asserted_alias: Option<AgentAlias>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_alias: Option<AgentAlias>,
-    pub endpoint: Endpoint,
+    /// Direct dial endpoint (joined from the peer's host record).
+    /// `None` for brokered peers — their dial target is the broker,
+    /// not their own host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<Endpoint>,
     pub trust_level: TrustLevel,
     pub fingerprint: String,
     pub reputation: i64,
@@ -1521,7 +1511,7 @@ pub struct PendingConfirmationView {
     pub from_host_pubkey: Option<String>,
     /// What the operator would authorise by accepting (e.g.
     /// `"message.deliver"`, `"workspace.invite"`). Mirrors the
-    /// `HoldedIntent` enum's `as_str()`. Distinct from
+    /// `HeldIntent` enum's `as_str()`. Distinct from
     /// `audit_log.action` (which records *events*, not intents).
     pub intent: String,
     pub sensitivity: String,

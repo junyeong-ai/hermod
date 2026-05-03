@@ -18,6 +18,7 @@ use crate::repositories::{
     briefs::BriefRepository,
     capabilities::CapabilityRepository,
     confirmations::ConfirmationRepository,
+    hosts::HostRepository,
     local_agents::LocalAgentRepository,
     messages::MessageRepository,
     notifications::NotificationRepository,
@@ -34,6 +35,7 @@ use super::audit::PostgresAuditRepository;
 use super::briefs::PostgresBriefRepository;
 use super::capabilities::PostgresCapabilityRepository;
 use super::confirmations::PostgresConfirmationRepository;
+use super::hosts::PostgresHostRepository;
 use super::local_agents::PostgresLocalAgentRepository;
 use super::messages::PostgresMessageRepository;
 use super::notifications::PostgresNotificationRepository;
@@ -56,6 +58,7 @@ pub struct PostgresDatabase {
     channels: PostgresChannelRepository,
     confirmations: PostgresConfirmationRepository,
     discovered_channels: PostgresDiscoveredChannelRepository,
+    hosts: PostgresHostRepository,
     local_agents: PostgresLocalAgentRepository,
     mcp_sessions: PostgresMcpSessionRepository,
     messages: PostgresMessageRepository,
@@ -93,6 +96,7 @@ impl PostgresDatabase {
             channels: PostgresChannelRepository::new(pool.clone()),
             confirmations: PostgresConfirmationRepository::new(pool.clone()),
             discovered_channels: PostgresDiscoveredChannelRepository::new(pool.clone()),
+            hosts: PostgresHostRepository::new(pool.clone()),
             local_agents: PostgresLocalAgentRepository::new(pool.clone()),
             mcp_sessions: PostgresMcpSessionRepository::new(pool.clone()),
             messages: PostgresMessageRepository::new(pool.clone()),
@@ -138,11 +142,14 @@ impl Database for PostgresDatabase {
     fn confirmations(&self) -> &dyn ConfirmationRepository {
         &self.confirmations
     }
-    fn local_agents(&self) -> &dyn LocalAgentRepository {
-        &self.local_agents
-    }
     fn discovered_channels(&self) -> &dyn DiscoveredChannelRepository {
         &self.discovered_channels
+    }
+    fn hosts(&self) -> &dyn HostRepository {
+        &self.hosts
+    }
+    fn local_agents(&self) -> &dyn LocalAgentRepository {
+        &self.local_agents
     }
     fn mcp_sessions(&self) -> &dyn McpSessionRepository {
         &self.mcp_sessions
@@ -197,7 +204,7 @@ impl Database for PostgresDatabase {
                 .fetch_one(&self.pool)
                 .await?;
         let peers_total: i64 = sqlx::query_scalar(
-            r#"SELECT COUNT(*) FROM agents
+            r#"SELECT COUNT(*) FROM hosts
                WHERE endpoint IS NOT NULL AND endpoint NOT LIKE 'unix://%'"#,
         )
         .fetch_one(&self.pool)

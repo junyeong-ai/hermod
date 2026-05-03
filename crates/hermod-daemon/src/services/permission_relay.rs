@@ -65,7 +65,7 @@ impl RelayResponder for MessageRelayResponder {
             .get(&to)
             .await?
             .ok_or(ServiceError::NotFound)?;
-        let to_addr = match agent.endpoint {
+        let to_addr = match crate::services::resolve_host_endpoint(&*self.db, &agent).await {
             Some(ep) => AgentAddress::with_endpoint(agent.id, ep),
             None => AgentAddress::local(agent.id),
         };
@@ -143,7 +143,7 @@ impl PromptForwarder for CapabilityPromptForwarder {
                 Ok(Some(a)) => a,
                 _ => continue,
             };
-            let to_addr = match agent.endpoint {
+            let to_addr = match crate::services::resolve_host_endpoint(&*self.db, &agent).await {
                 Some(ep) => AgentAddress::with_endpoint(agent.id, ep),
                 None => AgentAddress::local(agent.id),
             };

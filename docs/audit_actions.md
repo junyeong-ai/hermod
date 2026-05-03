@@ -29,8 +29,7 @@ runs it on every PR.
 ### agent.*
 | Action | Trigger | Details |
 | --- | --- | --- |
-| `agent.alias_collision` | Local alias proposed for an agent collides with an existing different agent's local label. The collision is recorded but the row is upserted without the local alias. | `proposed`, `for_id` |
-| `agent.register` | `agent.register` IPC call (operator-driven directory entry). | `trust_level`, `local_alias`, `endpoint`, `alias_outcome` |
+| `agent.register` | `agent.register` IPC call (operator-driven directory entry). Routing — endpoint or broker — is wired up separately via `peer.add`. | `trust_level`, `local_alias` |
 
 ### audit.*
 | Action | Trigger | Details |
@@ -112,8 +111,7 @@ runs it on every PR.
 ### peer.*
 | Action | Trigger | Details |
 | --- | --- | --- |
-| `peer.add` | Operator `peer.add`. Exactly one of `endpoint` / `via_agent` is non-null per the schema CHECK; `alias_outcome` carries the `AliasOutcome` view. | `fingerprint`, `endpoint`, `via_agent`, `alias_outcome` |
-| `peer.alias_collision` | Local alias requested in `peer.add` collides with an existing peer. | `proposed`, `for_id` |
+| `peer.add` | Operator `peer.add`. Exactly one of `host_id` / `via_agent` is non-null per the schema CHECK; direct adds populate `host_id` (which joins to the `hosts` table for the dial endpoint), brokered adds populate `via_agent`. | `fingerprint`, `host_id`, `via_agent` |
 | `peer.trust` | `peer.trust` (operator promotes / demotes). | `level` |
 | `peer.remove` | `peer.remove` (clears endpoint and TLS pin). | none |
 | `peer.repin` | `peer.repin` (operator-confirmed cert rotation). | `previous`, `new` |

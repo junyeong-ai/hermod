@@ -249,26 +249,26 @@ pub(crate) fn validate_inbound_body_size(
 /// confirmation gate stores in `pending_confirmations.intent`. Total
 /// over `MessageKind` so adding a new kind requires updating the
 /// match — the compiler enforces the catalogue.
-pub(crate) fn intent_for(envelope: &Envelope) -> hermod_storage::HoldedIntent {
+pub(crate) fn intent_for(envelope: &Envelope) -> hermod_storage::HeldIntent {
     use hermod_core::MessageKind;
-    use hermod_storage::HoldedIntent;
+    use hermod_storage::HeldIntent;
     match envelope.kind {
-        MessageKind::Direct => HoldedIntent::DirectMessage,
-        MessageKind::Brief => HoldedIntent::BriefDeliver,
-        MessageKind::ChannelBroadcast => HoldedIntent::ChannelBroadcast,
-        MessageKind::WorkspaceInvite => HoldedIntent::WorkspaceInvite,
-        MessageKind::ChannelAdvertise => HoldedIntent::ChannelAdvertise,
-        MessageKind::Presence => HoldedIntent::PresenceUpdate,
-        MessageKind::File => HoldedIntent::FileDeliver,
-        MessageKind::PermissionPrompt => HoldedIntent::PermissionRelay,
-        MessageKind::PermissionResponse => HoldedIntent::PermissionRelayResponse,
-        MessageKind::CapabilityGrant => HoldedIntent::CapabilityDeliver,
-        MessageKind::AuditFederate => HoldedIntent::AuditFederate,
-        MessageKind::WorkspaceRosterRequest => HoldedIntent::WorkspaceRosterRequest,
-        MessageKind::WorkspaceRosterResponse => HoldedIntent::WorkspaceRosterResponse,
-        MessageKind::WorkspaceChannelsRequest => HoldedIntent::WorkspaceChannelsRequest,
-        MessageKind::WorkspaceChannelsResponse => HoldedIntent::WorkspaceChannelsResponse,
-        MessageKind::PeerAdvertise => HoldedIntent::PeerAdvertise,
+        MessageKind::Direct => HeldIntent::DirectMessage,
+        MessageKind::Brief => HeldIntent::BriefDeliver,
+        MessageKind::ChannelBroadcast => HeldIntent::ChannelBroadcast,
+        MessageKind::WorkspaceInvite => HeldIntent::WorkspaceInvite,
+        MessageKind::ChannelAdvertise => HeldIntent::ChannelAdvertise,
+        MessageKind::Presence => HeldIntent::PresenceUpdate,
+        MessageKind::File => HeldIntent::FileDeliver,
+        MessageKind::PermissionPrompt => HeldIntent::PermissionRelay,
+        MessageKind::PermissionResponse => HeldIntent::PermissionRelayResponse,
+        MessageKind::CapabilityGrant => HeldIntent::CapabilityDeliver,
+        MessageKind::AuditFederate => HeldIntent::AuditFederate,
+        MessageKind::WorkspaceRosterRequest => HeldIntent::WorkspaceRosterRequest,
+        MessageKind::WorkspaceRosterResponse => HeldIntent::WorkspaceRosterResponse,
+        MessageKind::WorkspaceChannelsRequest => HeldIntent::WorkspaceChannelsRequest,
+        MessageKind::WorkspaceChannelsResponse => HeldIntent::WorkspaceChannelsResponse,
+        MessageKind::PeerAdvertise => HeldIntent::PeerAdvertise,
     }
 }
 

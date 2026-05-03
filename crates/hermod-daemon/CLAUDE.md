@@ -148,5 +148,5 @@ running under containers config exclusively via env.
 - New envelope kind: `MessageKind` variant in `hermod-core` →
   `MessageBody::*` body type → `inbound/<kind>.rs` acceptor →
   outbound builder in the relevant service → `intent_for` arm in
-  `inbound/scope.rs` → `HoldedIntent` variant in `hermod-storage`.
+  `inbound/scope.rs` → `HeldIntent` variant in `hermod-storage`.
   Compiler walks you through the exhaustiveness.

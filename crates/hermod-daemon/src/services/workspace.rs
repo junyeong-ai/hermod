@@ -317,10 +317,12 @@ impl WorkspaceService {
                 .await?
                 .ok_or(ServiceError::NotFound)?
         };
-        Ok(match rec.endpoint {
-            Some(ep) if !ep.is_local() => AgentAddress::with_endpoint(rec.id, ep),
-            _ => AgentAddress::local(rec.id),
-        })
+        Ok(
+            match crate::services::resolve_host_endpoint(&*self.db, &rec).await {
+                Some(ep) if !ep.is_local() => AgentAddress::with_endpoint(rec.id, ep),
+                _ => AgentAddress::local(rec.id),
+            },
+        )
     }
 
     pub async fn mute(

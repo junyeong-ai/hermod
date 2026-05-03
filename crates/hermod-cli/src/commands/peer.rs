@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use clap::Args;
 use hermod_core::{Endpoint, TrustLevel};
 use hermod_protocol::ipc::methods::{
@@ -14,19 +14,23 @@ use crate::error::{from_underlying, invalid};
 #[derive(Args, Debug)]
 pub struct AddArgs {
     /// Direct endpoint, e.g. `wss://host:7823`. Mutually exclusive
-    /// with `--via` — pick one.
+    /// with `--via` — pick one. Required together with
+    /// `--host-pubkey-hex`, which pins the Noise XX handshake.
     #[arg(long, conflicts_with = "via", required_unless_present = "via")]
     pub endpoint: Option<String>,
     /// Reach this peer through a broker that's already in the
     /// directory (`agent_id` or `@<local_alias>`). The broker's
     /// `BrokerMode::RelayOnly` fall-through forwards the envelope.
-    /// Mutually exclusive with `--endpoint`.
-    #[arg(long)]
+    /// Mutually exclusive with `--endpoint` and `--host-pubkey-hex`
+    /// (the broker dials, not us, so the peer's host pubkey isn't
+    /// needed at add time).
+    #[arg(long, conflicts_with_all = ["endpoint", "host_pubkey_hex"])]
     pub via: Option<String>,
     /// 64-char hex of the remote daemon's host identity pubkey. Pinned
     /// for the Noise XX handshake when this daemon dials the peer.
-    #[arg(long)]
-    pub host_pubkey_hex: String,
+    /// Required with `--endpoint`, omitted with `--via`.
+    #[arg(long, requires = "endpoint")]
+    pub host_pubkey_hex: Option<String>,
     /// 64-char hex of the peer agent's identity pubkey. Envelopes
     /// addressed `--to <alias>` resolve to this agent's id; signature
     /// verification uses this pubkey.
@@ -68,9 +72,17 @@ pub async fn add(args: AddArgs, target: &ClientTarget) -> Result<()> {
     // match is exhaustive for the operator's mental model and the
     // wire enum.
     let reach = match (args.endpoint, args.via) {
-        (Some(ep), None) => PeerReach::Direct {
-            endpoint: Endpoint::from_str(&ep).map_err(|e| from_underlying("endpoint", e))?,
-        },
+        (Some(ep), None) => {
+            let host_pubkey_hex = args.host_pubkey_hex.ok_or_else(|| {
+                anyhow!(
+                    "--host-pubkey-hex is required with --endpoint (clap should have caught this)"
+                )
+            })?;
+            PeerReach::Direct {
+                endpoint: Endpoint::from_str(&ep).map_err(|e| from_underlying("endpoint", e))?,
+                host_pubkey_hex,
+            }
+        }
         (None, Some(via)) => PeerReach::Via { via },
         _ => unreachable!("clap enforces XOR"),
     };
@@ -78,7 +90,6 @@ pub async fn add(args: AddArgs, target: &ClientTarget) -> Result<()> {
     let r = c
         .peer_add(PeerAddParams {
             reach,
-            host_pubkey_hex: args.host_pubkey_hex,
             agent_pubkey_hex: args.agent_pubkey_hex,
             local_alias: args
                 .alias
@@ -88,17 +99,6 @@ pub async fn add(args: AddArgs, target: &ClientTarget) -> Result<()> {
                 .map_err(|e| from_underlying("alias", e))?,
         })
         .await?;
-    if matches!(
-        r.alias_outcome,
-        hermod_protocol::ipc::methods::AliasOutcomeView::LocalDropped
-    ) {
-        eprintln!(
-            "warning: requested local_alias was already bound to another peer; \
-             added without alias. The peer's self-asserted alias will arrive on \
-             first federation contact (visible as `peer_asserted_alias`). Either \
-             rename the existing peer or pick a different alias."
-        );
-    }
     println!("{}", serde_json::to_string_pretty(&r)?);
     Ok(())
 }

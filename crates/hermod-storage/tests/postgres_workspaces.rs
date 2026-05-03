@@ -67,13 +67,11 @@ async fn seed_agent(pool: &sqlx::PgPool, id: AgentId, byte: u8) {
         .upsert(&AgentRecord {
             id,
             pubkey: PubkeyBytes([byte; 32]),
-            host_pubkey: None,
             endpoint: None,
             via_agent: None,
             local_alias: None,
             peer_asserted_alias: None,
             trust_level: TrustLevel::Local,
-            tls_fingerprint: None,
             reputation: 0,
             first_seen: now,
             last_seen: Some(now),

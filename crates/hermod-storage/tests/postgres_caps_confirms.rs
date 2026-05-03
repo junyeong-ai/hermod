@@ -17,7 +17,7 @@ use hermod_storage::repositories::capabilities::{
     CapabilityFilter, CapabilityRecord, CapabilityRepository,
 };
 use hermod_storage::repositories::confirmations::{
-    ConfirmationRepository, ConfirmationStatus, HoldRequest, HoldedIntent,
+    ConfirmationRepository, ConfirmationStatus, HeldIntent, HoldRequest,
 };
 use sqlx::Executor;
 use std::sync::Arc;
@@ -66,13 +66,11 @@ async fn seed_agent(pool: &sqlx::PgPool, id: AgentId) {
         .upsert(&AgentRecord {
             id,
             pubkey: PubkeyBytes([1u8; 32]),
-            host_pubkey: None,
             endpoint: None,
             via_agent: None,
             local_alias: None,
             peer_asserted_alias: None,
             trust_level: TrustLevel::Tofu,
-            tls_fingerprint: None,
             reputation: 0,
             first_seen: now,
             last_seen: Some(now),
@@ -297,7 +295,7 @@ async fn confirmations_dedupe_pending_envelope_under_partial_index() {
     let req = |summary: &'static str| HoldRequest {
         envelope_id: &env_id,
         actor: &actor,
-        intent: HoldedIntent::DirectMessage,
+        intent: HeldIntent::DirectMessage,
         sensitivity: "review",
         trust_level: TrustLevel::Tofu,
         summary,
@@ -354,7 +352,7 @@ async fn confirmations_quota_check_under_concurrent_enqueue() {
             let req = HoldRequest {
                 envelope_id: &env_id,
                 actor: &actor,
-                intent: HoldedIntent::DirectMessage,
+                intent: HeldIntent::DirectMessage,
                 sensitivity: "review",
                 trust_level: TrustLevel::Tofu,
                 summary: "concurrent",
@@ -401,7 +399,7 @@ async fn confirmations_decide_is_idempotent() {
         .enqueue(HoldRequest {
             envelope_id: &env_id,
             actor: &actor,
-            intent: HoldedIntent::DirectMessage,
+            intent: HeldIntent::DirectMessage,
             sensitivity: "review",
             trust_level: TrustLevel::Tofu,
             summary: "decide-test",
@@ -439,7 +437,7 @@ async fn confirmations_expire_pending_older_than_cutoff() {
     conf.enqueue(HoldRequest {
         envelope_id: &env1,
         actor: &actor,
-        intent: HoldedIntent::DirectMessage,
+        intent: HeldIntent::DirectMessage,
         sensitivity: "review",
         trust_level: TrustLevel::Tofu,
         summary: "old",
@@ -454,7 +452,7 @@ async fn confirmations_expire_pending_older_than_cutoff() {
     conf.enqueue(HoldRequest {
         envelope_id: &env2,
         actor: &actor,
-        intent: HoldedIntent::DirectMessage,
+        intent: HeldIntent::DirectMessage,
         sensitivity: "review",
         trust_level: TrustLevel::Tofu,
         summary: "fresh",

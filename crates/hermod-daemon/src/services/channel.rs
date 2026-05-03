@@ -194,7 +194,7 @@ impl ChannelService {
                 continue;
             }
             let recipient = match self.db.agents().get(&member).await? {
-                Some(rec) => match rec.endpoint {
+                Some(rec) => match crate::services::resolve_host_endpoint(&*self.db, &rec).await {
                     Some(Endpoint::Wss(w)) => AgentAddress::with_endpoint(rec.id, Endpoint::Wss(w)),
                     _ => AgentAddress::local(rec.id),
                 },

@@ -1,5 +1,6 @@
 use hermod_core::{
-    AgentAddress, AgentId, Envelope, MessageBody, MessagePriority, MessageStatus, Timestamp,
+    AgentAddress, AgentId, Envelope, MessageBody, MessageId, MessagePriority, MessageStatus,
+    Timestamp,
 };
 use hermod_crypto::{LocalKeySigner, Signer};
 use hermod_daemon::local_agent::LocalAgentRegistry;
@@ -94,6 +95,28 @@ impl MessageService {
         fields(to = %params.to.id, kind = ?params.body.kind(), priority = ?params.priority)
     )]
     pub async fn send(&self, params: MessageSendParams) -> Result<MessageSendResult, ServiceError> {
+        self.send_with_envelope_id(params, MessageId::new()).await
+    }
+
+    /// Service-internal entry point that sends with a caller-allocated
+    /// envelope id. Required by the workspace-observability gossip path,
+    /// where the originator pre-allocates the request envelope id and
+    /// keys its pending-response tracker on it — the responder echoes
+    /// the id verbatim into `WorkspaceRosterResponse.request_id` /
+    /// `WorkspaceChannelsResponse.request_id`, so the originator's
+    /// envelope id MUST equal the registered key. Public `send` calls
+    /// this with `MessageId::new()` for the canonical case.
+    ///
+    /// Not exposed on the IPC surface — letting external callers pin
+    /// envelope ids is a foot-gun (collisions trip the messages PK and
+    /// invite replay confusion). Internal callers stay subject to every
+    /// gate `send` enforces (DM size, file hash, access, rate limit,
+    /// signing).
+    pub(crate) async fn send_with_envelope_id(
+        &self,
+        params: MessageSendParams,
+        envelope_id: MessageId,
+    ) -> Result<MessageSendResult, ServiceError> {
         if let MessageBody::Direct { text } = &params.body
             && text.len() > MAX_DIRECT_TEXT_BYTES
         {
@@ -129,6 +152,7 @@ impl MessageService {
         let ttl = params.ttl_secs.unwrap_or(3600);
 
         let mut envelope = Envelope::draft(from, params.to.clone(), params.body, priority, ttl);
+        envelope.id = envelope_id;
         if let Some(thread) = params.thread {
             envelope = envelope.with_thread(thread);
         }
@@ -463,12 +487,29 @@ impl SenderProjection {
                     }
                     None => false,
                 };
+                // Resolve the host pubkey through the hosts FK so
+                // the recipient's view of the sender ("which daemon
+                // hosts this agent?") still surfaces. `host_id`
+                // matches the host's `id`, which is
+                // `agent_id_from_pubkey(host_pubkey)` — we read the
+                // pubkey from the row to keep the wire format
+                // identical to the pre-PR-6 hex.
+                let host_pubkey_hex = match rec.host_id.as_ref() {
+                    Some(host_id) => db
+                        .hosts()
+                        .get(host_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|h| hex::encode(h.pubkey.as_slice())),
+                    None => None,
+                };
                 Self {
                     effective,
                     effective_ambiguous,
                     local: rec.local_alias,
                     peer: rec.peer_asserted_alias,
-                    host_pubkey_hex: rec.host_pubkey.map(|h| hex::encode(h.as_slice())),
+                    host_pubkey_hex,
                 }
             }
             None => Self::default(),

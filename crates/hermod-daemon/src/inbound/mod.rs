@@ -433,8 +433,19 @@ impl InboundProcessor {
         // Auto-upsert sender into the directory on Tofu trust. The
         // pubkey-id binding above is cryptographic, so a sender
         // can only ever introduce themselves — never impersonate
-        // another identity.
-        self.upsert_sender_observed(&envelope.from.id, &claimed_pubkey)
+        // another identity. For direct hops (`inbound_hops == 0`)
+        // the connection's host_id is also the sender's host, so
+        // we link the agent's `host_id` to it inline — a
+        // first-contact reply can dial without waiting for an
+        // out-of-band `peer add` or `peer.advertise`. Brokered hops
+        // (`inbound_hops > 0`) leave routing unset; the broker's
+        // operator pins the via-link separately.
+        let sender_host = if inbound_hops == 0 {
+            Some(source_hop.clone())
+        } else {
+            None
+        };
+        self.upsert_sender_observed(&envelope.from.id, &claimed_pubkey, sender_host.as_ref())
             .await?;
 
         // Token-bucket per (sender → us) pair. Keyed on the
@@ -630,27 +641,34 @@ impl InboundProcessor {
         &self,
         sender: &AgentId,
         pubkey: &PubkeyBytes,
+        sender_host_id: Option<&AgentId>,
     ) -> Result<(), FederationRejection> {
         // Senders that are themselves locally-hosted agents are
         // already in the directory (registered at boot) — skip the
-        // observed-row upsert which would clobber operator-set
-        // fields with stale values.
+        // upsert which would clobber operator-set fields with stale
+        // values.
         if self.local_agents.lookup(sender).is_some() {
             return Ok(());
         }
+        // Goes through `upsert` (not `upsert_observed`) so subsequent
+        // envelopes from a sender we've already learned about do not
+        // reset the peer-asserted columns (`peer_asserted_alias`,
+        // `peer_asserted_tags`) that prior `peer.advertise` envelopes
+        // populated. Sender envelopes never carry alias/tag claims of
+        // their own — that's `peer.advertise`'s job — so the
+        // receiver-sovereignty collision-check the `upsert_observed`
+        // path provides is moot here.
         let now = Timestamp::now();
         self.db
             .agents()
-            .upsert_observed(&hermod_storage::AgentRecord {
+            .upsert(&hermod_storage::AgentRecord {
                 id: sender.clone(),
                 pubkey: *pubkey,
-                host_pubkey: None,
-                endpoint: None,
+                host_id: None,
                 via_agent: None,
                 local_alias: None,
                 peer_asserted_alias: None,
                 trust_level: TrustLevel::Tofu,
-                tls_fingerprint: None,
                 reputation: 0,
                 first_seen: now,
                 last_seen: Some(now),
@@ -658,6 +676,17 @@ impl InboundProcessor {
             })
             .await
             .map_err(|e| FederationRejection::Storage(e.to_string()))?;
+        // Direct-hop senders get their `host_id` auto-linked to the
+        // connection's authenticated host — reply path is routable
+        // immediately. Brokered hops skip this (broker is the source
+        // hop, not the sender's host).
+        if let Some(host_id) = sender_host_id {
+            self.db
+                .agents()
+                .set_routing_direct(sender, host_id)
+                .await
+                .map_err(|e| FederationRejection::Storage(e.to_string()))?;
+        }
         Ok(())
     }
 
@@ -945,13 +974,11 @@ mod tests {
             .upsert(&hermod_storage::AgentRecord {
                 id: self_id.clone(),
                 pubkey: self_pubkey_bytes,
-                host_pubkey: Some(self_pubkey_bytes),
-                endpoint: None,
+                host_id: None,
                 via_agent: None,
                 local_alias: None,
                 peer_asserted_alias: None,
                 trust_level: hermod_core::TrustLevel::Local,
-                tls_fingerprint: None,
                 reputation: 0,
                 first_seen: now,
                 last_seen: Some(now),

@@ -64,7 +64,7 @@ The fuzz harness is a separate, workspace-excluded crate at `fuzz/`
   AuditFederationPolicy { Default | Skip }`. String-prefix heuristics
   forbidden — the compiler enforces.
 - **Held-confirmation intent is typed.** `pending_confirmations.intent`
-  column maps to `HoldedIntent` enum at the API boundary, not free
+  column maps to `HeldIntent` enum at the API boundary, not free
   string.
 - **TLS is pinned to 1.3 only.** `hermod_transport::tls::PROTOCOL_VERSIONS`
   is the single source — every rustls config in the workspace uses it.

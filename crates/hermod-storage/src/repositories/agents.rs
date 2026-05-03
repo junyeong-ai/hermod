@@ -1,9 +1,7 @@
 //! Agent directory contract.
 
 use async_trait::async_trait;
-use hermod_core::{
-    AgentAlias, AgentId, CapabilityTagSet, Endpoint, PubkeyBytes, Timestamp, TrustLevel,
-};
+use hermod_core::{AgentAlias, AgentId, CapabilityTagSet, PubkeyBytes, Timestamp, TrustLevel};
 
 use crate::error::Result;
 
@@ -21,35 +19,34 @@ use crate::error::Result;
 ///     peer claims their own display name is, as observed in their
 ///     latest signed Hello / Presence frame. Advisory — never used for
 ///     routing, never UNIQUE-constrained.
+///
+/// **Routing**: an agent is reachable via either its host (`host_id`
+/// FK → `hosts.endpoint`) or a broker (`via_agent` FK → another
+/// agent that relays on its behalf). Mutually exclusive at the
+/// schema level. A directory-only entry (both `None`) is known but
+/// not yet routable; subsequent `peer.advertise` / `peer add` fills
+/// in the routing target.
 #[derive(Debug, Clone)]
 pub struct AgentRecord {
     pub id: AgentId,
     /// Agent's own ed25519 public key — verifies envelope signatures.
     pub pubkey: PubkeyBytes,
-    /// Host's ed25519 public key — the static key the *daemon* hosting
-    /// this agent presents during the federation Noise XX handshake.
-    /// Multiple agents on the same host share one `host_pubkey`.
-    /// `None` for legacy entries observed before the host key was
-    /// learned. For our own hosted agents (rows joined to `local_agents`),
-    /// equals this daemon's host pubkey.
-    pub host_pubkey: Option<PubkeyBytes>,
-    /// Network endpoint of the host (`wss://host:port`). Host-level,
-    /// not agent-level — multiple agents at one endpoint.
-    pub endpoint: Option<Endpoint>,
-    /// Indirect routing target. NULL ⇒ dial `endpoint` directly.
-    /// `Some(broker)` ⇒ envelopes addressed to this agent are
-    /// dispatched to the broker's endpoint with `to.id` preserved;
+    /// FK → `hosts.id`. The daemon this agent runs on; the host
+    /// record carries the federation endpoint + TLS pin used to
+    /// dial. `None` for entries observed before the host was
+    /// learned (e.g. a brokered peer registered before the broker
+    /// brought the underlying host record online).
+    pub host_id: Option<AgentId>,
+    /// Indirect routing target. NULL ⇒ dial `host_id`'s endpoint
+    /// directly. `Some(broker)` ⇒ envelopes addressed to this agent
+    /// are dispatched to the broker's host with `to.id` preserved;
     /// the broker's `BrokerMode::RelayOnly` fall-through relays the
-    /// second hop. Mutually exclusive with `endpoint` at the schema
-    /// level — operators choose direct OR brokered, never both.
+    /// second hop. Mutually exclusive with `host_id` at the schema
+    /// level.
     pub via_agent: Option<AgentId>,
     pub local_alias: Option<AgentAlias>,
     pub peer_asserted_alias: Option<AgentAlias>,
     pub trust_level: TrustLevel,
-    /// SHA-256 of the *host*'s TLS cert DER, captured on first
-    /// successful TLS handshake. Pinned per-host (multiple agents on
-    /// the same host share one cert). Lowercase, colon-separated.
-    pub tls_fingerprint: Option<String>,
     /// Operator-managed feedback signal.
     pub reputation: i64,
     pub first_seen: Timestamp,
@@ -60,6 +57,14 @@ pub struct AgentRecord {
     /// `hermod_core::capability_tag` module docs +
     /// `scripts/check_trust_boundaries.sh`). Empty for peers that
     /// have never advertised.
+    ///
+    /// Persistence semantics:
+    ///   * `upsert_observed` (peer-driven) — latest-wins. The set
+    ///     in this `AgentRecord` is written verbatim, including
+    ///     the empty set when a peer drops every label.
+    ///   * `upsert` (operator-driven) — peer-asserted is owned by
+    ///     the peer; the conflict path leaves the existing column
+    ///     untouched.
     pub peer_asserted_tags: CapabilityTagSet,
 }
 
@@ -85,24 +90,6 @@ pub enum AliasOutcome {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ForgetOutcome {
-    pub existed: bool,
-    pub prior_endpoint: Option<Endpoint>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RepinOutcome {
-    Replaced {
-        previous: Option<String>,
-        endpoint: Option<Endpoint>,
-    },
-    TrustMismatch {
-        actual: TrustLevel,
-    },
-    NotFound,
-}
-
 #[async_trait]
 pub trait AgentRepository: Send + Sync + std::fmt::Debug {
     /// Operator-driven upsert (e.g. `init`, `peer add`, `agent register`).
@@ -122,16 +109,14 @@ pub trait AgentRepository: Send + Sync + std::fmt::Debug {
 
     async fn list(&self) -> Result<Vec<AgentRecord>>;
 
-    /// Peers with a federation endpoint registered.
+    /// Remote agents reachable via the federation pool — carry a
+    /// `host_id` (direct) or `via_agent` (brokered), and are NOT
+    /// hosted by this daemon (excluded via the `local_agents`
+    /// sub-relation). Used by every operator-facing peer
+    /// enumeration: `peer list`, `peer advertise` fan-out, status
+    /// peer count. The local-agent exclusion keeps us from
+    /// fan-out-looping a daemon's own advertise back to itself.
     async fn list_federated(&self) -> Result<Vec<AgentRecord>>;
-
-    /// Replace `peer_asserted_tags` for one row. Used by the
-    /// inbound `peer.advertise` acceptor on every advertise — the
-    /// sender's most-recent claim is authoritative for the
-    /// peer-side facet, just like `peer_asserted_alias`. Tags are
-    /// validated through `CapabilityTagSet::parse_lossy` upstream;
-    /// this method just persists the result.
-    async fn set_peer_asserted_tags(&self, id: &AgentId, tags: &CapabilityTagSet) -> Result<()>;
 
     /// Count agents whose effective alias (local override winning,
     /// peer-asserted as fallback) equals `alias`, *excluding* the
@@ -148,23 +133,23 @@ pub trait AgentRepository: Send + Sync + std::fmt::Debug {
     async fn set_trust(&self, id: &AgentId, trust: TrustLevel) -> Result<()>;
     async fn touch(&self, id: &AgentId, at: Timestamp) -> Result<()>;
 
-    /// Atomic TOFU primitive for a peer's federation TLS cert. Pins
-    /// `tls_fingerprint` if currently `NULL`. Returns `Ok(true)` if pinned or
-    /// already matched, `Ok(false)` if a different fingerprint is stored.
-    async fn pin_or_match_tls_fingerprint(&self, id: &AgentId, observed: &str) -> Result<bool>;
+    /// Pin direct routing: this agent is dialled through `host_id`'s
+    /// federation endpoint. Atomic with `via_agent` clear, so the
+    /// `host_id XOR via_agent` CHECK invariant is satisfied without
+    /// a multi-statement window. Operator-driven (`peer add
+    /// --endpoint`); never invoked from the inbound path.
+    async fn set_routing_direct(&self, id: &AgentId, host_id: &AgentId) -> Result<()>;
 
-    /// Replace the stored TLS fingerprint, requiring the row's current
-    /// trust level to match `require`. Used by `peer.repin`.
-    async fn replace_tls_fingerprint(
-        &self,
-        id: &AgentId,
-        new: &str,
-        require: TrustLevel,
-    ) -> Result<RepinOutcome>;
+    /// Pin brokered routing: this agent is dialled through
+    /// `via_agent`'s host endpoint with `to.id` preserved on the
+    /// envelope. Atomic with `host_id` clear. Operator-driven
+    /// (`peer add --via`).
+    async fn set_routing_brokered(&self, id: &AgentId, via_agent: &AgentId) -> Result<()>;
 
-    /// Drop a peer's federation endpoint and TLS pin without deleting the
-    /// agent row. Read-then-clear is atomic so the caller can use
-    /// `prior_endpoint` to evict the matching pool entry without a TOCTOU
-    /// window.
-    async fn forget_peer(&self, id: &AgentId) -> Result<ForgetOutcome>;
+    /// Drop both routing pointers without deleting the agent row.
+    /// Used by `peer.remove`'s service path after the host's endpoint
+    /// has been forgotten — the agent row stays in the directory for
+    /// audit / capability lineage but becomes "directory-only / not
+    /// yet routable".
+    async fn clear_routing(&self, id: &AgentId) -> Result<()>;
 }

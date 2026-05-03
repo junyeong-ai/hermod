@@ -22,26 +22,35 @@
 --   * Partial indexes' `WHERE` predicates identical — Postgres supports
 --     them natively.
 
+-- Federation hosts. See sqlite migration for full semantics.
+CREATE TABLE hosts (
+    id                  TEXT NOT NULL PRIMARY KEY,
+    pubkey              BYTEA NOT NULL UNIQUE,
+    endpoint            TEXT,
+    tls_fingerprint     TEXT,
+    peer_asserted_alias TEXT,
+    first_seen          BIGINT NOT NULL,
+    last_seen           BIGINT
+);
+
 CREATE TABLE agents (
     id                  TEXT NOT NULL PRIMARY KEY,
     pubkey              BYTEA NOT NULL,
-    host_pubkey         BYTEA,
-    endpoint            TEXT,
-    -- Mirrors sqlite migration; see comment there for semantics.
-    via_agent        TEXT REFERENCES agents(id) ON DELETE SET NULL,
+    host_id             TEXT REFERENCES hosts(id) ON DELETE SET NULL,
+    via_agent           TEXT REFERENCES agents(id) ON DELETE SET NULL,
     local_alias         TEXT UNIQUE,
     peer_asserted_alias TEXT,
     trust_level         TEXT NOT NULL
                         CHECK (trust_level IN ('local','verified','tofu','untrusted')),
-    tls_fingerprint     TEXT,
     reputation          BIGINT NOT NULL DEFAULT 0,
     first_seen          BIGINT NOT NULL,
     last_seen           BIGINT,
     -- See sqlite migration for column purpose. Postgres parity.
     peer_asserted_tags  TEXT NOT NULL DEFAULT '[]',
-    CHECK (endpoint IS NULL OR via_agent IS NULL)
+    CHECK (host_id IS NULL OR via_agent IS NULL)
 );
-CREATE INDEX idx_agents_with_endpoint ON agents(id) WHERE endpoint IS NOT NULL;
+CREATE INDEX idx_agents_host ON agents(host_id) WHERE host_id IS NOT NULL;
+CREATE INDEX idx_agents_via  ON agents(via_agent) WHERE via_agent IS NOT NULL;
 
 CREATE TABLE local_agents (
     agent_id            TEXT NOT NULL PRIMARY KEY

@@ -64,14 +64,44 @@ from the static path.
 | `channels()` | `ChannelRepository` |
 | `confirmations()` | `ConfirmationRepository` |
 | `discovered_channels()` | `DiscoveredChannelRepository` |
+| `hosts()` | `HostRepository` |
+| `local_agents()` | `LocalAgentRepository` |
 | `mcp_sessions()` | `McpSessionRepository` |
 | `messages()` | `MessageRepository` |
+| `notifications()` | `NotificationRepository` |
 | `presences()` | `AgentPresenceRepository` |
 | `rate_limits()` | `RateLimitRepository` |
 | `workspaces()` | `WorkspaceRepository` |
 | `workspace_members()` | `WorkspaceMemberRepository` |
 
 Plus `ping()`, `schema_version()`, `metrics_snapshot()`, `shutdown()`.
+
+## Identity model — host vs agent
+
+Two tables, two concepts, no overlap:
+
+- **`hosts`** — daemons (the entity authenticated by the federation
+  Noise XX handshake). Carries `pubkey`, `endpoint`, `tls_fingerprint`,
+  `peer_asserted_alias` (host's own claimed name). Hosts are NEVER
+  envelope recipients; they're how the dial pool knows where to go.
+- **`agents`** — envelope senders / receivers. `agents.host_id` FK
+  points at the daemon hosting this agent. Carries `local_alias`,
+  `peer_asserted_alias` (persona), `trust_level`, `reputation`,
+  `peer_asserted_tags`, `via_agent` (brokered routing).
+
+Routing fields (`host_id` / `via_agent`) are NEVER touched by
+`upsert` / `upsert_observed`. Their ownership is encoded in three
+explicit methods:
+
+- `set_routing_direct(id, host_id)` — direct dial
+- `set_routing_brokered(id, via_agent)` — brokered dial
+- `clear_routing(id)` — both NULL (directory-only / not routable)
+
+Each method atomically clears the other slot, so the
+`host_id XOR via_agent` CHECK is satisfied without a multi-statement
+window. Operator paths (`peer add` direct/via) and the
+`peer.advertise` inbound acceptor call these methods after the
+identity-shaped upsert.
 
 ## Backend parity contract
 

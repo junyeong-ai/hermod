@@ -62,9 +62,7 @@ pub use webhook_audit_sink::{WebhookAuditSink, WebhookAuditSinkConfig};
 
 // Repository traits and their value types — re-exported flat for ergonomic
 // single-import callers (`use hermod_storage::AgentRecord`).
-pub use repositories::agents::{
-    AgentRecord, AgentRepository, AliasOutcome, ForgetOutcome, RepinOutcome,
-};
+pub use repositories::agents::{AgentRecord, AgentRepository, AliasOutcome};
 pub use repositories::audit::{
     ArchiveIndexEntry, ArchiveSummary, ArchiveVerification, AuditEntry, AuditFederationPolicy,
     AuditRepository, ChainVerification,
@@ -72,9 +70,10 @@ pub use repositories::audit::{
 pub use repositories::briefs::{BriefRecord, BriefRepository};
 pub use repositories::capabilities::{CapabilityFilter, CapabilityRecord, CapabilityRepository};
 pub use repositories::confirmations::{
-    ConfirmationRepository, ConfirmationStatus, HoldRequest, HoldedIntent, MAX_PENDING_PER_ACTOR,
+    ConfirmationRepository, ConfirmationStatus, HeldIntent, HoldRequest, MAX_PENDING_PER_ACTOR,
     PendingConfirmation,
 };
+pub use repositories::hosts::{ForgetOutcome, HostRecord, HostRepository, RepinOutcome};
 pub use repositories::local_agents::{
     LocalAgentInsertOutcome, LocalAgentRecord, LocalAgentRemoveOutcome, LocalAgentRepository,
 };

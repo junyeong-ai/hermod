@@ -90,6 +90,25 @@ pub async fn audit_or_warn(sink: &dyn AuditSink, mut entry: AuditEntry) {
     sink.record(entry).await;
 }
 
+/// Resolve an agent's `host_id` FK to the host's federation
+/// endpoint. Returns `None` for agents with no host (brokered or
+/// directory-only) or hosts whose endpoint hasn't been observed
+/// yet. Single helper so every dispatch path uses the same
+/// hosts-table lookup instead of poking columns that no longer
+/// exist on `AgentRecord`.
+pub async fn resolve_host_endpoint(
+    db: &dyn Database,
+    record: &AgentRecord,
+) -> Option<hermod_core::Endpoint> {
+    let host_id = record.host_id.as_ref()?;
+    db.hosts()
+        .get(host_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|h| h.endpoint)
+}
+
 pub use agent::AgentService;
 pub use audit::AuditService;
 pub use audit_remote::RemoteAuditSink;
@@ -113,14 +132,10 @@ pub use status::StatusService;
 pub use workspace::WorkspaceService;
 pub use workspace_observability::WorkspaceObservabilityService;
 
-use hermod_storage::{AgentRecord, Database};
+use hermod_storage::{AgentRecord, Database, HostRecord};
 
-/// Register every locally-hosted agent in the `agents` directory
-/// and the `local_agents` sub-relation. Each agent's row carries
-/// `host_pubkey = Some(host_pubkey)` so federation peers can
-/// resolve "which daemon hosts this agent_id" without a separate
-/// lookup, and `local_alias` mirrors the operator-set value from
-/// the agent's on-disk `alias` file (read at scan time).
+/// Register the daemon's own host record + every locally-hosted
+/// agent in the directory and the `local_agents` sub-relation.
 ///
 /// On return the registry's `workspace_root` / `created_at` fields
 /// reflect the persisted `local_agents` rows. See
@@ -133,18 +148,33 @@ pub async fn ensure_local_agents(
     audit_sink: &dyn AuditSink,
 ) -> anyhow::Result<crate::local_agent::LocalAgentRegistry> {
     let now = hermod_core::Timestamp::now();
+    let host_id = hermod_crypto::agent_id_from_pubkey(&host_pubkey);
+    db.hosts()
+        .upsert(&HostRecord {
+            id: host_id.clone(),
+            pubkey: host_pubkey,
+            // Boot path: this daemon's listen endpoint is decided by
+            // the operator (config / env). The federation pool dials
+            // *peers*, not self — so leaving self's endpoint as
+            // None costs nothing. A future surfacing of "what's
+            // *my* endpoint?" can populate it from `[daemon] listen_ws`.
+            endpoint: None,
+            tls_fingerprint: None,
+            peer_asserted_alias: None,
+            first_seen: now,
+            last_seen: Some(now),
+        })
+        .await?;
     for agent in registry.list().iter() {
         db.agents()
             .upsert(&AgentRecord {
                 id: agent.agent_id.clone(),
                 pubkey: agent.keypair.to_pubkey_bytes(),
-                host_pubkey: Some(host_pubkey),
-                endpoint: None,
+                host_id: None,
                 via_agent: None,
                 local_alias: agent.local_alias.clone(),
                 peer_asserted_alias: None,
                 trust_level: hermod_core::TrustLevel::Local,
-                tls_fingerprint: None,
                 reputation: 0,
                 first_seen: now,
                 last_seen: Some(now),
@@ -154,6 +184,10 @@ pub async fn ensure_local_agents(
                 // updated by the dedicated tag service.
                 peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
             })
+            .await?;
+        // Local agents are always direct: their host is this daemon.
+        db.agents()
+            .set_routing_direct(&agent.agent_id, &host_id)
             .await?;
     }
     crate::local_agent::merge_with_db(db, audit_sink, registry).await

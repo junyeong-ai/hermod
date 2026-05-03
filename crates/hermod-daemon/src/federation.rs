@@ -26,7 +26,7 @@
 use hermod_core::{Endpoint, PubkeyBytes, Timestamp, TrustLevel, WssEndpoint};
 use hermod_protocol::wire::{AckStatus, Pong, WireFrame};
 use hermod_routing::{Transport, TransportConnection};
-use hermod_storage::{AgentRecord, Database};
+use hermod_storage::{AgentRecord, Database, HostRecord};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -198,122 +198,113 @@ impl FederationServer {
     }
 }
 
-/// Register a federated peer's *host* row in the agents directory.
+/// Register a federation host (a remote daemon).
 ///
-/// A federation peer is a *daemon* — the entity authenticated by the
-/// Noise XX handshake. Its agents are learned dynamically (via
-/// envelope-receipt TOFU and, in H7, `peer.advertise`). Used by:
+/// A host is the entity authenticated by the federation Noise XX
+/// handshake. Used by:
 ///
-///   * Inbound handshake TOFU (`endpoint = None`, alias = None)
+///   * Inbound handshake TOFU (`endpoint = None`, alias = None,
+///     `tls_fingerprint = Some(observed)`)
 ///   * Broker config seed (`endpoint = Some(broker_endpoint)`)
 ///   * Discovery ingestion (mDNS, static-config peers — alias from beacon)
 ///
-/// The host row's `host_pubkey` is self-referential: every entity in
-/// the agents directory carries a host_pubkey, and for hosts that's
-/// their own pubkey.
+/// Hosts live in the dedicated `hosts` table. Agents reference them
+/// via `agents.host_id` FK. Re-observation COALESCEs missing fields
+/// so a partial update never blanks a known endpoint / TLS pin /
+/// alias.
 pub async fn record_host_peer(
     db: &dyn Database,
     endpoint: Option<WssEndpoint>,
     host_pubkey: PubkeyBytes,
     peer_asserted_alias: Option<hermod_core::AgentAlias>,
     tls_fingerprint: Option<String>,
-) -> anyhow::Result<(AgentRecord, hermod_storage::AliasOutcome)> {
+) -> anyhow::Result<HostRecord> {
     use hermod_crypto::agent_id_from_pubkey;
     let now = Timestamp::now();
     let host_id = agent_id_from_pubkey(&host_pubkey);
-    let outcome = db
-        .agents()
-        .upsert_observed(&AgentRecord {
+    db.hosts()
+        .upsert(&HostRecord {
             id: host_id.clone(),
             pubkey: host_pubkey,
-            host_pubkey: Some(host_pubkey),
             endpoint: endpoint.map(Endpoint::Wss),
-            via_agent: None,
-            local_alias: None,
-            peer_asserted_alias,
-            trust_level: TrustLevel::Tofu,
             tls_fingerprint,
-            reputation: 0,
+            peer_asserted_alias,
             first_seen: now,
             last_seen: Some(now),
-            peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
         })
         .await?;
-    let rec = db
-        .agents()
+    db.hosts()
         .get(&host_id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("host peer vanished after upsert: {host_id}"))?;
-    Ok((rec, outcome))
+        .ok_or_else(|| anyhow::anyhow!("host vanished after upsert: {host_id}"))
 }
 
-/// Register a federated peer's *agent* row, plus its host row.
-///
-/// Used by `peer.add` (operator-driven) where the operator knows both
-/// pubkeys out of band. Both rows are upserted: the host (so the pool
-/// can pin Noise XX with `host_pubkey`) and the agent (so envelope
-/// addressing by `to.id` resolves to the right host).
+/// Register a federation peer agent — `peer add --endpoint`. Inserts
+/// the host record (so the dial pool can resolve endpoint + TLS pin)
+/// and the agent record (so envelope addressing by `to.id` resolves).
+/// Both rows go through `upsert`, not `upsert_observed`, so a re-run
+/// of `peer add` on an agent the operator has already seen does not
+/// clobber peer-asserted columns the row has accumulated. A
+/// `local_alias` collision against a different agent_id surfaces as
+/// a UNIQUE-constraint storage error — operator input must resolve
+/// cleanly; the silent-drop sovereignty path is reserved for inbound.
 pub async fn record_agent_peer(
     db: &dyn Database,
     endpoint: WssEndpoint,
     host_pubkey: PubkeyBytes,
     agent_pubkey: PubkeyBytes,
     local_alias: Option<hermod_core::AgentAlias>,
-) -> anyhow::Result<(AgentRecord, hermod_storage::AliasOutcome)> {
+) -> anyhow::Result<AgentRecord> {
     use hermod_crypto::agent_id_from_pubkey;
-    record_host_peer(db, Some(endpoint.clone()), host_pubkey, None, None).await?;
+    let host = record_host_peer(db, Some(endpoint), host_pubkey, None, None).await?;
 
     let now = Timestamp::now();
     let agent_id = agent_id_from_pubkey(&agent_pubkey);
-    let outcome = db
-        .agents()
-        .upsert_observed(&AgentRecord {
+    db.agents()
+        .upsert(&AgentRecord {
             id: agent_id.clone(),
             pubkey: agent_pubkey,
-            host_pubkey: Some(host_pubkey),
-            endpoint: Some(Endpoint::Wss(endpoint)),
+            host_id: Some(host.id.clone()),
             via_agent: None,
             local_alias,
             peer_asserted_alias: None,
             trust_level: TrustLevel::Tofu,
-            tls_fingerprint: None,
             reputation: 0,
             first_seen: now,
             last_seen: None,
             peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
         })
         .await?;
-    let rec = db
-        .agents()
+    // Pin direct routing explicitly. `upsert` doesn't touch routing
+    // fields; this call carries the operator's intent and atomically
+    // satisfies the `host_id XOR via_agent` CHECK against any prior
+    // brokered configuration.
+    db.agents().set_routing_direct(&agent_id, &host.id).await?;
+    db.agents()
         .get(&agent_id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("agent peer vanished after upsert: {agent_id}"))?;
-    Ok((rec, outcome))
+        .ok_or_else(|| anyhow::anyhow!("agent peer vanished after upsert: {agent_id}"))
 }
 
-/// Register a peer agent that's reachable only through a broker.
+/// Register a peer agent reachable only through a broker.
 ///
-/// Mirror of [`record_agent_peer`] for the brokered case: instead
-/// of pinning an `endpoint`, the new agent's row points at
-/// `via_agent`. The broker's directory row must already exist
-/// (FK enforces it) — typically from a prior `peer add --endpoint`
-/// of the broker itself, or `record_host_peer` during inbound
-/// federation handshake.
+/// Mirror of [`record_agent_peer`] for the brokered case: instead of
+/// `host_id`, the new agent's row points at `via_agent`. The
+/// broker's host record must already exist (the broker itself is
+/// added first via `peer add --endpoint`, or learned via inbound
+/// federation handshake — both go through `record_host_peer`).
 ///
-/// The host row is NOT auto-inserted here: the broker is the
-/// single host the dispatcher will dial, and its row was
-/// established when the broker was added. The new agent's
-/// `host_pubkey` is the *peer's* host pubkey (the daemon hosting
-/// that agent on the far side of the broker), pinned for envelope
-/// signature verification — same self-cert binding as the direct
-/// case.
+/// The peer's own host record is NOT inserted here. The dial path
+/// goes through the broker's host; the peer's `host_pubkey` is
+/// captured implicitly inside `agent_pubkey`'s self-certifying
+/// derivation when its envelopes start arriving and inbound TOFU
+/// runs `record_host_peer` to back the cert pin then.
 pub async fn record_brokered_peer(
     db: &dyn Database,
     via_agent: hermod_core::AgentId,
-    host_pubkey: PubkeyBytes,
     agent_pubkey: PubkeyBytes,
     local_alias: Option<hermod_core::AgentAlias>,
-) -> anyhow::Result<(AgentRecord, hermod_storage::AliasOutcome)> {
+) -> anyhow::Result<AgentRecord> {
     use hermod_crypto::agent_id_from_pubkey;
     // Verify the broker exists in the directory — FK will reject
     // otherwise, but a friendly error here saves the operator a
@@ -327,28 +318,27 @@ pub async fn record_brokered_peer(
 
     let now = Timestamp::now();
     let agent_id = agent_id_from_pubkey(&agent_pubkey);
-    let outcome = db
-        .agents()
-        .upsert_observed(&AgentRecord {
+    db.agents()
+        .upsert(&AgentRecord {
             id: agent_id.clone(),
             pubkey: agent_pubkey,
-            host_pubkey: Some(host_pubkey),
-            endpoint: None,
-            via_agent: Some(via_agent),
+            host_id: None,
+            via_agent: Some(via_agent.clone()),
             local_alias,
             peer_asserted_alias: None,
             trust_level: TrustLevel::Tofu,
-            tls_fingerprint: None,
             reputation: 0,
             first_seen: now,
             last_seen: None,
             peer_asserted_tags: hermod_core::CapabilityTagSet::empty(),
         })
         .await?;
-    let rec = db
-        .agents()
+    // Pin brokered routing explicitly (atomic with `host_id` clear).
+    db.agents()
+        .set_routing_brokered(&agent_id, &via_agent)
+        .await?;
+    db.agents()
         .get(&agent_id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("brokered peer vanished after upsert: {agent_id}"))?;
-    Ok((rec, outcome))
+        .ok_or_else(|| anyhow::anyhow!("brokered peer vanished after upsert: {agent_id}"))
 }

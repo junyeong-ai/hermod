@@ -1,71 +1,85 @@
 -- Hermod schema.
 
--- Agents — unified identity directory for local self + every remote agent
--- this daemon has interacted with. `endpoint` is non-null iff the agent
--- speaks federation (i.e. is "a peer"). `tls_fingerprint` is captured on
--- first successful TLS handshake (TOFU-pinned thereafter). `reputation`
--- is operator-managed feedback; positive on clean traffic, negative on
--- protocol violations.
--- agents directory.
+-- Federation hosts — per-daemon identity and dial metadata. A host is
+-- a *daemon*, the entity authenticated by the federation Noise XX
+-- handshake. It is never an envelope recipient (that role belongs to
+-- the agents it carries). Splitting hosts and agents into separate
+-- tables encodes that asymmetry once at the schema level so callers
+-- (peer enumeration, fan-out, dial pool) never need to filter
+-- "is this row a host or an agent?" out of one conflated directory.
+--
+-- `id = base32(blake3(pubkey))[:26]`, same derivation as agents, so
+-- a single AgentId newtype carries either kind of identity through
+-- the codebase.
+CREATE TABLE hosts (
+    id                  TEXT NOT NULL PRIMARY KEY,
+    -- ed25519 static key the daemon presents during the federation
+    -- Noise XX handshake. UNIQUE so the (id, pubkey) pair stays
+    -- self-certifying — `id` is its blake3 prefix.
+    pubkey              BLOB NOT NULL UNIQUE,
+    -- Network endpoint dialled by the federation pool. NULL when
+    -- the host has only ever been observed via inbound TOFU and
+    -- the operator hasn't run `peer add --endpoint <wss://>` yet.
+    endpoint            TEXT,
+    -- SHA-256 of the host's TLS leaf cert DER, captured on first
+    -- successful TLS handshake. Pinned per-host (every agent on
+    -- this host shares this cert). Lowercase, colon-separated.
+    tls_fingerprint     TEXT,
+    -- Host-level peer-claimed display name ("alice-laptop").
+    -- Distinct from `agents.peer_asserted_alias` (the agent
+    -- persona's self-claim). Advisory display only — never used
+    -- for routing.
+    peer_asserted_alias TEXT,
+    first_seen          INTEGER NOT NULL,
+    last_seen           INTEGER
+);
+
+-- Agents directory — every entity that signs envelopes (local self
+-- + every remote agent we've interacted with). One agent lives on
+-- exactly one host; the `host_id` FK formalises that.
 --
 -- Identity / display split (best practice, see Signal / GitHub / PGP):
---   * `id` (ed25519 pubkey hash) — the canonical identifier. Routing,
+--   * `id` (ed25519 pubkey hash) — canonical identifier. Routing,
 --     crypto, audit, foreign keys all reference this. Immutable.
---   * `local_alias` — the operator-set nickname for this peer. Sacred:
---     once an operator has named someone @bob, no peer can take that
---     name from them. UNIQUE within the daemon. Used for `--to @alias`
---     resolution.
---   * `peer_asserted_alias` — the peer's self-claim from their last
---     Hello / Presence frame. Advisory display metadata only — never
---     used for routing, never overrides `local_alias`. NOT unique
---     (multiple peers can claim the same display name; we just store
---     each one's claim).
+--   * `local_alias` — operator's nickname. Sacred — once an
+--     operator names someone @bob, no peer can take it. UNIQUE
+--     within the daemon. Used for `--to @alias` resolution.
+--   * `peer_asserted_alias` — peer's self-claim from their last
+--     Hello / PeerAdvertise frame. Advisory; never overrides
+--     `local_alias`. NOT unique.
 CREATE TABLE agents (
     id                  TEXT NOT NULL PRIMARY KEY,
-    -- Agent's own ed25519 keypair public half. Verifies envelope
-    -- signatures.
+    -- Agent's own ed25519 pubkey — verifies envelope signatures.
     pubkey              BLOB NOT NULL,
-    -- Host's ed25519 keypair public half — the static key the
-    -- *daemon* hosting this agent presents during the federation
-    -- Noise XX handshake. NULL for entries observed before the host
-    -- key was learned (e.g. a legacy `peer add` without the host
-    -- pubkey hint). For our own hosted agents (`local_agents` join),
-    -- equals this daemon's host pubkey.
-    host_pubkey         BLOB,
-    -- Network endpoint of the host. wss://host:port — host-level,
-    -- not agent-level. Multiple agents on the same host share one
-    -- endpoint (Noise XX terminates at the host; the envelope's
-    -- to.id selects which local agent receives the payload).
-    endpoint            TEXT,
-    -- Indirect routing target. NULL ⇒ this row's `endpoint` is dialled
-    -- directly. `Some(broker_id)` ⇒ envelopes addressed to this agent
-    -- are dispatched to the broker `agents.via_agent`'s endpoint
-    -- with `envelope.to.id` preserved (the broker's
-    -- `BrokerMode::RelayOnly` fall-through relays the second hop).
-    -- Enables mesh topologies where only one node has a public
-    -- endpoint — every other peer reaches them through that broker.
+    -- The host this agent runs on. ON DELETE SET NULL keeps the
+    -- agent row alive when an operator forgets the host (e.g. via
+    -- `peer remove`); the agent becomes "directory-only" until a
+    -- new host record is observed.
+    host_id             TEXT REFERENCES hosts(id) ON DELETE SET NULL,
+    -- Indirect routing target. NULL ⇒ envelope addressed to this
+    -- agent dials `host_id`'s endpoint directly. `Some(broker_id)`
+    -- ⇒ dispatched to the broker's host with `envelope.to.id`
+    -- preserved; the broker's `BrokerMode::RelayOnly` fall-through
+    -- forwards the second hop. Enables mesh topologies where only
+    -- one node has a public endpoint.
     --
-    -- Resolution is recursive (broker may itself be indirect via
-    -- another broker), capped at MAX_RELAY_HOPS at dispatch time.
-    -- Cycles fail-loud at dispatch (audit `routing.cycle_detected`)
-    -- rather than at row insert — the dependency graph can change
-    -- atomically across multiple rows so DB-level constraints
-    -- can't catch every cycle.
+    -- Resolution is recursive (broker may itself be brokered),
+    -- capped at MAX_RELAY_HOPS at dispatch time. Cycles fail-loud
+    -- at dispatch (audit `routing.cycle_detected`) rather than at
+    -- row insert — the graph can change atomically across rows so
+    -- DB constraints can't catch every cycle.
     --
     -- ON DELETE SET NULL keeps the indirect row around when the
     -- broker is forgotten — operator repair (re-add broker, swap
-    -- via_agent) is a step, not a forced cascade.
-    via_agent        TEXT REFERENCES agents(id) ON DELETE SET NULL,
+    -- via_agent) is an explicit step, not a forced cascade.
+    via_agent           TEXT REFERENCES agents(id) ON DELETE SET NULL,
     local_alias         TEXT UNIQUE,
     peer_asserted_alias TEXT,
-    -- `local` means this agent is hosted by THIS daemon (private key
-    -- in `local_agents` row). Replaces the legacy `self` value.
-    -- Multi-tenant — multiple `local` rows are normal.
+    -- `local` means this agent is hosted by THIS daemon (private
+    -- key in `local_agents`). Multi-tenant — multiple `local` rows
+    -- are normal.
     trust_level         TEXT NOT NULL
                         CHECK (trust_level IN ('local','verified','tofu','untrusted')),
-    -- SHA-256 of the *host*'s TLS cert. Pinned per-host, not per-
-    -- agent — multiple agents on the same host share one cert.
-    tls_fingerprint     TEXT,
     reputation          INTEGER NOT NULL DEFAULT 0,
     first_seen          INTEGER NOT NULL,
     last_seen           INTEGER,
@@ -76,15 +90,14 @@ CREATE TABLE agents (
     -- `scripts/check_trust_boundaries.sh` grep contract). JSON-
     -- encoded `Vec<String>` validated through
     -- `CapabilityTagSet::parse_lossy` on read; per-entry parse
-    -- failures drop the entry, never reject the row. Default
-    -- `'[]'` so existing rows pre-PR-4 read as empty.
+    -- failures drop the entry, never reject the row.
     peer_asserted_tags  TEXT NOT NULL DEFAULT '[]',
-    -- Endpoint XOR via_agent (or both NULL = directory-only,
-    -- not yet routable). Observed agents start NULL/NULL and become
-    -- routable once an endpoint or broker hint arrives.
-    CHECK (endpoint IS NULL OR via_agent IS NULL)
+    -- Direct routing (host_id) XOR brokered routing (via_agent),
+    -- or both NULL = directory-only / not yet routable.
+    CHECK (host_id IS NULL OR via_agent IS NULL)
 );
-CREATE INDEX idx_agents_with_endpoint ON agents(id) WHERE endpoint IS NOT NULL;
+CREATE INDEX idx_agents_host ON agents(host_id) WHERE host_id IS NOT NULL;
+CREATE INDEX idx_agents_via  ON agents(via_agent) WHERE via_agent IS NOT NULL;
 
 -- Sub-relation for agents this daemon hosts. Adds the private-key
 -- material (kept on disk under `$HERMOD_HOME/agents/<id>/`, not in

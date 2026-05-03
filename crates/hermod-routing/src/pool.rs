@@ -221,7 +221,7 @@ impl PeerPool {
             let peer_id = identity.host_id.clone();
             match self
                 .db
-                .agents()
+                .hosts()
                 .pin_or_match_tls_fingerprint(&peer_id, &fp)
                 .await
             {

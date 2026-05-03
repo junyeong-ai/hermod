@@ -123,7 +123,7 @@ impl Router {
             Some(r) => r,
             None => return Err(RoutingError::RecipientNotFound(target.id.to_string())),
         };
-        if let Some(ep) = record.endpoint
+        if let Some(ep) = self.host_endpoint(record.host_id.as_ref()).await?
             && !ep.is_local()
         {
             return Ok(RouteOutcome::Remote(ep));
@@ -147,6 +147,19 @@ impl Router {
             });
         }
         Ok(RouteOutcome::LocalKnown)
+    }
+
+    /// Resolve an agent's `host_id` FK to the host's federation
+    /// endpoint, or `None` if the agent has no host (directory-only)
+    /// or the host record has no endpoint yet (TOFU first-contact
+    /// before `peer add --endpoint`). The host table carries the
+    /// dial address; the agent table only references it.
+    async fn host_endpoint(&self, host_id: Option<&AgentId>) -> Result<Option<Endpoint>> {
+        let Some(id) = host_id else {
+            return Ok(None);
+        };
+        let host = self.db.hosts().get(id).await?;
+        Ok(host.and_then(|h| h.endpoint))
     }
 
     /// Walk `via_agent` indirections from `first_via` until a
@@ -176,7 +189,7 @@ impl Router {
                 .get(&current)
                 .await?
                 .ok_or_else(|| RoutingError::RecipientNotFound(current.to_string()))?;
-            if let Some(ep) = hop.endpoint
+            if let Some(ep) = self.host_endpoint(hop.host_id.as_ref()).await?
                 && !ep.is_local()
             {
                 return Ok(RouteOutcome::Brokered {
@@ -232,18 +245,39 @@ mod tests {
     }
 
     async fn upsert(db: &Arc<dyn Database>, id: AgentId, endpoint: Option<Endpoint>) {
+        // Test helper: when an endpoint is supplied, register a host
+        // record under the agent's id (the test agent's pubkey
+        // doubles as the host key) and link via host_id. When None,
+        // the agent is directory-only.
         let pk = PubkeyBytes([0x42; 32]);
+        let host_id = if endpoint.is_some() {
+            let host_pk = PubkeyBytes([0x43; 32]);
+            let hid = hermod_crypto::agent_id_from_pubkey(&host_pk);
+            db.hosts()
+                .upsert(&hermod_storage::HostRecord {
+                    id: hid.clone(),
+                    pubkey: host_pk,
+                    endpoint: endpoint.clone(),
+                    tls_fingerprint: None,
+                    peer_asserted_alias: None,
+                    first_seen: Timestamp::now(),
+                    last_seen: None,
+                })
+                .await
+                .unwrap();
+            Some(hid)
+        } else {
+            None
+        };
         db.agents()
             .upsert(&AgentRecord {
-                id,
+                id: id.clone(),
                 pubkey: pk,
-                host_pubkey: None,
-                endpoint,
+                host_id: None,
                 via_agent: None,
                 local_alias: None,
                 peer_asserted_alias: None,
                 trust_level: TrustLevel::Tofu,
-                tls_fingerprint: None,
                 reputation: 0,
                 first_seen: Timestamp::now(),
                 last_seen: None,
@@ -251,6 +285,9 @@ mod tests {
             })
             .await
             .unwrap();
+        if let Some(hid) = host_id {
+            db.agents().set_routing_direct(&id, &hid).await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -445,15 +482,13 @@ mod tests {
         let pk = PubkeyBytes([0x42; 32]);
         db.agents()
             .upsert(&AgentRecord {
-                id,
+                id: id.clone(),
                 pubkey: pk,
-                host_pubkey: None,
-                endpoint: None,
-                via_agent: Some(via),
+                host_id: None,
+                via_agent: None,
                 local_alias: None,
                 peer_asserted_alias: None,
                 trust_level: TrustLevel::Tofu,
-                tls_fingerprint: None,
                 reputation: 0,
                 first_seen: Timestamp::now(),
                 last_seen: None,
@@ -461,5 +496,6 @@ mod tests {
             })
             .await
             .unwrap();
+        db.agents().set_routing_brokered(&id, &via).await.unwrap();
     }
 }

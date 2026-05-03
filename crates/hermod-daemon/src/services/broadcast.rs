@@ -188,10 +188,13 @@ async fn dispatch_one(
     body: MessageBody,
 ) -> bool {
     let recipient = match db.agents().get(&member).await {
-        Ok(Some(rec)) => match rec.endpoint {
-            Some(ep) if !ep.is_local() => AgentAddress::with_endpoint(rec.id, ep),
-            _ => AgentAddress::local(rec.id),
-        },
+        Ok(Some(rec)) => {
+            let endpoint = crate::services::resolve_host_endpoint(db, &rec).await;
+            match endpoint {
+                Some(ep) if !ep.is_local() => AgentAddress::with_endpoint(rec.id, ep),
+                _ => AgentAddress::local(rec.id),
+            }
+        }
         Ok(None) => {
             warn!(member = %member, "skipping fanout: agent not in directory");
             return false;
