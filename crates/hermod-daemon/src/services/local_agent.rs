@@ -409,6 +409,7 @@ fn summary_for(
     LocalAgentSummary {
         agent_id: agent.agent_id.clone(),
         alias: agent.local_alias.clone(),
+        pubkey_hex: hex::encode(agent.keypair.to_pubkey_bytes().as_slice()),
         bearer_file: bearer_token_path(home, &agent.agent_id)
             .display()
             .to_string(),

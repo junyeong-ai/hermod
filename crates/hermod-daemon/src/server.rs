@@ -133,14 +133,6 @@ pub async fn serve(
     let rate_limit = RateLimiter::new(db.clone(), config.policy.rate_limit_per_sender);
     let started = Instant::now();
 
-    // Local Unix-socket IPC binds the lone hosted agent as the
-    // connection's caller when there's exactly one (single-tenant
-    // convenience for `hermod` operator commands). With N>1 the
-    // local socket leaves caller_agent unset and operators reach
-    // per-agent methods over remote IPC + bearer instead.
-    let local_socket_caller: Option<hermod_core::AgentId> =
-        registry.solo().map(|a| a.agent_id.clone());
-
     // Federation transport — currently a single `WssNoiseTransport`.
     // Hold it as `Arc<dyn Transport>` so the daemon never references a
     // concrete backend; future `GrpcMtlsTransport` / `QuicTransport`
@@ -734,10 +726,9 @@ pub async fn serve(
                 match accept {
                     Ok(stream) => {
                         let dispatcher = dispatcher.clone();
-                        let local_caller = local_socket_caller.clone();
                         let registry = registry.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_connection(stream, dispatcher, local_caller, registry).await {
+                            if let Err(e) = handle_connection(stream, dispatcher, registry).await {
                                 error!(error = %e, "connection terminated with error");
                             }
                         });
@@ -809,23 +800,35 @@ async fn shutdown_sequence(
 async fn handle_connection(
     stream: hermod_transport::UnixIpcStream,
     dispatcher: Dispatcher,
-    local_caller: Option<hermod_core::AgentId>,
     registry: hermod_daemon::local_agent::LocalAgentRegistry,
 ) -> Result<()> {
     // Unix-socket IPC inherits filesystem-permission auth — anyone
     // who can open the socket is already running as the daemon's
     // owning user, so there's no per-connection bearer challenge.
-    // When the daemon hosts exactly one local agent we bind it as
-    // the connection's `CALLER_AGENT` (single-tenant convenience).
-    // For N>1 hosted agents the caller is established by an explicit
-    // `auth.bind_caller` request from the client (resolves a bearer
-    // to the agent_id it was issued for); without that request,
-    // per-agent methods on a multi-tenant daemon error out.
+    //
+    // Caller binding for the connection comes from one of three sources,
+    // checked in order at accept time:
+    //
+    //   1. `registry.solo()` — when the daemon hosts exactly ONE local
+    //      agent the caller is bound automatically (single-tenant
+    //      convenience for `hermod` operator commands). Read live per
+    //      connection, NOT captured at startup, so `local.add` /
+    //      `local.remove` mid-process correctly flips this on/off.
+    //   2. `auth.bind_caller` — explicit per-connection bearer
+    //      resolution. Required on multi-tenant daemons (N>1 hosted
+    //      agents) to disambiguate which agent the client speaks for;
+    //      also valid on single-tenant daemons (overrides #1). May be
+    //      called multiple times in one connection to switch identity.
+    //   3. Otherwise the connection has no caller_agent — operator-
+    //      scoped IPC methods (status/list-style) still work; per-agent
+    //      methods (message.send, inbox.list, …) error out with
+    //      InvalidParam.
     use hermod_protocol::ipc::Response;
     use hermod_protocol::ipc::methods::{AuthBindCallerResult, method};
 
     let mut server = IpcServer::new(stream);
-    let mut bound_caller: Option<hermod_core::AgentId> = local_caller;
+    let mut bound_caller: Option<hermod_core::AgentId> =
+        registry.solo().map(|a| a.agent_id.clone());
     while let Some(req) = server.next_request().await? {
         if req.method == method::AUTH_BIND_CALLER {
             let resp = match parse_bind_caller(&req.params, &registry) {
@@ -1115,31 +1118,20 @@ mod auth_bind_caller_tests {
         let registry = local_agent::load_registry(home).unwrap();
 
         // Happy path — bootstrap bearer resolves to its agent_id.
-        let bootstrap_token = std::fs::read_to_string(local_agent::bearer_token_path(
-            home,
-            &bootstrap.agent_id,
-        ))
-        .unwrap();
+        let bootstrap_token =
+            std::fs::read_to_string(local_agent::bearer_token_path(home, &bootstrap.agent_id))
+                .unwrap();
         let bootstrap_token = bootstrap_token.trim().to_string();
-        let resolved = parse_bind_caller(
-            &Some(json!({ "bearer": bootstrap_token })),
-            &registry,
-        )
-        .expect("bootstrap bearer must resolve");
+        let resolved = parse_bind_caller(&Some(json!({ "bearer": bootstrap_token })), &registry)
+            .expect("bootstrap bearer must resolve");
         assert_eq!(resolved, bootstrap.agent_id);
 
         // Second agent's bearer resolves independently.
-        let extra_token = std::fs::read_to_string(local_agent::bearer_token_path(
-            home,
-            &extra.agent_id,
-        ))
-        .unwrap();
+        let extra_token =
+            std::fs::read_to_string(local_agent::bearer_token_path(home, &extra.agent_id)).unwrap();
         let extra_token = extra_token.trim().to_string();
-        let resolved = parse_bind_caller(
-            &Some(json!({ "bearer": extra_token })),
-            &registry,
-        )
-        .expect("extra agent's bearer must resolve");
+        let resolved = parse_bind_caller(&Some(json!({ "bearer": extra_token })), &registry)
+            .expect("extra agent's bearer must resolve");
         assert_eq!(resolved, extra.agent_id);
 
         // Unknown bearer → Unauthorized.

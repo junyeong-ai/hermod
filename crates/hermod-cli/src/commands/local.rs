@@ -78,8 +78,8 @@ pub async fn list(home: &Path) -> Result<()> {
         return Ok(());
     }
     println!(
-        "{:<26}  {:<20}  {:<10}  secret",
-        "agent_id", "alias", "bearer"
+        "{:<26}  {:<20}  {:<64}  {:<10}  secret",
+        "agent_id", "alias", "pubkey_hex", "bearer"
     );
     for a in &agents {
         let alias = a
@@ -87,10 +87,12 @@ pub async fn list(home: &Path) -> Result<()> {
             .as_ref()
             .map(|s| s.as_str().to_string())
             .unwrap_or_default();
+        let pubkey_hex = hex::encode(a.keypair.to_pubkey_bytes().as_slice());
         println!(
-            "{:<26}  {:<20}  {:<10}  {}",
+            "{:<26}  {:<20}  {:<64}  {:<10}  {}",
             a.agent_id.as_str(),
             alias,
+            pubkey_hex,
             mask(a.bearer_token.expose_secret()),
             local_agent::secret_path(home, &a.agent_id).display(),
         );
@@ -108,6 +110,14 @@ pub async fn show(args: ShowArgs, home: &Path) -> Result<()> {
             .as_ref()
             .map(|a| a.as_str())
             .unwrap_or("(unset)")
+    );
+    // Pubkey hex — operators copy this into a peer's
+    // `peer add --agent-pubkey-hex …`. Without it on the show
+    // surface, multi-tenant peer-add would force the operator to
+    // open the secret file and re-derive, exposing the seed.
+    println!(
+        "pubkey_hex:      {}",
+        hex::encode(agent.keypair.to_pubkey_bytes().as_slice())
     );
     println!(
         "ed25519_secret:  {}",
@@ -143,6 +153,7 @@ pub async fn add(args: AddArgs, target: &ClientTarget) -> Result<()> {
             .map(|a| a.as_str())
             .unwrap_or("(unset)"),
     );
+    println!("  pubkey_hex:   {}", res.agent.pubkey_hex);
     println!("  bearer_file:  {}", res.agent.bearer_file);
     println!("  secret_file:  {}", res.agent.secret_file);
     println!("  bearer_token: {}", res.bearer_token);

@@ -638,6 +638,12 @@ pub struct LocalAgentSummary {
     pub agent_id: AgentId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alias: Option<AgentAlias>,
+    /// 64-char hex-encoded ed25519 agent pubkey. Operators copy this
+    /// to a peer's `peer add --agent-pubkey-hex …` invocation. Without
+    /// this on the summary, registering a multi-tenant peer would
+    /// require reading the on-disk seed and re-deriving — exposing
+    /// the secret to a manual derive flow.
+    pub pubkey_hex: String,
     /// Path to the bearer file on disk. Operators piping into MCP
     /// `.mcp.json` (`HERMOD_BEARER_FILE`) reference this directly.
     pub bearer_file: String,

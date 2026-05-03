@@ -92,6 +92,56 @@ tests):
 Code injects when the MCP server connects. The string is verbatim
 inside the test snapshot — do not edit without updating both.
 
+### Notification delivery — interactive vs `--print`
+
+`hermod mcp`'s `notifications/claude/channel` push frames (DM /
+broadcast / confirmation / permission events) reach the AI's
+conversation context only in **interactive** Claude Code sessions
+(stdio loop stays open between turns). With `claude --print` (single-
+shot mode) the prompt-response cycle exits before the next turn is
+ever assembled, so push frames stamped after the AI's reply are
+buffered but never surfaced. The AI can still pull them via the
+`mcp__hermod__inbox_list` tool (or `channel_history` for broadcasts).
+
+This is a `--print` lifecycle constraint, not a wiring bug — the
+wire emit is pinned by `crates/hermod-cli/tests/channels.rs`. When
+operators report "the message arrived but Claude didn't see it",
+ask them to use the interactive shell.
+
+## Multi-tenant local IPC — caller binding
+
+Local Unix socket binds the caller agent through one of three
+sources (resolved per connection inside `server::handle_connection`):
+
+1. `LocalAgentRegistry::solo()` — single-tenant convenience: when
+   the daemon hosts exactly ONE local agent, that agent is the
+   bound caller without any further auth. Read **live per
+   connection** so `local.add` / `local.remove` correctly flips
+   this on/off. Do not capture this at startup.
+2. `auth.bind_caller { bearer }` — explicit per-connection bearer
+   resolution (`LocalAgentRegistry::resolve_bearer`). Required on
+   multi-tenant daemons; valid on single-tenant ones too. The CLI
+   issues this automatically in `DaemonClient::connect` when
+   `HERMOD_BEARER_FILE` / `HERMOD_BEARER_TOKEN` / `--bearer-file` /
+   `--bearer-command` is set. Subsequent `auth.bind_caller` calls
+   on the same connection swap the bound caller — useful for
+   long-lived shells switching tenants.
+3. Otherwise — no caller bound. Operator-scoped methods
+   (`status.get`, `local.list`, `peer.list`, …) still work; per-
+   agent methods (`message.send`, `inbox.list`, …) error with
+   `InvalidParam` "no caller_agent in context".
+
+Bearer rotation behavior **differs by transport** by design:
+- **Remote IPC** uses `resolve_and_register_bearer` so a
+  concurrent `local.rotate` force-closes any session pinned to
+  the rotated bearer. Bearer is the only credential, so
+  invalidation cuts the session.
+- **Local IPC** binds the caller once at `auth.bind_caller` time
+  and trusts the connection until disconnect. Rotation does
+  NOT terminate live local connections — local socket already
+  trusts filesystem permissions, so the bearer rotation is
+  policy maintenance, not a credential revocation.
+
 ## Tool naming
 
 MCP tool names mirror IPC method names with `.` → `_`
