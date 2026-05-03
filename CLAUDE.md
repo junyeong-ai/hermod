@@ -16,17 +16,24 @@ when the task touches them.
 ## Crate layer order (strict — never violate)
 
 ```
-hermod-core   →  hermod-crypto  →  hermod-storage  →  hermod-transport
-                                                      ↓
-                hermod-protocol ←─────────┐    hermod-routing
-                                          │           ↓
-                                  hermod-discovery
-                                          ↓
-                              hermod-daemon  +  hermod-cli
+hermod-core
+  ↓
+hermod-crypto
+  ├─→ hermod-storage
+  ├─→ hermod-transport
+  ├─→ hermod-discovery
+  └─→ hermod-protocol     (also depends on transport)
+        ↓
+        hermod-routing    (also depends on storage + transport)
+          ↓
+          hermod-daemon   (depends on every crate above)
+            ↓
+            hermod-cli    (depends on every crate above except discovery)
 ```
 
-A crate may only depend on crates above it in the chain. The boundary
-is enforced socially (no cargo lint pins it); flag any inversion in
+A crate may only depend on crates above it in the chain (verify with
+`grep '^hermod-' crates/<crate>/Cargo.toml`). The boundary is
+enforced socially (no cargo lint pins it); flag any inversion in
 review.
 
 ---

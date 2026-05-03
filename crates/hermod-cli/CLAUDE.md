@@ -19,8 +19,10 @@ bearer/              BearerProvider trait + 3 implementations
 main.rs              clap CLI dispatch
 commands/            one file per `hermod <subcommand>` (peer, capability, brief, bearer, …)
 mcp/                 MCP server (hand-rolled JSON-RPC over stdio)
-  initialize.rs      capabilities + INSTRUCTIONS prompt (pinned by tests)
+  mod.rs             stdio JSON-RPC dispatch + initialize / tools/list / tools/call routing
+  initialize.rs      capabilities + INSTRUCTIONS_PRELUDE system prompt (pinned by tests)
   notification.rs    `notifications/claude/channel` + `…/permission` frame builder
+  notifier.rs        cross-platform OS-notification dispatcher (osascript / notify-send / PowerShell)
   permission.rs      Channels permission-relay bridge to the daemon
   session.rs         attach / heartbeat / detach + emitters
   channel.rs         cursor-based polling source (DM, file, confirmation, permission)
@@ -88,9 +90,9 @@ tests):
 - `experimental.claude/channel`
 - `experimental.claude/channel/permission`
 
-`initialize.rs::INSTRUCTIONS` is the system-prompt fragment Claude
-Code injects when the MCP server connects. The string is verbatim
-inside the test snapshot — do not edit without updating both.
+`initialize.rs::INSTRUCTIONS_PRELUDE` is the system-prompt fragment
+Claude Code injects when the MCP server connects. The string is
+verbatim inside the test snapshot — do not edit without updating both.
 
 ### Notification delivery — interactive vs `--print`
 

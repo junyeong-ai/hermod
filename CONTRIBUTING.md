@@ -2,13 +2,13 @@
 
 ## Quick orientation
 
-Hermod is a Rust workspace with eight crates:
+Hermod is a Rust workspace. Each crate's role:
 
 | Crate | Role |
 | ----- | ---- |
 | `hermod-core` | Identity types (`AgentId`, `AgentAlias`), envelope schema, time, errors. The vocabulary every other crate speaks. |
 | `hermod-crypto` | ed25519 keypair, Noise XX wrappers, blake3 helpers, capability-token signing. |
-| `hermod-storage` | SQLite repositories (one repo per logical entity). Migrations embedded via `sqlx::migrate!`. |
+| `hermod-storage` | SQLite + PostgreSQL repositories (one repo per logical entity). Migrations embedded via `sqlx::migrate!`. |
 | `hermod-protocol` | Wire-level codecs (CBOR envelopes, JSON-RPC IPC) and the canonical IPC method surface (`crates/hermod-protocol/src/ipc/methods.rs`). |
 | `hermod-routing` | Federation peer connections, outbox delivery, capability access checks, rate limiting, confirmation matrix. |
 | `hermod-discovery` | Static + mDNS peer discovery. |
@@ -20,9 +20,9 @@ Hermod is a Rust workspace with eight crates:
 
 ### A new IPC method
 
-1. **Wire constant**: append to `crates/hermod-protocol/src/ipc/methods.rs::method` (`<namespace>.<verb>` snake_case).
+1. **Wire constant**: append to `crates/hermod-protocol/src/ipc/methods.rs::method` (`<namespace>.<verb>` snake_case). `scripts/check_naming.sh` verifies the const-name shape and dispatcher coverage.
 2. **Params + Result types**: add `<Namespace><Verb>Params` and `<Namespace><Verb>Result` next to the constant. Use `#[serde(default, skip_serializing_if = "Option::is_none")]` for optional fields.
-3. **Service handler**: add a method to the appropriate `crates/hermod-daemon/src/services/*.rs`. State-changing methods MUST `db.audit().append(...)`.
+3. **Service handler**: add a method to the appropriate `crates/hermod-daemon/src/services/*.rs`. State-changing methods emit audit rows via `audit_or_warn(&*self.audit_sink, AuditEntry { … }).await` — direct `AuditRepository::append` is forbidden by `clippy.toml`. See `.claude/rules/audit-emission.md` for the full discipline.
 4. **Dispatcher**: route in `crates/hermod-daemon/src/dispatcher.rs::dispatch`.
 5. **CLI client wrapper**: add to `crates/hermod-cli/src/client.rs`.
 6. **CLI command**: add to `crates/hermod-cli/src/commands/<area>.rs` and wire into `crates/hermod-cli/src/main.rs`.
@@ -33,8 +33,9 @@ Hermod is a Rust workspace with eight crates:
 1. Add the variant to `crates/hermod-core/src/envelope.rs::MessageBody` with a `serde(tag = "kind")`-consistent name.
 2. Update `MessageBody::kind()` and `MessageKind`.
 3. Update `crates/hermod-routing/src/confirmation.rs::classify` (sensitivity) and `summarize`.
-4. Update `crates/hermod-daemon/src/inbound.rs::apply_envelope` (handler arm) and `validate_inbound_body_size` (size cap).
-5. Update `crates/hermod-routing/src/lib.rs::scope` if a new capability scope is needed.
+4. Add a per-kind acceptor file under `crates/hermod-daemon/src/inbound/<kind>.rs` (the dispatch entry is `InboundProcessor::accept_envelope` in `inbound/mod.rs`); register the size cap in `inbound/scope.rs::validate_inbound_body_size`.
+5. Add a `HeldIntent` variant in `crates/hermod-storage/src/repositories/confirmations.rs` and the `intent_for` arm in `crates/hermod-daemon/src/inbound/scope.rs`.
+6. Update `crates/hermod-routing/src/lib.rs::scope` if a new capability scope is needed.
 
 ### A new audit action
 

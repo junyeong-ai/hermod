@@ -6,21 +6,25 @@ service layer, outbox worker, janitor, and observability endpoint.
 ## Module layout
 
 ```
-bootstrap/         construction-phase helpers (audit_sink, …)
-config.rs          [identity|daemon|storage|blob|federation|policy|audit|broker]
-dispatcher.rs      RPC method → service-call routing
-federation.rs      WSS+Noise inbound accept loop (Semaphore, per-IP rate limit)
-home_layout.rs     single source of truth for $HERMOD_HOME mode policy: spec(), set_secure_umask(), prepare_dirs() (init), ensure_dirs() (boot), enforce(), audit() (doctor)
-identity.rs        on-disk seed/cert/bearer helpers (load, save, ensure_tls, ensure_bearer_token)
-inbound/           per-MessageKind acceptors (one impl block per file)
-ipc_remote.rs      WSS+Bearer remote-IPC server
-janitor.rs         periodic sweep (briefs, confirms, sessions, audit archive)
-main.rs            entry: load identity → ensure TLS → connect storage → server::serve
-observability.rs   /healthz (liveness) + /readyz (readiness) + /metrics (Prometheus, hand-rolled HTTP/1.1)
-outbox.rs          retry queue with claim_token + claimed_at backoff
-paths.rs           HOME / config / blob root resolution
-server.rs          serve() — orchestrates audit sink → transport → services → workers
-services/          one *Service per IPC namespace (held by Dispatcher)
+bootstrap/          construction-phase helpers (audit_sink, …)
+audit_context.rs    task-local CALLER_AGENT + client_ip overlays for audit_or_warn
+client_ip.rs        XFF / proxy header resolution (trusted_proxies-gated)
+config.rs           [identity|daemon|storage|blob|federation|policy|audit|broker]
+dispatcher.rs       RPC method → service-call routing
+federation.rs       WSS+Noise inbound accept loop (Semaphore, per-IP rate limit)
+fs_atomic.rs        atomic file write helpers (rename-into-place, fsync)
+home_layout.rs      single source of truth for $HERMOD_HOME mode policy: spec(), set_secure_umask(), prepare_dirs() (init), ensure_dirs() (boot), enforce(), audit() (doctor)
+host_identity.rs    daemon's on-disk host material: seed, TLS cert, bearer (load, save, ensure_tls)
+inbound/            per-MessageKind acceptors (one impl block per file under InboundProcessor)
+ipc_remote.rs       WSS+Bearer remote-IPC server
+janitor.rs          periodic sweep (briefs, confirms, sessions, audit archive)
+local_agent.rs      per-tenant agent provisioning + LocalAgentRegistry (live-mutable)
+main.rs             entry: load identity → ensure TLS → connect storage → server::serve
+observability.rs    /healthz (liveness) + /readyz (readiness) + /metrics (Prometheus, hand-rolled HTTP/1.1)
+outbox.rs           retry queue with claim_token + claimed_at backoff
+paths.rs            HOME / config / blob root resolution
+server.rs           serve() — orchestrates audit sink → transport → services → workers; handle_connection per Unix-socket accept
+services/           one *Service per IPC namespace (held by Dispatcher)
 services/permission_relay.rs  production trait impls of PromptForwarder + RelayResponder
 ```
 

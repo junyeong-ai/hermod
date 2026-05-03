@@ -136,10 +136,9 @@ the audit-sink files, so it loads automatically when relevant.
 ## Migrations
 
 Up-only, baked at compile time (`sqlx::migrate!("./migrations")`).
-Schema version 1 currently. Pre-v1 clean-slate: when a column changes,
-edit the migration file in place — the daemon's
-`StorageError::SchemaMismatch` handler instructs operators to archive
-the DB and re-init.
+Pre-v1 clean-slate: when a column changes, edit the migration file in
+place — the daemon's `StorageError::SchemaMismatch` handler
+instructs operators to archive the DB and re-init.
 
 `migrations/` (sqlite) and `migrations-postgres/` (postgres) must stay
 schema-equivalent. Dialect substitutions only:

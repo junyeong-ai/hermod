@@ -217,11 +217,12 @@ fuzz/                 cargo-fuzz harness (workspace-excluded)
   Claude Code, broker mode, audit federation, TLS rotate, backup &
   restore.
 - [`docs/threat-model.md`](./docs/threat-model.md) — security spec
-  (trust boundaries, threats T1–T22, invariants).
+  (trust boundaries, enumerated threats with mitigations,
+  invariants).
 - [`docs/audit_actions.md`](./docs/audit_actions.md) — audit-row
   catalogue (every action the daemon emits, with details schema).
 - [`docs/confirmation.md`](./docs/confirmation.md) — inbound trust
-  matrix (4 trust levels × 3 sensitivity tiers).
+  matrix (peer trust level × action sensitivity tier).
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md) — contributor workflow.
 - [`fuzz/README.md`](./fuzz/README.md) — running fuzz campaigns
   against the wire / envelope / capability parsers.
