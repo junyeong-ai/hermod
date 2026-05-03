@@ -230,7 +230,7 @@ enum MessageCmd {
     /// Send a direct text message.
     Send(commands::message::SendArgs),
     /// Send a file (inline payload up to `[policy] max_file_payload_bytes`,
-    /// default 1 MiB).
+    /// default 60 KiB — bounded by the Noise transport frame).
     #[command(name = "send-file")]
     SendFile(commands::message::SendFileArgs),
     /// Mark messages as read.

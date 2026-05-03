@@ -194,9 +194,10 @@ pub struct PolicyConfig {
     /// Cap on `MessageBody::File` payload bytes accepted from peers and
     /// emitted by `MessageService::send_file`. Cannot exceed the
     /// compile-time ceiling [`hermod_core::MAX_FILE_PAYLOAD_BYTES`]
-    /// (1 MiB) — the daemon clamps silently if a higher value is set.
-    /// Lower this in resource-constrained environments to bound the
-    /// memory cost of inbox blobs.
+    /// (60 KiB, bounded by the Noise transport frame size) — the
+    /// daemon clamps silently if a higher value is set. Lower this in
+    /// resource-constrained environments to bound the memory cost of
+    /// inbox blobs.
     #[serde(default = "defaults::max_file_payload_bytes")]
     pub max_file_payload_bytes: u32,
     /// Live `audit_log` rows older than this are archived into
@@ -331,7 +332,7 @@ impl Default for StorageConfig {
     }
 }
 
-/// Pluggable blob store. File-message payloads (1 MiB cap) and
+/// Pluggable blob store. File-message payloads (60 KiB cap) and
 /// gzip-compressed audit-archive day-buckets land here. Backends are
 /// selected by DSN scheme — see [`hermod_storage::open_blob_store`]
 /// for the catalogue. Auth/region for cloud backends come from the

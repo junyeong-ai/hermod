@@ -1,7 +1,7 @@
 //! Pluggable content storage for binary payloads.
 //!
 //! Hermod stores two kinds of opaque binary content outside the SQLite
-//! metadata tables: file-message payloads (1 MiB cap, surfaced to the
+//! metadata tables: file-message payloads (60 KiB cap, surfaced to the
 //! operator's MCP host) and audit-log archive files (gzip-compressed
 //! JSONL day-buckets). Both are append-only, content-addressed, and
 //! large enough that interleaving them with metadata rows would bloat

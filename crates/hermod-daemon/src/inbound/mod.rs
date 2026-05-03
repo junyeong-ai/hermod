@@ -67,7 +67,7 @@ pub struct InboundProcessor {
     /// Inbound `MessageBody::File` payload cap. Operators tune this to
     /// trade off inbox RAM/disk vs. legitimate AI-agent file shares.
     /// Cannot exceed the compile-time ceiling
-    /// [`hermod_core::MAX_FILE_PAYLOAD_BYTES`] (1 MiB).
+    /// [`hermod_core::MAX_FILE_PAYLOAD_BYTES`] (60 KiB).
     max_file_payload_bytes: usize,
     /// Operator opt-in to act as an audit-federation aggregator. When
     /// `true`, inbound `AuditFederate` envelopes from authenticated

@@ -232,12 +232,20 @@ impl FromStr for NotificationStatus {
 
 /// Hard ceiling on a `MessageBody::File` payload, in bytes. The
 /// daemon's `[policy]` config can lower this further; nothing on the
-/// wire may exceed it. Set generously above the typical AI-agent file-
-/// share size (snippets, logs, small screenshots, structured reports)
-/// while keeping a single envelope's CBOR encode well under the
-/// `tokio-tungstenite` default WS frame cap so a malformed sender
-/// can't blow up the federation listener.
-pub const MAX_FILE_PAYLOAD_BYTES: usize = 1024 * 1024; // 1 MiB
+/// wire may exceed it.
+///
+/// Bounded by the federation transport: each envelope ships as ONE
+/// `WireFrame::Envelope` inside a single Noise transport message, and
+/// Noise itself caps every message at `MAX_NOISE_MESSAGE_LEN = 65_519`
+/// bytes (`hermod_protocol::handshake`). Subtracting the worst-case
+/// envelope-frame overhead (signature, agent ids, alias, mime, name,
+/// CBOR map keys + length prefixes ≈ 4 KiB headroom) leaves ~60 KiB
+/// usable for the file body.
+///
+/// Sized for the typical AI-agent file-share workload: snippets, logs,
+/// small screenshots, structured reports. Anything larger needs the
+/// blob-store reference path, not inline transport.
+pub const MAX_FILE_PAYLOAD_BYTES: usize = 60 * 1024; // 60 KiB
 
 /// Maximum capability tokens attached to a single envelope.
 ///

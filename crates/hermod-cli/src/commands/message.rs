@@ -37,7 +37,8 @@ pub struct SendFileArgs {
     #[arg(long)]
     pub to: String,
     /// Path to the file to send. Read into memory; cap is `[policy]
-    /// max_file_payload_bytes` (default 1 MiB).
+    /// max_file_payload_bytes` (default 60 KiB — bounded by the Noise
+    /// transport frame size).
     #[arg(long)]
     pub file: PathBuf,
     /// IANA media type. Inferred from file extension if omitted, with

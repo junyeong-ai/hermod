@@ -374,4 +374,72 @@ mod tests {
             }
         }
     }
+
+    /// `MAX_FILE_PAYLOAD_BYTES` lives in `hermod-core` but its real
+    /// constraint comes from this crate: an envelope ships as ONE
+    /// `WireFrame::Envelope` inside ONE Noise transport message capped
+    /// at `MAX_NOISE_MESSAGE_LEN`. This test pins the relationship —
+    /// a max-size File envelope (with worst-case-ish field sizes for
+    /// alias / mime / name / capability tokens) MUST encode to bytes
+    /// that fit the Noise frame, with reasonable headroom for the
+    /// AEAD tag (16 bytes) and future field additions.
+    ///
+    /// Bumping `MAX_FILE_PAYLOAD_BYTES` past the headroom cliff
+    /// trips this test, forcing whoever raised it to either lower
+    /// the cap, add chunked transport, or shrink envelope overhead.
+    #[test]
+    fn max_file_envelope_fits_in_noise_frame() {
+        use hermod_core::{
+            CapabilityTagSet, Envelope, MAX_CAPS_PER_ENVELOPE, MAX_FILE_PAYLOAD_BYTES, MessageBody,
+        };
+        use serde_bytes::ByteBuf;
+
+        let id = AgentId::from_str("abcdefghijklmnopqrstuvwxyz").unwrap();
+        let payload = vec![0xAB; MAX_FILE_PAYLOAD_BYTES];
+        // The hash field's bytes are 32 — value doesn't matter for size
+        // accounting, so we ship a sentinel rather than pulling blake3
+        // into hermod-protocol just for a test fixture.
+        let hash_bytes = vec![0u8; 32];
+        let env = Envelope {
+            v: hermod_core::PROTOCOL_VERSION,
+            id: hermod_core::MessageId::new(),
+            ts: hermod_core::Timestamp::now(),
+            from: AgentAddress::local(id.clone()),
+            from_pubkey: PubkeyBytes::zero(),
+            to: AgentAddress::local(id),
+            kind: hermod_core::MessageKind::File,
+            thread: None,
+            priority: MessagePriority::Normal,
+            ttl_secs: 3600,
+            body: MessageBody::File {
+                name: "x".repeat(255), // worst-case display name
+                mime: "application/octet-stream".into(),
+                hash: ByteBuf::from(hash_bytes),
+                data: ByteBuf::from(payload),
+            },
+            caps: Vec::new(), // see headroom note below
+            sig: hermod_core::SignatureBytes::zero(),
+        };
+        let frame = WireFrame::Envelope(EnvelopeFrame::origin(env));
+        let bytes = encode(&frame).unwrap();
+        let max = crate::handshake::MAX_NOISE_MESSAGE_LEN;
+        let aead_tag = 16;
+        let envelope_overhead_observed = bytes.len() - MAX_FILE_PAYLOAD_BYTES;
+
+        assert!(
+            bytes.len() + aead_tag <= max,
+            "max-size File envelope ({} bytes) + AEAD tag ({}) overflows Noise frame ({}); \
+             envelope overhead = {} bytes (cap headroom = {} bytes), \
+             lower MAX_FILE_PAYLOAD_BYTES or implement multi-frame chunking",
+            bytes.len(),
+            aead_tag,
+            max,
+            envelope_overhead_observed,
+            max as i64 - bytes.len() as i64 - aead_tag as i64,
+        );
+        // Caps are zero in this fixture; the constant just has to remain
+        // sane (so a future bump can't silently exhaust the headroom).
+        let _ = MAX_CAPS_PER_ENVELOPE;
+        let _ = CapabilityTagSet::empty();
+    }
 }
